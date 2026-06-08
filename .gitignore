@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Virtual environments
+.venv/
+venv/
+server/venv/
+
+# Local configuration
+.env
+.env.*
+!.env.example
+
+# Runtime data
+server/data/*.db
+server/data/*.db-*
+server/data/*.sqlite
+server/data/*.sqlite-*
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.code-workspace
+
+# Local assistant settings
+.claude/settings.local.json
