@@ -23,6 +23,7 @@ server/data/*.db-*
 server/data/*.sqlite
 server/data/*.sqlite-*
 server/data/*.bak
+legacy/python/server/data/
 deepseek_data-*.zip
 *.log
 

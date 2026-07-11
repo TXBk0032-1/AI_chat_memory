@@ -22,7 +22,15 @@
     // ===== 配置 =====
     const DEFAULT_BRIDGE_URL = 'http://localhost:19820/api/v1';
     const BRIDGE_URL_KEY = 'bridge_url';
+    const BRIDGE_SECRET_KEY = 'bridge_secret';
     const TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
+
+    function bridgeHeaders(extra = {}) {
+        const headers = { 'X-AI-Chat-Memory-Client': 'userscript-v1', ...extra };
+        const secret = String(GM_getValue(BRIDGE_SECRET_KEY, '') || '').trim();
+        if (secret) headers['X-AI-Chat-Memory-Secret'] = secret;
+        return headers;
+    }
 
     function normalizeBridgeUrl(value) {
         const url = new URL(String(value || '').trim());
@@ -408,6 +416,14 @@
         GM_deleteValue(BRIDGE_URL_KEY);
         alert(`后端地址已重置为 ${DEFAULT_BRIDGE_URL}，刷新页面后生效。`);
     });
+    GM_registerMenuCommand('设置本地服务密钥', () => {
+        const value = prompt('请输入桌面端生成的随机密钥；留空表示清除', GM_getValue(BRIDGE_SECRET_KEY, ''));
+        if (value === null) return;
+        const secret = value.trim();
+        if (secret) GM_setValue(BRIDGE_SECRET_KEY, secret);
+        else GM_deleteValue(BRIDGE_SECRET_KEY);
+        alert(secret ? '本地服务密钥已保存。' : '本地服务密钥已清除。');
+    });
     if (adapter.tokenKey) {
         GM_registerMenuCommand('清除已保存令牌', () => {
             clearStoredToken(adapter.tokenKey);
@@ -417,7 +433,7 @@
 
     async function checkServer() {
         try {
-            const res = await fetch(`${BRIDGE_URL}/health`);
+            const res = await fetch(`${BRIDGE_URL}/health`, { headers: bridgeHeaders() });
             return res.ok;
         } catch { return false; }
     }
@@ -488,7 +504,7 @@
         ui.setProgress(4, 4, '导入官方 ZIP...');
         const importRes = await fetch(`${BRIDGE_URL}/sessions/import/deepseek-export`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/zip' },
+            headers: bridgeHeaders({ 'Content-Type': 'application/zip' }),
             body: zipBlob
         });
         if (!importRes.ok) throw new Error(`官方 ZIP 导入失败 ${importRes.status}: ${await importRes.text()}`);
@@ -523,7 +539,7 @@
         ui.setProgress(1, 1, '推送到服务端...');
         const res = await fetch(`${BRIDGE_URL}/sessions/import`, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: bridgeHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ platform: PLATFORM, sessions: results })
         });
         if (!res.ok) throw new Error(`导入失败 ${res.status}: ${await res.text()}`);
@@ -550,7 +566,7 @@
                 ui.setStatus(`全量获取 ${sessions.length} 个会话`);
             } else {
                 ui.setStatus('查询同步状态...');
-                const statusRes = await fetch(`${BRIDGE_URL}/sessions/sync-status?platform=${PLATFORM}`);
+                const statusRes = await fetch(`${BRIDGE_URL}/sessions/sync-status?platform=${PLATFORM}`, { headers: bridgeHeaders() });
                 if (!statusRes.ok) throw new Error(`同步状态查询失败 ${statusRes.status}: ${await statusRes.text()}`);
                 const { last_updated_at } = await statusRes.json();
 
