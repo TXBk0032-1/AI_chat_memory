@@ -17,6 +17,7 @@ Two main components:
    - `api/health.py` — Health check
    - `core/database.py` — aiosqlite init, session/message insert helpers
    - `core/normalizer.py` — Platform-specific raw data → unified format; dispatcher `normalize_session()` routes by platform string
+   - `core/deepseek_export.py` — DeepSeek ZIP export parser; validates and loads conversations.json from exported archives
    - `models/__init__.py` — Pydantic models (Message, Session, ImportRequest, ImportResponse)
    - `static/index.html` — Single-file web UI with marked.js + KaTeX
 

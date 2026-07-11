@@ -1,10 +1,15 @@
 import aiosqlite
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import Any
+
 from config import DB_PATH, DATA_DIR
 
-async def init_db():
+async def init_db() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("PRAGMA foreign_keys = ON")
         await db.executescript("""
             CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,
@@ -30,23 +35,52 @@ async def init_db():
         """)
         await db.commit()
 
-async def get_db():
-    return await aiosqlite.connect(DB_PATH)
-
-async def insert_session(db, session: dict) -> bool:
+@asynccontextmanager
+async def get_db() -> AsyncIterator[aiosqlite.Connection]:
+    db = await aiosqlite.connect(DB_PATH)
     try:
-        await db.execute(
-            "INSERT OR REPLACE INTO sessions (id, platform, platform_session_id, title, created_at, updated_at, imported_at, raw_data) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (session['id'], session['platform'], session['platform_session_id'], session.get('title', ''),
-             session.get('created_at'), session.get('updated_at'), session.get('imported_at'),
-             json.dumps(session.get('raw_data'), ensure_ascii=False) if session.get('raw_data') else None)
-        )
-        return True
-    except Exception as e:
-        print(f"Insert session error: {e}")
-        return False
+        await db.execute("PRAGMA foreign_keys = ON")
+        yield db
+    finally:
+        await db.close()
 
-async def insert_messages(db, session_id: str, messages: list):
+async def insert_session(db: aiosqlite.Connection, session: dict[str, Any]) -> str:
+    raw_data = json.dumps(session.get('raw_data'), ensure_ascii=False) if session.get('raw_data') else None
+    cursor = await db.execute(
+        "SELECT id FROM sessions WHERE platform = ? AND platform_session_id = ?",
+        (session['platform'], session['platform_session_id'])
+    )
+    existing = await cursor.fetchone()
+
+    if existing:
+        session_id = existing[0]
+        await db.execute(
+            """
+            UPDATE sessions
+            SET title = ?, created_at = ?, updated_at = ?, imported_at = ?, raw_data = ?
+            WHERE id = ?
+            """,
+            (session.get('title', ''), session.get('created_at'), session.get('updated_at'),
+             session.get('imported_at'), raw_data, session_id)
+        )
+        return session_id
+
+    await db.execute(
+        """
+        INSERT INTO sessions
+        (id, platform, platform_session_id, title, created_at, updated_at, imported_at, raw_data)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (session['id'], session['platform'], session['platform_session_id'], session.get('title', ''),
+         session.get('created_at'), session.get('updated_at'), session.get('imported_at'), raw_data)
+    )
+    return session['id']
+
+async def insert_messages(
+    db: aiosqlite.Connection,
+    session_id: str,
+    messages: list[dict[str, Any]],
+) -> None:
     await db.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
     for i, m in enumerate(messages):
         await db.execute(

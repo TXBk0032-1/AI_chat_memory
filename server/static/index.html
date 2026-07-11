@@ -228,6 +228,8 @@
         }
 
         .btn-refresh:hover { background: rgba(45,212,168,0.12); border-color: rgba(45,212,168,0.4); }
+        .btn-import { border-color: rgba(74,108,244,0.24); color: #8ea4ff; background: rgba(74,108,244,0.06); }
+        .btn-import:hover { background: rgba(74,108,244,0.14); border-color: rgba(74,108,244,0.46); }
 
         /* === 主内容 === */
         main { flex: 1; padding: 24px 40px 60px; }
@@ -450,6 +452,34 @@
 
         .btn-close:hover { border-color: var(--cinnabar); color: var(--cinnabar); }
 
+        .modal-tabs {
+            display: none;
+            gap: 6px;
+            padding: 12px 32px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.04);
+            flex-shrink: 0;
+        }
+
+        .modal-tabs.active { display: flex; }
+
+        .modal-tab {
+            padding: 8px 14px;
+            border: 1px solid rgba(255,255,255,0.06);
+            border-bottom: none;
+            border-radius: 5px 5px 0 0;
+            background: var(--scroll);
+            color: var(--mist-dim);
+            font-family: var(--font-body);
+            font-size: 13px;
+            cursor: pointer;
+        }
+
+        .modal-tab.active {
+            color: #8ea4ff;
+            background: rgba(74,108,244,0.12);
+            border-color: rgba(74,108,244,0.28);
+        }
+
         /* === 消息列表 === */
         .messages {
             flex: 1;
@@ -466,6 +496,13 @@
             margin-bottom: 24px;
             opacity: 0;
             animation: msgIn 0.25s ease forwards;
+            border-radius: 6px;
+            transition: background 0.3s, box-shadow 0.3s;
+        }
+
+        .msg.highlight {
+            background: rgba(74,108,244,0.08);
+            box-shadow: 0 0 0 1px rgba(74,108,244,0.24);
         }
 
         @keyframes msgIn {
@@ -560,6 +597,40 @@
             border-radius: 0 4px 4px 0;
         }
 
+        .branch-overview {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            font-size: 13px;
+        }
+
+        .branch-node {
+            position: relative;
+            margin-left: calc(var(--depth, 0) * 22px);
+            padding: 10px 12px;
+            border: 1px solid rgba(255,255,255,0.06);
+            border-left: 2px solid rgba(74,108,244,0.34);
+            border-radius: 5px;
+            background: var(--scroll);
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .branch-node:hover {
+            background: var(--scroll-hover);
+            border-color: rgba(74,108,244,0.32);
+        }
+
+        .branch-node.branching { border-left-color: var(--gold); }
+        .branch-node .branch-head { display: flex; align-items: center; gap: 10px; margin-bottom: 5px; }
+        .branch-role { font-family: var(--font-mono); font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; }
+        .branch-role.user { color: var(--jade); }
+        .branch-role.assistant { color: var(--cinnabar-glow); }
+        .branch-time { font-family: var(--font-mono); font-size: 10px; color: var(--mist-dim); }
+        .branch-count { font-family: var(--font-mono); font-size: 10px; color: var(--gold); }
+        .branch-preview { color: #d0d0de; line-height: 1.55; word-break: break-word; }
+        .branch-empty { color: var(--mist-dim); padding: 40px; text-align: center; }
+
         /* === 加载动画 === */
         .loading {
             display: flex;
@@ -591,7 +662,7 @@
             .header-top { flex-direction: column; gap: 12px; }
             .toolbar { flex-wrap: wrap; }
             .search-box { max-width: 100%; }
-            .modal-header, .messages { padding-left: 16px; padding-right: 16px; }
+            .modal-header, .messages, .modal-tabs { padding-left: 16px; padding-right: 16px; }
             .session-card { grid-template-columns: 4px 1fr; }
             .session-side { display: none; }
         }
@@ -627,6 +698,8 @@
                     <div class="pill" data-platform="kimi">Kimi</div>
                 </div>
                 <button class="btn-refresh" onclick="doSearch()">搜索</button>
+                <button class="btn-refresh btn-import" id="deepseek-import-btn" onclick="document.getElementById('deepseek-zip-input').click()">导入ZIP</button>
+                <input type="file" id="deepseek-zip-input" accept=".zip,application/zip" style="display:none">
             </div>
         </header>
 
@@ -644,6 +717,10 @@
                 </div>
                 <button class="btn-close" onclick="closeModal()">×</button>
             </div>
+            <div class="modal-tabs" id="modal-tabs">
+                <button class="modal-tab active" data-view="timeline">时间线</button>
+                <button class="modal-tab" data-view="branches">分支总览</button>
+            </div>
             <div class="messages" id="modal-messages"></div>
         </div>
     </div>
@@ -654,6 +731,8 @@
         let currentPlatform = '';
         const sessionCache = {};
         let searchTimer = null;
+        let activeModalSession = null;
+        let modalView = 'timeline';
 
         // === 筛选器 ===
         document.getElementById('filters').addEventListener('click', e => {
@@ -759,6 +838,7 @@
 
         function renderModal(session) {
             const msgContainer = document.getElementById('modal-messages');
+            const tabs = document.getElementById('modal-tabs');
             document.getElementById('modal-title').textContent = session.title || '无标题';
             document.getElementById('modal-meta').innerHTML = `
                 <span>${session.platform}</span>
@@ -766,6 +846,24 @@
                 <span>${(session.messages || []).length} 条消息</span>
             `;
 
+            activeModalSession = session;
+            const messages = session.messages || [];
+            const hasBranchData = messages.some(m => m.metadata?.source === 'deepseek_export');
+            tabs.classList.toggle('active', hasBranchData);
+            if (!hasBranchData) modalView = 'timeline';
+            document.querySelectorAll('.modal-tab').forEach(btn => {
+                btn.classList.toggle('active', btn.dataset.view === modalView);
+            });
+
+            if (modalView === 'branches' && hasBranchData) {
+                renderBranchOverview(session);
+            } else {
+                renderTimeline(session);
+            }
+        }
+
+        function renderTimeline(session) {
+            const msgContainer = document.getElementById('modal-messages');
             const messages = session.messages || [];
             if (messages.length === 0) {
                 msgContainer.innerHTML = '<div class="empty-state"><div class="empty-glyph">空</div><div class="empty-text">此卷无内容</div></div>';
@@ -775,13 +873,14 @@
             msgContainer.innerHTML = messages.map((m, i) => {
                 const role = (m.role || '').toLowerCase();
                 const thinking = m.metadata?.thinking;
+                const nodeId = m.metadata?.node_id || '';
                 const thinkHtml = thinking ? `
                     <div class="thinking-block" onclick="this.classList.toggle('open')">
                         <div class="thinking-toggle">思考过程</div>
                         <div class="thinking-content">${renderContent(thinking)}</div>
                     </div>` : '';
                 return `
-                <div class="msg ${role}" style="animation-delay:${i * 30}ms">
+                <div class="msg ${role}" data-node-id="${escapeAttr(nodeId)}" data-msg-index="${i}" style="animation-delay:${i * 30}ms">
                     <div class="msg-header">
                         <span class="msg-role ${role}">${role}</span>
                         ${m.created_at ? `<span class="msg-time">${formatTime(m.created_at)}</span>` : ''}
@@ -793,10 +892,102 @@
             }).join('');
         }
 
+        function renderBranchOverview(session) {
+            const msgContainer = document.getElementById('modal-messages');
+            const messages = session.messages || [];
+            const byNode = new Map();
+            messages.forEach((m, i) => {
+                const nodeId = m.metadata?.node_id || `msg-${i}`;
+                byNode.set(nodeId, { message: m, index: i, nodeId, children: [] });
+            });
+
+            const roots = [];
+            byNode.forEach(node => {
+                const parentId = node.message.metadata?.parent_node_id;
+                if (parentId && byNode.has(parentId)) {
+                    byNode.get(parentId).children.push(node);
+                } else {
+                    roots.push(node);
+                }
+            });
+
+            byNode.forEach(node => {
+                node.children.sort((a, b) => String(a.message.created_at || '').localeCompare(String(b.message.created_at || '')));
+            });
+            roots.sort((a, b) => String(a.message.created_at || '').localeCompare(String(b.message.created_at || '')));
+
+            const html = [];
+            const walk = (node, depth = 0) => {
+                const m = node.message;
+                const role = (m.role || '').toLowerCase();
+                const childCount = node.children.length;
+                const preview = compactText(m.content || m.metadata?.thinking || '');
+                html.push(`
+                    <div class="branch-node ${childCount > 1 ? 'branching' : ''}" style="--depth:${Math.min(depth, 12)}" data-node-id="${escapeAttr(node.nodeId)}" onclick="focusTimelineNode(this.dataset.nodeId)">
+                        <div class="branch-head">
+                            <span class="branch-role ${role}">${role}</span>
+                            ${m.created_at ? `<span class="branch-time">${formatTime(m.created_at)}</span>` : ''}
+                            ${childCount > 1 ? `<span class="branch-count">${childCount} 分支</span>` : ''}
+                        </div>
+                        <div class="branch-preview">${escapeHtml(preview)}</div>
+                    </div>
+                `);
+                node.children.forEach(child => walk(child, depth + 1));
+            };
+            roots.forEach(root => walk(root, 0));
+            msgContainer.innerHTML = html.length
+                ? `<div class="branch-overview">${html.join('')}</div>`
+                : '<div class="branch-empty">没有可展示的分支数据</div>';
+        }
+
+        function focusTimelineNode(nodeId) {
+            modalView = 'timeline';
+            renderModal(activeModalSession);
+            requestAnimationFrame(() => {
+                const el = Array.from(document.querySelectorAll('.msg')).find(item => item.dataset.nodeId === nodeId);
+                if (!el) return;
+                el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                el.classList.add('highlight');
+                setTimeout(() => el.classList.remove('highlight'), 1800);
+            });
+        }
+
         function closeModal() {
             const modal = document.getElementById('modal');
             modal.classList.remove('visible');
             setTimeout(() => modal.classList.remove('active'), 300);
+        }
+
+        async function importDeepSeekZip(file) {
+            if (!file) return;
+            const btn = document.getElementById('deepseek-import-btn');
+            const oldText = btn.textContent;
+            btn.disabled = true;
+            btn.textContent = '导入中...';
+            try {
+                const res = await fetch(`${API}/sessions/import/deepseek-export`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/zip' },
+                    body: file
+                });
+                if (!res.ok) throw new Error(await res.text());
+                const data = await res.json();
+                btn.textContent = `导入 ${data.imported}`;
+                sessionCacheClear();
+                await loadSessions();
+                setTimeout(() => { btn.textContent = oldText; }, 2200);
+            } catch (e) {
+                btn.textContent = '导入失败';
+                alert('DeepSeek ZIP 导入失败: ' + e.message);
+                setTimeout(() => { btn.textContent = oldText; }, 2200);
+            } finally {
+                btn.disabled = false;
+                document.getElementById('deepseek-zip-input').value = '';
+            }
+        }
+
+        function sessionCacheClear() {
+            Object.keys(sessionCache).forEach(k => delete sessionCache[k]);
         }
 
         // === 删除 ===
@@ -814,7 +1005,15 @@
         }
 
         function escapeHtml(s) {
-            return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+            return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+        }
+
+        function escapeAttr(s) {
+            return escapeHtml(String(s || '')).replace(/'/g, '&#39;');
+        }
+
+        function compactText(text) {
+            return String(text || '').replace(/\s+/g, ' ').trim().slice(0, 180) || '空内容';
         }
 
         function renderContent(text) {
@@ -871,6 +1070,13 @@
         document.getElementById('search').addEventListener('keydown', e => { if (e.key === 'Enter') { clearTimeout(searchTimer); doSearch(); } });
         document.getElementById('date-from').addEventListener('change', doSearch);
         document.getElementById('date-to').addEventListener('change', doSearch);
+        document.getElementById('deepseek-zip-input').addEventListener('change', e => importDeepSeekZip(e.target.files?.[0]));
+        document.getElementById('modal-tabs').addEventListener('click', e => {
+            const tab = e.target.closest('.modal-tab');
+            if (!tab || !activeModalSession) return;
+            modalView = tab.dataset.view;
+            renderModal(activeModalSession);
+        });
         document.getElementById('modal').addEventListener('click', e => { if (e.target.id === 'modal') closeModal(); });
         document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
 

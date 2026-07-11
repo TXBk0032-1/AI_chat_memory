@@ -90,7 +90,6 @@ DeepSeek 支持基于 `updated_at` 的增量同步；豆包和 Kimi 当前使用
 ```
 ai-chat-memory/
 ├── README.md                                # 项目说明
-├── AGENTS.md                                # Codex 工作说明
 ├── CLAUDE.md                                # Claude Code 工作说明
 ├── docs/PROJECT.md                          # 架构和维护梳理
 ├── start-server.ps1                         # Windows 快速启动脚本
@@ -103,7 +102,8 @@ ai-chat-memory/
 │   │   └── health.py                          # 健康检查
 │   ├── core/
 │   │   ├── database.py                        # SQLite (aiosqlite)
-│   │   └── normalizer.py                      # 平台数据标准化
+│   │   ├── normalizer.py                      # 平台数据标准化
+│   │   └── deepseek_export.py                 # DeepSeek ZIP 导出解析器
 │   ├── models/__init__.py                     # Pydantic 模型
 │   ├── static/index.html                      # Web UI「藏经阁」
 │   └── data/chat_memory.db                    # SQLite 数据库（本地运行数据）

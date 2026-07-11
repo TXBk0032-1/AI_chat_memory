@@ -11,6 +11,7 @@
 // @run-at       document-start
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_deleteValue
 // @grant        GM_registerMenuCommand
 // @grant        unsafeWindow
 // ==/UserScript==
@@ -19,13 +20,62 @@
     'use strict';
 
     // ===== 配置 =====
-    const BRIDGE_URL = 'http://localhost:19820/api/v1';
+    const DEFAULT_BRIDGE_URL = 'http://localhost:19820/api/v1';
+    const BRIDGE_URL_KEY = 'bridge_url';
+    const TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
+
+    function normalizeBridgeUrl(value) {
+        const url = new URL(String(value || '').trim());
+        if (!['http:', 'https:'].includes(url.protocol)) {
+            throw new Error('后端地址仅支持 http:// 或 https://');
+        }
+        return url.toString().replace(/\/$/, '');
+    }
+
+    function getBridgeUrl() {
+        try {
+            return normalizeBridgeUrl(GM_getValue(BRIDGE_URL_KEY, DEFAULT_BRIDGE_URL));
+        } catch {
+            GM_deleteValue(BRIDGE_URL_KEY);
+            return DEFAULT_BRIDGE_URL;
+        }
+    }
+
+    const BRIDGE_URL = getBridgeUrl();
     const PLATFORM = location.hostname.includes('deepseek') ? 'deepseek'
                    : location.hostname.includes('doubao') ? 'doubao'
                    : location.hostname.includes('kimi') ? 'kimi' : null;
 
     if (!PLATFORM) return;
     console.log(`🧠 AI Chat Memory 已加载 [${PLATFORM}]`);
+
+    function tokenCapturedAtKey(tokenKey) {
+        return `${tokenKey}_captured_at`;
+    }
+
+    function saveToken(tokenKey, token, label) {
+        const value = String(token || '').trim();
+        if (!value || GM_getValue(tokenKey) === value) return;
+        GM_setValue(tokenKey, value);
+        GM_setValue(tokenCapturedAtKey(tokenKey), Date.now());
+        console.log(`✅ 已捕获${label}令牌:`, value.slice(0, 10) + '...');
+    }
+
+    function getStoredToken(tokenKey) {
+        const token = GM_getValue(tokenKey);
+        const capturedAt = Number(GM_getValue(tokenCapturedAtKey(tokenKey), 0));
+        if (!token) return null;
+        if (!capturedAt || Date.now() - capturedAt > TOKEN_TTL_MS) {
+            clearStoredToken(tokenKey);
+            return null;
+        }
+        return token;
+    }
+
+    function clearStoredToken(tokenKey) {
+        GM_deleteValue(tokenKey);
+        GM_deleteValue(tokenCapturedAtKey(tokenKey));
+    }
 
     // ===== 适配器基类 =====
     class BaseAdapter {
@@ -51,20 +101,19 @@
         }
 
         _captureToken() {
-            if (GM_getValue(this.tokenKey) || unsafeWindow.__DS_CAPTURED) return;
             console.log('🔄 令牌窃听器已启动，等待有效 Bearer 令牌...');
 
             const originalFetch = unsafeWindow.fetch;
+            const tokenKey = this.tokenKey;
             unsafeWindow.fetch = function(...args) {
                 const options = args[1] || {};
                 const headers = options.headers || {};
-                const auth = headers.Authorization || headers.authorization;
+                const auth = typeof headers.get === 'function'
+                    ? headers.get('authorization')
+                    : (headers.Authorization || headers.authorization);
                 const match = typeof auth === 'string' && auth.match(/^Bearer\s+(.+)$/);
                 if (match && match[1].trim() !== '') {
-                    console.log('✅ 已捕获令牌(fetch):', match[1].slice(0, 10) + '...');
-                    GM_setValue('ds_token', match[1]);
-                    unsafeWindow.__DS_CAPTURED = true;
-                    unsafeWindow.fetch = originalFetch;
+                    saveToken(tokenKey, match[1], 'DeepSeek');
                 }
                 return originalFetch.apply(this, args);
             };
@@ -80,9 +129,7 @@
                 if (this._authHeader) {
                     const match = this._authHeader.match(/^Bearer\s+(.+)$/);
                     if (match && match[1].trim() !== '') {
-                        console.log('✅ 已捕获令牌(XHR):', match[1].slice(0, 10) + '...');
-                        GM_setValue('ds_token', match[1]);
-                        unsafeWindow.__DS_CAPTURED = true;
+                        saveToken(tokenKey, match[1], 'DeepSeek');
                     }
                 }
                 return origSend.apply(this, args);
@@ -90,11 +137,11 @@
         }
 
         async getToken() {
-            return GM_getValue(this.tokenKey);
+            return getStoredToken(this.tokenKey);
         }
 
         _xhr(url, retry = 0) {
-            const token = GM_getValue(this.tokenKey);
+            const token = getStoredToken(this.tokenKey);
             return new Promise((resolve, reject) => {
                 const xhr = new unsafeWindow.XMLHttpRequest();
                 xhr.open('GET', url);
@@ -110,13 +157,45 @@
                         const wait = (retry + 1) * 15000;
                         console.warn(`⚠️ 429限流，${wait/1000}s 后重试 (${retry+1}/3)`);
                         setTimeout(() => this._xhr(url, retry + 1).then(resolve, reject), wait);
-                    } else {
+                        return;
+                    }
+
+                    if (xhr.status < 200 || xhr.status >= 300) {
+                        reject(new Error(`DeepSeek 请求失败 ${xhr.status}: ${this._formatError(xhr.responseText)}`));
+                        return;
+                    }
+
+                    try {
                         resolve(JSON.parse(xhr.responseText));
+                    } catch (e) {
+                        reject(new Error(`DeepSeek 响应解析失败: ${e.message}`));
                     }
                 };
                 xhr.onerror = () => reject(new Error(`XHR error: ${xhr.status}`));
                 xhr.send();
             });
+        }
+
+        _formatError(text) {
+            if (!text) return '无响应内容';
+            try {
+                const json = JSON.parse(text);
+                return json.message || json.msg || json.error || json.detail || JSON.stringify(json).slice(0, 160);
+            } catch {
+                return String(text).slice(0, 160);
+            }
+        }
+
+        _extractSessionsPage(json, label = '会话列表') {
+            const bizData = json?.data?.biz_data;
+            if (!bizData || !Array.isArray(bizData.chat_sessions)) {
+                const detail = json?.message || json?.msg || json?.error || json?.detail || json?.code;
+                throw new Error(`${label}响应异常${detail ? `: ${detail}` : ''}`);
+            }
+            return {
+                sessions: bizData.chat_sessions,
+                hasMore: Boolean(bizData.has_more)
+            };
         }
 
         async fetchAllSessions() {
@@ -125,8 +204,7 @@
             const allSessions = [];
 
             let json = await this._xhr('https://chat.deepseek.com/api/v0/chat_session/fetch_page?lte_cursor.pinned=false');
-            let sessions = json?.data?.biz_data?.chat_sessions || [];
-            let hasMore = json?.data?.biz_data?.has_more || false;
+            let { sessions, hasMore } = this._extractSessionsPage(json);
             allSessions.push(...sessions);
             console.log(`📋 首页 ${sessions.length} 条, hasMore=${hasMore}`);
 
@@ -134,8 +212,7 @@
                 do {
                     const cursor = sessions[sessions.length - 1].updated_at;
                     json = await this._xhr(`https://chat.deepseek.com/api/v0/chat_session/fetch_page?lte_cursor.pinned=false&lte_cursor.updated_at=${cursor}`);
-                    sessions = json?.data?.biz_data?.chat_sessions || [];
-                    hasMore = json?.data?.biz_data?.has_more || false;
+                    ({ sessions, hasMore } = this._extractSessionsPage(json));
                     allSessions.push(...sessions);
                     console.log(`📋 本页 ${sessions.length} 条, 累计 ${allSessions.length}, hasMore=${hasMore}`);
                 } while (hasMore);
@@ -147,6 +224,45 @@
 
         async fetchConversation(id) {
             return this._xhr(`https://chat.deepseek.com/api/v0/chat/history_messages?chat_session_id=${id}`);
+        }
+
+        async createOfficialExportTask() {
+            return this._xhr('https://chat.deepseek.com/api/v0/export_all');
+        }
+
+        async fetchOfficialExportStatus() {
+            return this._xhr('https://chat.deepseek.com/api/v0/download_export_history');
+        }
+
+        extractOfficialZipUrl(json) {
+            const seen = new Set();
+            const walk = value => {
+                if (!value || seen.has(value)) return null;
+                if (typeof value === 'string') {
+                    return /^https?:\/\/.+\.zip(\?|$)/.test(value) ? value : null;
+                }
+                if (Array.isArray(value)) {
+                    for (const item of value) {
+                        const found = walk(item);
+                        if (found) return found;
+                    }
+                } else if (typeof value === 'object') {
+                    seen.add(value);
+                    for (const key of Object.keys(value)) {
+                        const found = walk(value[key]);
+                        if (found) return found;
+                    }
+                }
+                return null;
+            };
+            return walk(json);
+        }
+
+        describeExportStatus(json) {
+            const text = JSON.stringify(json || {});
+            if (/未创建|not.?created|no.?task/i.test(text)) return '官方导出任务未创建';
+            if (/生成|处理中|进行中|pending|running|processing/i.test(text)) return '官方导出生成中';
+            return '官方导出生成中';
         }
 
         getCurrentSessionId() {
@@ -208,7 +324,6 @@
         }
 
         _captureToken() {
-            if (unsafeWindow.__KIMI_CAPTURED) return;
             const originalFetch = unsafeWindow.fetch;
             const tokenKey = this.tokenKey;
             unsafeWindow.fetch = function(...args) {
@@ -222,19 +337,17 @@
                     }
                     const match = typeof auth === 'string' && auth.match(/^Bearer\s+(.+)$/);
                     if (match && match[1].trim() !== '') {
-                        console.log('✅ 已捕获Kimi令牌:', match[1].slice(0, 10) + '...');
-                        GM_setValue(tokenKey, match[1]);
-                        unsafeWindow.__KIMI_CAPTURED = true;
+                        saveToken(tokenKey, match[1], 'Kimi');
                     }
                 } catch(e) {}
                 return originalFetch.apply(this, args);
             };
         }
 
-        async getToken() { return GM_getValue(this.tokenKey); }
+        async getToken() { return getStoredToken(this.tokenKey); }
 
         async _fetch(url, body) {
-            const token = GM_getValue(this.tokenKey);
+            const token = getStoredToken(this.tokenKey);
             const res = await fetch(url, {
                 method: 'POST',
                 headers: {
@@ -281,6 +394,27 @@
                   : PLATFORM === 'kimi' ? new KimiAdapter()
                   : new DoubaoAdapter();
 
+    GM_registerMenuCommand('设置后端地址', () => {
+        const value = prompt('请输入后端 API 地址（包含 /api/v1）', BRIDGE_URL);
+        if (value === null) return;
+        try {
+            GM_setValue(BRIDGE_URL_KEY, normalizeBridgeUrl(value));
+            alert('后端地址已保存，刷新页面后生效。');
+        } catch (error) {
+            alert(`后端地址无效: ${error.message}`);
+        }
+    });
+    GM_registerMenuCommand('重置后端地址', () => {
+        GM_deleteValue(BRIDGE_URL_KEY);
+        alert(`后端地址已重置为 ${DEFAULT_BRIDGE_URL}，刷新页面后生效。`);
+    });
+    if (adapter.tokenKey) {
+        GM_registerMenuCommand('清除已保存令牌', () => {
+            clearStoredToken(adapter.tokenKey);
+            alert(`${PLATFORM} 令牌已清除，将自动捕获新的令牌。`);
+        });
+    }
+
     async function checkServer() {
         try {
             const res = await fetch(`${BRIDGE_URL}/health`);
@@ -295,11 +429,12 @@
         let cursor = null, hasMore = true;
 
         while (hasMore) {
-            let url = 'https://chat.deepseek.com/api/v0/chat_session/fetch_page?lte_cursor.pinned=flase';
+            let url = 'https://chat.deepseek.com/api/v0/chat_session/fetch_page?lte_cursor.pinned=false';
             if (cursor) url += `&lte_cursor.updated_at=${cursor}`;
             const json = await adapter._xhr(url);
-            const sessions = json?.data?.biz_data?.chat_sessions || [];
-            hasMore = json?.data?.biz_data?.has_more || false;
+            const page = adapter._extractSessionsPage(json, '增量会话列表');
+            const sessions = page.sessions;
+            hasMore = page.hasMore;
 
             let hitOld = false;
             for (const s of sessions) {
@@ -321,6 +456,45 @@
     }
 
     let syncAbort = false;
+
+    async function syncDeepSeekOfficialExport() {
+        const token = await adapter.getToken();
+        if (!token) throw new Error('Token 未就绪');
+
+        ui.setProgress(1, 4, '创建官方导出任务...');
+        await adapter.createOfficialExportTask();
+        if (syncAbort) { ui.setStatus('⏹ 已停止'); return; }
+
+        let zipUrl = null;
+        const maxAttempts = 72;
+        for (let attempt = 1; attempt <= maxAttempts && !syncAbort; attempt++) {
+            ui.setProgress(2, 4, `等待官方导出 ${attempt}/${maxAttempts}`);
+            const status = await adapter.fetchOfficialExportStatus();
+            zipUrl = adapter.extractOfficialZipUrl(status);
+            if (zipUrl) break;
+            ui.setStatus(adapter.describeExportStatus(status));
+            await new Promise(r => setTimeout(r, 5000));
+        }
+        if (syncAbort) { ui.setStatus('⏹ 已停止'); return; }
+        if (!zipUrl) throw new Error('官方导出超时，未获取到 ZIP 下载地址');
+
+        ui.setProgress(3, 4, '下载官方 ZIP...');
+        const zipRes = await fetch(zipUrl, { method: 'GET', credentials: 'omit', mode: 'cors' });
+        if (!zipRes.ok) throw new Error(`ZIP 下载失败 ${zipRes.status}: ${await zipRes.text()}`);
+        const zipBlob = await zipRes.blob();
+        if (!zipBlob.size) throw new Error('ZIP 下载为空');
+        if (syncAbort) { ui.setStatus('⏹ 已停止'); return; }
+
+        ui.setProgress(4, 4, '导入官方 ZIP...');
+        const importRes = await fetch(`${BRIDGE_URL}/sessions/import/deepseek-export`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/zip' },
+            body: zipBlob
+        });
+        if (!importRes.ok) throw new Error(`官方 ZIP 导入失败 ${importRes.status}: ${await importRes.text()}`);
+        const data = await importRes.json();
+        ui.setStatus(`✅ 官方导入 ${data.imported} 个, 跳过 ${data.skipped} 个`);
+    }
 
     async function fetchDetailsAndPush(sessions) {
         if (!sessions.length) {
@@ -352,6 +526,7 @@
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ platform: PLATFORM, sessions: results })
         });
+        if (!res.ok) throw new Error(`导入失败 ${res.status}: ${await res.text()}`);
         const data = await res.json();
         ui.setStatus(`✅ 导入 ${data.imported} 个, 跳过 ${data.skipped} 个`);
     }
@@ -366,12 +541,17 @@
         try {
             let sessions;
             if (fullSync) {
+                if (PLATFORM === 'deepseek') {
+                    await syncDeepSeekOfficialExport();
+                    return;
+                }
                 ui.setStatus('全量拉取会话列表...');
                 sessions = await adapter.fetchAllSessions();
                 ui.setStatus(`全量获取 ${sessions.length} 个会话`);
             } else {
                 ui.setStatus('查询同步状态...');
                 const statusRes = await fetch(`${BRIDGE_URL}/sessions/sync-status?platform=${PLATFORM}`);
+                if (!statusRes.ok) throw new Error(`同步状态查询失败 ${statusRes.status}: ${await statusRes.text()}`);
                 const { last_updated_at } = await statusRes.json();
 
                 if (!last_updated_at) {

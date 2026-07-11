@@ -33,5 +33,5 @@ if static_path.exists():
     app.mount("/", StaticFiles(directory=static_path, html=True), name="static")
 
 if __name__ == "__main__":
-    print(f"🚀 AI Chat Memory 服务启动: http://{HOST}:{PORT}")
+    print(f"AI Chat Memory 服务启动: http://{HOST}:{PORT}")
     uvicorn.run(app, host=HOST, port=PORT)

@@ -1,7 +1,13 @@
 from uuid import uuid4
-from datetime import datetime, timezone
+from datetime import datetime
+from typing import Any
 
-def _iso_to_ts(iso_str):
+DEEPSEEK_EXPORT_CONTENT_TYPES = {
+    'REQUEST': 'user',
+    'RESPONSE': 'assistant',
+}
+
+def _iso_to_ts(iso_str: str | None) -> str | None:
     """ISO 8601 → Unix 时间戳字符串，失败返回原值"""
     if not iso_str:
         return iso_str
@@ -11,7 +17,7 @@ def _iso_to_ts(iso_str):
     except Exception:
         return iso_str
 
-def normalize_deepseek_session(raw: dict) -> dict:
+def normalize_deepseek_session(raw: dict[str, Any]) -> dict[str, Any]:
     """DeepSeek 原始数据 → 统一格式"""
     messages = []
     if not raw or not isinstance(raw, dict):
@@ -32,7 +38,99 @@ def normalize_deepseek_session(raw: dict) -> dict:
         })
     return {'messages': messages}
 
-def normalize_doubao_session(raw: dict) -> dict:
+def normalize_deepseek_export_session(raw: dict[str, Any]) -> dict[str, Any]:
+    """DeepSeek 官方导出 conversation → 统一格式，保留 mapping 分支关系"""
+    if not raw or not isinstance(raw, dict):
+        raise ValueError('DeepSeek export conversation must be an object')
+    mapping = raw.get('mapping')
+    if not isinstance(mapping, dict):
+        raise ValueError('DeepSeek export conversation missing mapping')
+
+    messages = []
+    for node_id, node in mapping.items():
+        if not isinstance(node, dict):
+            continue
+        message = node.get('message')
+        if not isinstance(message, dict):
+            continue
+
+        fragments = message.get('fragments') or []
+        if not isinstance(fragments, list):
+            fragments = []
+
+        fragment_types = []
+        content_by_role = {'user': [], 'assistant': []}
+        thinking = []
+        tool_types = []
+        search_result_count = 0
+
+        for fragment in fragments:
+            if not isinstance(fragment, dict):
+                continue
+            fragment_type = fragment.get('type')
+            if fragment_type:
+                fragment_types.append(fragment_type)
+
+            content = fragment.get('content')
+            if fragment_type in DEEPSEEK_EXPORT_CONTENT_TYPES and content:
+                content_by_role[DEEPSEEK_EXPORT_CONTENT_TYPES[fragment_type]].append(str(content))
+            elif fragment_type == 'THINK' and content:
+                thinking.append(str(content))
+            elif fragment_type:
+                tool_types.append(fragment_type)
+
+            results = fragment.get('results')
+            if isinstance(results, list):
+                search_result_count += len(results)
+
+        role = None
+        content = ''
+        if content_by_role['user']:
+            role = 'user'
+            content = '\n'.join(content_by_role['user'])
+        elif content_by_role['assistant']:
+            role = 'assistant'
+            content = '\n'.join(content_by_role['assistant'])
+
+        if not role:
+            continue
+
+        metadata = {
+            'source': 'deepseek_export',
+            'node_id': node.get('id') or node_id,
+            'parent_node_id': node.get('parent'),
+            'children_node_ids': node.get('children') or [],
+            'fragment_types': sorted(set(t for t in fragment_types if t)),
+            'tool_types': sorted(set(t for t in tool_types if t)),
+            'search_result_count': search_result_count,
+            'model': message.get('model'),
+            'files': message.get('files') or [],
+        }
+        if thinking:
+            metadata['thinking'] = '\n'.join(thinking)
+
+        messages.append({
+            'id': message.get('message_id') or node.get('id') or node_id or str(uuid4()),
+            'role': role,
+            'content': content,
+            'created_at': message.get('inserted_at') or raw.get('updated_at') or raw.get('inserted_at'),
+            'metadata': metadata
+        })
+
+    messages.sort(key=lambda m: m.get('created_at') or '')
+    return {
+        'id': str(uuid4()),
+        'platform': 'deepseek',
+        'platform_session_id': str(raw.get('id', '')),
+        'title': raw.get('title', ''),
+        'created_at': raw.get('inserted_at'),
+        'updated_at': raw.get('updated_at') or raw.get('inserted_at'),
+        'imported_at': datetime.now().isoformat(),
+        'messages': messages,
+        'raw_data': raw
+    }
+
+def normalize_doubao_session(raw: dict[str, Any]) -> dict[str, Any]:
     """豆包原始数据 → 统一格式"""
     messages = []
     if not raw or not isinstance(raw, dict):
@@ -51,7 +149,7 @@ def normalize_doubao_session(raw: dict) -> dict:
         })
     return {'messages': messages}
 
-def normalize_kimi_session(raw: dict) -> dict:
+def normalize_kimi_session(raw: dict[str, Any]) -> dict[str, Any]:
     """Kimi ListMessages 原始数据 → 统一格式"""
     messages = []
     if not raw or not isinstance(raw, dict):
@@ -73,7 +171,11 @@ def normalize_kimi_session(raw: dict) -> dict:
         })
     return {'messages': messages}
 
-def normalize_session(platform: str, raw_session: dict, raw_conversation: dict = None) -> dict:
+def normalize_session(
+    platform: str,
+    raw_session: dict[str, Any],
+    raw_conversation: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """统一标准化入口"""
     session_id = str(uuid4())
 
