@@ -126,4 +126,11 @@ mod tests {
         );
         assert!(settings.data_directory.is_none());
     }
+
+    #[test]
+    fn disables_secret_validation_by_default() {
+        let settings = AppSettings::default();
+        assert!(!settings.secret_enabled);
+        assert!(settings.secret.is_none());
+    }
 }

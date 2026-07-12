@@ -47,8 +47,8 @@ async fn authorize(
 ) -> Response {
     let origin = headers.get("origin").and_then(|v| v.to_str().ok());
     let settings = service.settings.get().await;
-    if !is_authorized(request.method(), origin, &headers, &settings) {
-        return (StatusCode::FORBIDDEN, "forbidden").into_response();
+    if let Err(reason) = authorization_error(request.method(), origin, &headers, &settings) {
+        return (StatusCode::FORBIDDEN, reason).into_response();
     }
     let mut response = if request.method() == Method::OPTIONS {
         StatusCode::NO_CONTENT.into_response()
@@ -74,20 +74,41 @@ async fn authorize(
     response
 }
 
+#[cfg(test)]
 fn is_authorized(
     method: &Method,
     origin: Option<&str>,
     headers: &HeaderMap,
     settings: &crate::models::AppSettings,
 ) -> bool {
+    authorization_error(method, origin, headers, settings).is_ok()
+}
+
+fn authorization_error(
+    method: &Method,
+    origin: Option<&str>,
+    headers: &HeaderMap,
+    settings: &crate::models::AppSettings,
+) -> Result<(), &'static str> {
     let allowed =
         origin.is_some_and(|value| settings.allowed_origins.iter().any(|item| item == value));
+    if !allowed {
+        return Err("origin_not_allowed");
+    }
+    if *method == Method::OPTIONS {
+        return Ok(());
+    }
     let protocol_ok =
         headers.get(CLIENT_HEADER).and_then(|v| v.to_str().ok()) == Some(CLIENT_VALUE);
-    let secret_ok = *method == Method::OPTIONS
-        || !settings.secret_enabled
+    if !protocol_ok {
+        return Err("invalid_client");
+    }
+    let secret_ok = !settings.secret_enabled
         || headers.get(SECRET_HEADER).and_then(|v| v.to_str().ok()) == settings.secret.as_deref();
-    allowed && (*method == Method::OPTIONS || protocol_ok) && secret_ok
+    if !secret_ok {
+        return Err("invalid_secret");
+    }
+    Ok(())
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -165,6 +186,15 @@ mod tests {
             &headers,
             &settings
         ));
+        assert_eq!(
+            authorization_error(
+                &Method::GET,
+                Some("https://chat.deepseek.com"),
+                &headers,
+                &settings
+            ),
+            Err("invalid_secret")
+        );
         headers.insert(SECRET_HEADER, HeaderValue::from_static("secret"));
         assert!(is_authorized(
             &Method::GET,
