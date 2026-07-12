@@ -62,7 +62,7 @@ pub fn run() {
                 }
             });
 
-            let show = MenuItem::with_id(app, "show", "打开藏经阁", true, None::<&str>)?;
+            let show = MenuItem::with_id(app, "show", "打开对话归档", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &quit])?;
             TrayIconBuilder::new()
