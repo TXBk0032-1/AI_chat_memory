@@ -129,15 +129,14 @@ i.deepseek { background: #5273e6; } i.doubao { background: #e36f53; } i.kimi { b
 .markdown code { font-family: "Cascadia Code", Consolas, monospace; font-size: 12px; }
 .markdown :not(pre) > code { padding: 2px 4px; border-radius: 3px; color: #9e3e36; background: #f4eeee; }
 .markdown img { max-width: 100%; }
-.thinking { margin: 0 0 12px; padding: 9px 13px; border: 1px solid #d7dfdc; border-radius: 999px; color: #66706d; background: #f5f7f6; font-size: 11px; transition: border-radius .3s ease, border-color .22s ease, background-color .22s ease, box-shadow .22s ease; overflow: hidden; }
-.thinking[open] { border-radius: 22px; border-color: #bdcec8; background: #f2f7f5; box-shadow: 0 6px 18px #263d3510; }
-.thinking summary { display: flex; align-items: center; gap: 7px; cursor: pointer; font-weight: 650; list-style: none; }
-.thinking summary::-webkit-details-marker { display: none; }
-.thinking summary::before { content: ""; width: 6px; height: 6px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(45deg) translateY(-1px); transition: transform .28s cubic-bezier(.2, .85, .25, 1.2); }
-.thinking[open] summary::before { transform: rotate(225deg) translate(-1px, -1px); }
-.thinking-reveal { display: grid; grid-template-rows: 0fr; opacity: 0; transform: translateY(-8px) perspective(500px) rotateX(-5deg); transform-origin: top; transition: grid-template-rows .3s cubic-bezier(.2, .8, .2, 1), opacity .22s ease, transform .3s cubic-bezier(.2, .8, .2, 1); }
-.thinking-reveal > .markdown { min-height: 0; overflow: hidden; }
-.thinking[open] .thinking-reveal { grid-template-rows: 1fr; opacity: 1; transform: translateY(0) perspective(500px) rotateX(0); }
+.thinking { margin: 0 0 12px; padding: 9px 13px; border: 1px solid #d7dfdc; border-radius: 18px; color: #66706d; background: #f5f7f6; font-size: 11px; transition: border-color .22s ease, background-color .22s ease, box-shadow .22s ease; overflow: hidden; }
+.thinking.open { border-color: #bdcec8; background: #f2f7f5; box-shadow: 0 6px 18px #263d3510; }
+.thinking-toggle { width: 100%; padding: 0; border: 0; display: flex; align-items: center; gap: 7px; color: inherit; background: transparent; cursor: pointer; font-weight: 650; text-align: left; }
+.thinking-toggle::before { content: ""; width: 6px; height: 6px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(45deg) translateY(-1px); transition: transform .28s cubic-bezier(.2, .85, .25, 1.2); }
+.thinking.open .thinking-toggle::before { transform: rotate(225deg) translate(-1px, -1px); }
+.thinking-reveal { display: grid; grid-template-rows: 0fr; opacity: 0; transform: translateY(-6px); transition: grid-template-rows .32s cubic-bezier(.2, .8, .2, 1), opacity .24s ease .02s, transform .32s cubic-bezier(.2, .8, .2, 1); }
+.thinking-reveal > div { min-height: 0; overflow: hidden; }
+.thinking.open .thinking-reveal { grid-template-rows: 1fr; opacity: 1; transform: translateY(0); }
 .thinking .markdown { margin-top: 10px; color: #66706d; font-size: 12px; }
 .branch-list { padding-top: 10px; }
 .branch-row { width: calc(100% - 16px); min-height: 50px; display: grid; grid-template-columns: 32px minmax(0, 1fr); align-items: start; gap: 8px; padding: 10px; border: 0; border-left: 2px solid #83a69c; color: #414a4e; background: #f5f7f6; text-align: left; }
@@ -208,7 +207,7 @@ i.deepseek { background: #5273e6; } i.doubao { background: #e36f53; } i.kimi { b
 @keyframes spin { to { transform: rotate(360deg); } }
 
 @media (prefers-reduced-motion: reduce) {
-  .settings-modal-enter-active, .settings-modal-leave-active, .settings-modal-enter-active .settings-dialog, .settings-modal-leave-active .settings-dialog, .source-highlight, .source-item, .source-item i, .filter-chevron, .filter-panel-enter-active, .filter-panel-leave-active, .detail-camera-enter-active, .detail-camera-leave-active, .thinking, .thinking-reveal, .thinking summary::before { transition-duration: .01ms; }
+  .settings-modal-enter-active, .settings-modal-leave-active, .settings-modal-enter-active .settings-dialog, .settings-modal-leave-active .settings-dialog, .source-highlight, .source-item, .source-item i, .filter-chevron, .filter-panel-enter-active, .filter-panel-leave-active, .detail-camera-enter-active, .detail-camera-leave-active, .thinking, .thinking-reveal, .thinking-toggle::before { transition-duration: .01ms; }
 }
 
 @media (max-width: 1050px) {

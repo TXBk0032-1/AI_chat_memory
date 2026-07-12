@@ -77,6 +77,7 @@ const showSettings = ref(false)
 const showClosePrompt = ref(false)
 const pendingCloseBehavior = ref<'hide_to_tray' | 'exit' | null>(null)
 const detailMode = ref<'conversation' | 'branches'>('conversation')
+const expandedThinking = ref(new Set<string>())
 const settings = ref<SettingsModel>({ setup_complete: false, secret_enabled: false, allowed_origins: [], migrated_legacy_database: false, close_behavior: 'ask', tray_click_behavior: 'show_menu' })
 const originText = ref('')
 const total = ref(0)
@@ -133,11 +134,19 @@ async function selectSession(id: string) {
   try {
     selected.value = await invoke<SessionDetail>('get_session', { id })
     detailMode.value = 'conversation'
+    expandedThinking.value = new Set()
   } catch (reason) {
     error.value = String(reason)
   } finally {
     detailLoading.value = false
   }
+}
+
+function toggleThinking(messageId: string) {
+  const next = new Set(expandedThinking.value)
+  if (next.has(messageId)) next.delete(messageId)
+  else next.add(messageId)
+  expandedThinking.value = next
 }
 
 async function removeSession() {
@@ -404,7 +413,10 @@ onBeforeUnmount(() => {
                 <div v-if="detailMode === 'conversation'" key="conversation" class="conversation-view">
                   <article v-for="message in selected.messages" :key="message.id" :class="['message-block', message.role]">
                     <div class="message-author"><span>{{ roleName(message.role) }}</span><time>{{ formatDate(message.created_at, true) }}</time></div>
-                    <details v-if="metadata(message, 'thinking')" class="thinking"><summary>查看思考过程</summary><div class="thinking-reveal"><div class="markdown" v-html="render(metadata(message, 'thinking') || '')"></div></div></details>
+                    <section v-if="metadata(message, 'thinking')" :class="['thinking', { open: expandedThinking.has(message.id) }]">
+                      <button class="thinking-toggle" :aria-expanded="expandedThinking.has(message.id)" @click="toggleThinking(message.id)">查看思考过程</button>
+                      <div class="thinking-reveal" :aria-hidden="!expandedThinking.has(message.id)"><div><div class="markdown" v-html="render(metadata(message, 'thinking') || '')"></div></div></div>
+                    </section>
                     <div class="markdown" v-html="render(message.content)"></div>
                   </article>
                 </div>
