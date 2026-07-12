@@ -77,3 +77,11 @@ release 产物输出到 `artifacts/`。使用 `-Clean` 可清理 Rust/前端缓�
 ```powershell
 .\scripts\install-hooks.ps1
 ```
+
+编码代理在完成并提交任务后应执行统一结束 Hook：
+
+```powershell
+.\scripts\finish-task.ps1
+```
+
+该命令要求工作区无未提交改动，并运行完整 release 流水线生成最新 MSI、EXE 和校验清单。
