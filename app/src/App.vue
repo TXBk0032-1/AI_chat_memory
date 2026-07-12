@@ -400,20 +400,20 @@ onBeforeUnmount(() => {
               <button :class="{ active: detailMode === 'branches' }" @click="detailMode='branches'"><GitBranch :size="15" />分支</button>
             </div>
             <div class="message-list">
-              <template v-if="detailMode === 'conversation'">
-                <article v-for="message in selected.messages" :key="message.id" :class="['message-block', message.role]">
-                  <div class="message-author"><span>{{ roleName(message.role) }}</span><time>{{ formatDate(message.created_at, true) }}</time></div>
-                  <details v-if="metadata(message, 'thinking')" class="thinking"><summary>查看思考过程</summary><div class="markdown" v-html="render(metadata(message, 'thinking') || '')"></div></details>
-                  <div class="markdown" v-html="render(message.content)"></div>
-                </article>
-              </template>
-              <template v-else>
-                <div class="branch-list">
+              <Transition name="detail-camera" mode="out-in">
+                <div v-if="detailMode === 'conversation'" key="conversation" class="conversation-view">
+                  <article v-for="message in selected.messages" :key="message.id" :class="['message-block', message.role]">
+                    <div class="message-author"><span>{{ roleName(message.role) }}</span><time>{{ formatDate(message.created_at, true) }}</time></div>
+                    <details v-if="metadata(message, 'thinking')" class="thinking"><summary>查看思考过程</summary><div class="thinking-reveal"><div class="markdown" v-html="render(metadata(message, 'thinking') || '')"></div></div></details>
+                    <div class="markdown" v-html="render(message.content)"></div>
+                  </article>
+                </div>
+                <div v-else key="branches" class="branch-list">
                   <button v-for="message in selected.messages" :key="message.id" class="branch-row" :style="{ marginLeft: `${branchDepth(message) * 18}px` }">
                     <span>{{ roleName(message.role) }}</span><p>{{ message.content || metadata(message, 'thinking') || '空消息' }}</p>
                   </button>
                 </div>
-              </template>
+              </Transition>
             </div>
             <footer class="detail-footer"><button class="danger-button" @click="removeSession"><Trash2 :size="15" />删除对话</button></footer>
           </template>
