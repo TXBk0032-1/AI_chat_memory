@@ -1,10 +1,12 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { open } from '@tauri-apps/plugin-dialog'
 import {
   Archive,
+  ArrowDown,
+  ArrowUp,
   CalendarDays,
   Check,
   ChevronDown,
@@ -89,17 +91,31 @@ const apiStatus = ref<ApiStatus>({ service: { state: 'starting' }, userscript_co
 const secretCopied = ref(false)
 const sessionPaneWidth = ref(520)
 const resizingPanes = ref(false)
+const searchElapsed = ref<number | null>(null)
+const searchHitIndex = ref(-1)
+const loopSearch = ref(false)
+const toast = ref('')
 const pageSize = 100
 let statusTimer: number | undefined
 let unlistenCloseRequest: UnlistenFn | undefined
 let resizeStartX = 0
 let resizeStartWidth = 0
+let toastTimer: number | undefined
 
 const filtered = computed(() => Boolean(query.value || platform.value || dateFrom.value || dateTo.value))
 const hasBranches = computed(() => selected.value?.messages.some((message) => metadata(message, 'source') === 'deepseek_export') ?? false)
 const statusLabel = computed(() => apiStatus.value.service.state === 'running' ? '同步服务运行中' : apiStatus.value.service.state === 'failed' ? '同步服务异常' : '同步服务启动中')
 const sourceIndex = computed(() => ['', 'deepseek', 'doubao', 'kimi'].indexOf(platform.value))
 const sourceAccent = computed(() => ({ deepseek: '#4d8fe8', doubao: '#e05c62', kimi: '#39a878' } as Record<string, string>)[platform.value] ?? '#f5f7f7')
+const selectedMatches = computed(() => {
+  const needle = query.value.trim().toLocaleLowerCase()
+  if (!needle || !selected.value) return []
+  return selected.value.messages.flatMap((message) => {
+    const text = `${message.content}\n${metadata(message, 'thinking') || ''}`.toLocaleLowerCase()
+    const count = text.split(needle).length - 1
+    return Array.from({ length: count }, (_, index) => ({ messageId: message.id, index }))
+  })
+})
 
 function epoch(value: string, end = false) {
   if (!value) return null
@@ -107,6 +123,7 @@ function epoch(value: string, end = false) {
 }
 
 async function loadSessions(reset = true) {
+  const started = performance.now()
   loading.value = true
   error.value = ''
   if (reset) page.value = 0
@@ -123,6 +140,7 @@ async function loadSessions(reset = true) {
     })
     sessions.value = reset ? result.sessions : [...sessions.value, ...result.sessions]
     total.value = result.total
+    searchElapsed.value = query.value ? performance.now() - started : null
     if (reset && selected.value && !result.sessions.some((item) => item.id === selected.value?.id)) selected.value = null
   } catch (reason) {
     error.value = String(reason)
@@ -143,11 +161,43 @@ async function selectSession(id: string) {
     selected.value = await invoke<SessionDetail>('get_session', { id })
     detailMode.value = 'conversation'
     expandedThinking.value = new Set()
+    searchHitIndex.value = -1
   } catch (reason) {
     error.value = String(reason)
   } finally {
     detailLoading.value = false
   }
+}
+
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function highlightRenderedHtml(html: string) {
+  const needle = query.value.trim()
+  if (!needle) return html
+  const pattern = new RegExp(escapeRegExp(needle), 'gi')
+  return html.split(/(<[^>]+>)/g).map((part) => part.startsWith('<') ? part : part.replace(pattern, (match) => `<mark class="search-hit">${match}</mark>`)).join('')
+}
+
+function highlightTitle(value: string) {
+  return highlightRenderedHtml(markdown.utils.escapeHtml(value || '未命名对话'))
+}
+
+async function navigateSearch(direction: number) {
+  if (!selectedMatches.value.length) return
+  let next = searchHitIndex.value + direction
+  if (next < 0 || next >= selectedMatches.value.length) {
+    if (!loopSearch.value) return
+    next = next < 0 ? selectedMatches.value.length - 1 : 0
+    toast.value = '已循环到当前对话的另一端'
+    window.clearTimeout(toastTimer)
+    toastTimer = window.setTimeout(() => { toast.value = '' }, 1800)
+  }
+  searchHitIndex.value = next
+  await nextTick()
+  const hits = document.querySelectorAll<HTMLElement>('.conversation-view mark.search-hit')
+  hits[next]?.scrollIntoView({ behavior: 'smooth', block: 'center' })
 }
 
 function toggleThinking(messageId: string) {
@@ -317,7 +367,7 @@ function render(value: string, message?: Message) {
   const source = (value || '')
     .replace(/\\\[([\s\S]*?)\\\]/g, (_, formula) => `\n$$${formula}$$\n`)
     .replace(/\\\((.+?)\\\)/g, (_, formula) => `$${formula}$`)
-  return markdown.render(source).replace(/\[reference:(\d+)\]/gi, (label, rawIndex) => {
+  return highlightRenderedHtml(markdown.render(source).replace(/\[reference:(\d+)\]/gi, (label, rawIndex) => {
       const index = Number(rawIndex)
       const reference = references[index] ?? references[index - 1]
       const url = referenceValue(reference, ['url', 'link', 'href'])
@@ -327,7 +377,7 @@ function render(value: string, message?: Message) {
       const safeTitle = markdown.utils.escapeHtml(title)
       const safeSummary = markdown.utils.escapeHtml(summary)
       return `<a class="reference-link" href="${markdown.utils.escapeHtml(url)}" target="_blank" rel="noopener noreferrer" data-summary="${safeSummary}">${safeTitle}</a>`
-    })
+    }))
 }
 
 function metadata(message: Message, key: string) {
@@ -357,6 +407,7 @@ onMounted(async () => {
 })
 onBeforeUnmount(() => {
   window.clearInterval(statusTimer)
+  window.clearTimeout(toastTimer)
   unlistenCloseRequest?.()
 })
 </script>
@@ -403,7 +454,10 @@ onBeforeUnmount(() => {
       </header>
 
       <section class="control-bar">
-        <label class="search-field"><Search :size="17" /><input v-model="query" placeholder="搜索标题和消息内容" @keyup.enter="loadSessions()" /><button v-if="query" title="清除搜索" @click="query=''; loadSessions()"><X :size="15" /></button></label>
+        <div class="search-stack">
+          <label class="search-field"><Search :size="17" /><input v-model="query" placeholder="搜索标题和消息内容" @input="searchElapsed=null" @keyup.enter="loadSessions()" /><button v-if="query" title="清除搜索" @click="query=''; searchElapsed=null; loadSessions()"><X :size="15" /></button></label>
+          <Transition name="search-summary"><div v-if="searchElapsed !== null" class="search-summary">找到 {{ total }} 条结果 · {{ searchElapsed.toFixed(0) }} 毫秒</div></Transition>
+        </div>
         <button :class="['filter-button', { active: showFilters || filtered, expanded: showFilters }]" :aria-expanded="showFilters" @click="showFilters=!showFilters"><CalendarDays :size="16" />日期筛选<ChevronDown class="filter-chevron" :size="14" /></button>
         <span class="result-count">{{ sessions.length }} / {{ total }}</span>
       </section>
@@ -433,7 +487,7 @@ onBeforeUnmount(() => {
             :class="['session-row', { selected: selected?.id === session.id }]"
             @click="selectSession(session.id)"
           >
-            <span class="session-title"><strong>{{ session.title || '未命名对话' }}</strong></span>
+            <span class="session-title"><strong v-html="highlightTitle(session.title)"></strong></span>
             <span class="platform-cell"><i :class="session.platform"></i>{{ platformName(session.platform) }}</span>
             <time>{{ formatDate(session.updated_at, true) }}</time>
           </button>
@@ -464,7 +518,16 @@ onBeforeUnmount(() => {
               <button :class="{ active: detailMode === 'conversation' }" @click="detailMode='conversation'"><MessageSquareText :size="15" />对话</button>
               <button :class="{ active: detailMode === 'branches' }" @click="detailMode='branches'"><GitBranch :size="15" />分支</button>
             </div>
+            <div v-if="query && detailMode === 'conversation'" class="search-navigation">
+              <span>{{ selectedMatches.length ? `${Math.max(searchHitIndex + 1, 0)} / ${selectedMatches.length}` : '当前对话无正文命中' }}</span>
+              <button class="icon-button" title="上一个命中" :disabled="!selectedMatches.length" @click="navigateSearch(-1)"><ArrowUp :size="15" /></button>
+              <button class="icon-button" title="下一个命中" :disabled="!selectedMatches.length" @click="navigateSearch(1)"><ArrowDown :size="15" /></button>
+              <label><input v-model="loopSearch" type="checkbox" />循环</label>
+            </div>
             <div class="message-list">
+              <div v-if="selectedMatches.length" class="search-scroll-markers" aria-hidden="true">
+                <i v-for="(match, index) in selectedMatches" :key="`${match.messageId}-${index}`" :style="{ top: `${((selected?.messages.findIndex(item => item.id === match.messageId) ?? 0) + 0.5) / Math.max(selected?.messages.length ?? 1, 1) * 100}%` }"></i>
+              </div>
               <Transition name="detail-camera" mode="out-in">
                 <div v-if="detailMode === 'conversation'" key="conversation" class="conversation-view">
                   <article v-for="message in selected.messages" :key="message.id" :class="['message-block', message.role]">
@@ -550,5 +613,6 @@ onBeforeUnmount(() => {
         </section>
       </div>
     </Transition>
+    <Transition name="toast"><div v-if="toast" class="toast" role="status">{{ toast }}</div></Transition>
   </div>
 </template>
