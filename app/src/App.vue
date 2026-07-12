@@ -95,6 +95,7 @@ const searchElapsed = ref<number | null>(null)
 const searchHitIndex = ref(-1)
 const loopSearch = ref(false)
 const toast = ref('')
+const activeBranchNode = ref('')
 const pageSize = 100
 let statusTimer: number | undefined
 let unlistenCloseRequest: UnlistenFn | undefined
@@ -115,6 +116,17 @@ const selectedMatches = computed(() => {
     const count = text.split(needle).length - 1
     return Array.from({ length: count }, (_, index) => ({ messageId: message.id, index }))
   })
+})
+const branchPath = computed(() => {
+  const path = new Set<string>()
+  const messages = selected.value?.messages ?? []
+  const byNode = new Map(messages.map((message) => [metadata(message, 'node_id'), message]))
+  let node = activeBranchNode.value || metadata(messages[messages.length - 1], 'node_id') || ''
+  while (node && !path.has(node)) {
+    path.add(node)
+    node = metadata(byNode.get(node)!, 'parent_node_id') || ''
+  }
+  return path
 })
 
 function epoch(value: string, end = false) {
@@ -162,11 +174,19 @@ async function selectSession(id: string) {
     detailMode.value = 'conversation'
     expandedThinking.value = new Set()
     searchHitIndex.value = -1
+    activeBranchNode.value = metadata(selected.value.messages[selected.value.messages.length - 1], 'node_id') || ''
   } catch (reason) {
     error.value = String(reason)
   } finally {
     detailLoading.value = false
   }
+}
+
+async function selectBranch(message: Message) {
+  activeBranchNode.value = metadata(message, 'node_id') || ''
+  detailMode.value = 'conversation'
+  await nextTick()
+  document.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(message.id)}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
 }
 
 function escapeRegExp(value: string) {
@@ -384,6 +404,11 @@ function metadata(message: Message, key: string) {
   return message.metadata?.[key] as string | undefined
 }
 
+function metadataArray(message: Message, key: string) {
+  const value = message.metadata?.[key]
+  return Array.isArray(value) ? value : []
+}
+
 function branchDepth(message: Message) {
   let depth = 0
   let parent = metadata(message, 'parent_node_id')
@@ -530,7 +555,7 @@ onBeforeUnmount(() => {
               </div>
               <Transition name="detail-camera" mode="out-in">
                 <div v-if="detailMode === 'conversation'" key="conversation" class="conversation-view">
-                  <article v-for="message in selected.messages" :key="message.id" :class="['message-block', message.role]">
+                  <article v-for="message in selected.messages" :key="message.id" :data-message-id="message.id" :class="['message-block', message.role]">
                     <div class="message-author"><span>{{ roleName(message.role) }}</span><time>{{ formatDate(message.created_at, true) }}</time></div>
                     <section v-if="metadata(message, 'thinking')" :class="['thinking', { open: expandedThinking.has(message.id) }]">
                       <button class="thinking-toggle" :aria-expanded="expandedThinking.has(message.id)" @click="toggleThinking(message.id)">查看思考过程</button>
@@ -540,9 +565,12 @@ onBeforeUnmount(() => {
                   </article>
                 </div>
                 <div v-else key="branches" class="branch-list">
-                  <button v-for="message in selected.messages" :key="message.id" class="branch-row" :style="{ marginLeft: `${branchDepth(message) * 18}px` }">
-                    <span>{{ roleName(message.role) }}</span><p>{{ message.content || metadata(message, 'thinking') || '空消息' }}</p>
-                  </button>
+                  <header><div><strong>对话分支</strong><span>{{ selected.messages.length }} 个节点</span></div><small>选择节点可返回对应消息</small></header>
+                  <div class="branch-tree">
+                    <button v-for="message in selected.messages" :key="message.id" :class="['branch-row', { current: activeBranchNode === metadata(message, 'node_id'), path: branchPath.has(metadata(message, 'node_id') || '') }]" :style="{ '--branch-depth': branchDepth(message) }" @click="selectBranch(message)">
+                      <i class="branch-rail"></i><span class="branch-node"></span><div><strong>{{ roleName(message.role) }}</strong><p>{{ message.content || metadata(message, 'thinking') || '空消息' }}</p><small>{{ metadataArray(message, 'children_node_ids').length }} 个后续节点</small></div>
+                    </button>
+                  </div>
                 </div>
               </Transition>
             </div>
