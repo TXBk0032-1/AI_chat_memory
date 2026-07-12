@@ -112,4 +112,18 @@ mod tests {
         }));
         let _ = tokio::fs::remove_dir_all(root).await;
     }
+
+    #[test]
+    fn loads_settings_created_before_desktop_preferences() {
+        let settings: AppSettings = serde_json::from_str(
+            r#"{"setup_complete":true,"secret_enabled":false,"secret":null,"allowed_origins":[],"migrated_legacy_database":false}"#,
+        )
+        .unwrap();
+        assert_eq!(settings.close_behavior, crate::models::CloseBehavior::Ask);
+        assert_eq!(
+            settings.tray_click_behavior,
+            crate::models::TrayClickBehavior::ShowMenu
+        );
+        assert!(settings.data_directory.is_none());
+    }
 }

@@ -95,6 +95,30 @@ pub struct AppSettings {
     pub secret: Option<String>,
     pub allowed_origins: Vec<String>,
     pub migrated_legacy_database: bool,
+    #[serde(default)]
+    pub data_directory: Option<String>,
+    #[serde(default)]
+    pub close_behavior: CloseBehavior,
+    #[serde(default)]
+    pub tray_click_behavior: TrayClickBehavior,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloseBehavior {
+    #[default]
+    Ask,
+    HideToTray,
+    Exit,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrayClickBehavior {
+    #[default]
+    ShowMenu,
+    OpenWindow,
+    NoAction,
 }
 
 impl Default for AppSettings {
@@ -110,6 +134,9 @@ impl Default for AppSettings {
                 "https://www.kimi.com".into(),
             ],
             migrated_legacy_database: false,
+            data_directory: None,
+            close_behavior: CloseBehavior::Ask,
+            tray_click_behavior: TrayClickBehavior::ShowMenu,
         }
     }
 }

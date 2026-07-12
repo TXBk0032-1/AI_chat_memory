@@ -52,6 +52,9 @@ type SettingsModel = {
   secret?: string
   allowed_origins: string[]
   migrated_legacy_database: boolean
+  data_directory?: string
+  close_behavior: 'ask' | 'hide_to_tray' | 'exit'
+  tray_click_behavior: 'show_menu' | 'open_window' | 'no_action'
 }
 type ApiStatus = { state: string; message?: string }
 
@@ -71,7 +74,7 @@ const dateTo = ref('')
 const showFilters = ref(false)
 const showSettings = ref(false)
 const detailMode = ref<'conversation' | 'branches'>('conversation')
-const settings = ref<SettingsModel>({ setup_complete: false, secret_enabled: false, allowed_origins: [], migrated_legacy_database: false })
+const settings = ref<SettingsModel>({ setup_complete: false, secret_enabled: false, allowed_origins: [], migrated_legacy_database: false, close_behavior: 'ask', tray_click_behavior: 'show_menu' })
 const originText = ref('')
 const total = ref(0)
 const page = ref(0)
@@ -195,6 +198,17 @@ async function migrateLegacy() {
     await invoke('migrate_legacy_database', { path })
     settings.value = await invoke('get_settings')
     await loadSessions()
+  } catch (reason) {
+    error.value = String(reason)
+  }
+}
+
+async function changeDataDirectory() {
+  const path = await open({ directory: true, multiple: false, title: '选择数据保存目录' })
+  if (typeof path !== 'string') return
+  if (!confirm('应用将把当前数据库复制到新目录并立即重启。是否继续？')) return
+  try {
+    await invoke('move_data_directory', { path })
   } catch (reason) {
     error.value = String(reason)
   }
@@ -387,6 +401,13 @@ onBeforeUnmount(() => window.clearInterval(statusTimer))
         <section class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
         <header><div><h2 id="settings-title">应用设置</h2><p>配置本地同步服务和数据迁移</p></div><button class="icon-button" title="关闭" @click="showSettings=false"><X :size="18" /></button></header>
         <div class="settings-content">
+          <section class="setting-group">
+            <div class="setting-row"><div><h3>数据保存位置</h3><p class="path-value">{{ settings.data_directory || '系统默认应用数据目录' }}</p></div><button class="secondary-button" @click="changeDataDirectory">更改位置</button></div>
+          </section>
+          <section class="setting-group behavior-settings">
+            <label><span>关闭窗口后</span><select v-model="settings.close_behavior"><option value="ask">下次关闭时询问</option><option value="hide_to_tray">隐藏到系统托盘</option><option value="exit">退出应用</option></select></label>
+            <label><span>点击托盘图标</span><select v-model="settings.tray_click_behavior"><option value="show_menu">弹出托盘菜单</option><option value="open_window">打开主界面</option><option value="no_action">不执行操作</option></select></label>
+          </section>
           <section class="setting-group">
             <div class="setting-heading"><ShieldCheck :size="18" /><div><h3>允许的网页来源</h3><p>每行填写一个完整的 HTTP 或 HTTPS Origin，不支持通配符。</p></div></div>
             <textarea v-model="originText" spellcheck="false" aria-label="Origin 白名单"></textarea>
