@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { open } from '@tauri-apps/plugin-dialog'
+import { openUrl } from '@tauri-apps/plugin-opener'
 import {
   Archive,
   ArrowDown,
@@ -128,6 +129,7 @@ const branchPath = computed(() => {
   }
   return path
 })
+const sessionReferences = computed(() => collectReferences(selected.value?.raw_data))
 
 function epoch(value: string, end = false) {
   if (!value) return null
@@ -353,6 +355,13 @@ function stopPaneResize() {
   resizingPanes.value = false
 }
 
+async function openMarkdownLink(event: MouseEvent) {
+  const link = (event.target as HTMLElement).closest<HTMLAnchorElement>('a.reference-link')
+  if (!link || !/^https?:\/\//i.test(link.href)) return
+  event.preventDefault()
+  await openUrl(link.href)
+}
+
 async function refreshApiStatus() {
   apiStatus.value = await invoke('get_api_status')
 }
@@ -382,14 +391,39 @@ function referenceValue(reference: unknown, keys: string[]) {
   return ''
 }
 
+function collectReferences(value: unknown) {
+  const references = new Map<number, unknown>()
+  const visit = (item: unknown) => {
+    if (Array.isArray(item)) {
+      item.forEach(visit)
+      return
+    }
+    if (!item || typeof item !== 'object') return
+    const record = item as Record<string, unknown>
+    const url = referenceValue(record, ['url', 'link', 'href'])
+    const citeIndex = typeof record.cite_index === 'number' ? record.cite_index : Number(record.cite_index)
+    if (url && Number.isInteger(citeIndex) && citeIndex >= 0) references.set(citeIndex, record)
+    Object.values(record).forEach(visit)
+  }
+  visit(value)
+  return references
+}
+
+function resolveReference(index: number, message?: Message) {
+  const messageReferences = Array.isArray(message?.metadata?.references) ? message.metadata.references : []
+  return sessionReferences.value.get(index)
+    ?? messageReferences.find((reference) => Number((reference as Record<string, unknown>)?.cite_index) === index)
+    ?? messageReferences[index]
+    ?? messageReferences[index - 1]
+}
+
 function render(value: string, message?: Message) {
-  const references = Array.isArray(message?.metadata?.references) ? message.metadata.references : []
   const source = (value || '')
     .replace(/\\\[([\s\S]*?)\\\]/g, (_, formula) => `\n$$${formula}$$\n`)
     .replace(/\\\((.+?)\\\)/g, (_, formula) => `$${formula}$`)
   return highlightRenderedHtml(markdown.render(source).replace(/\[reference:(\d+)\]/gi, (label, rawIndex) => {
       const index = Number(rawIndex)
-      const reference = references[index] ?? references[index - 1]
+      const reference = resolveReference(index, message)
       const url = referenceValue(reference, ['url', 'link', 'href'])
       if (!/^https?:\/\//i.test(url)) return label
       const title = referenceValue(reference, ['title', 'name']) || `引用 ${index}`
@@ -549,7 +583,7 @@ onBeforeUnmount(() => {
               <button class="icon-button" title="下一个命中" :disabled="!selectedMatches.length" @click="navigateSearch(1)"><ArrowDown :size="15" /></button>
               <label><input v-model="loopSearch" type="checkbox" />循环</label>
             </div>
-            <div class="message-list">
+            <div class="message-list" @click="openMarkdownLink">
               <div v-if="selectedMatches.length" class="search-scroll-markers" aria-hidden="true">
                 <i v-for="(match, index) in selectedMatches" :key="`${match.messageId}-${index}`" :style="{ top: `${((selected?.messages.findIndex(item => item.id === match.messageId) ?? 0) + 0.5) / Math.max(selected?.messages.length ?? 1, 1) * 100}%` }"></i>
               </div>
