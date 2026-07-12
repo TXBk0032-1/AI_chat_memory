@@ -29,6 +29,27 @@ pub async fn connect(path: &Path) -> Result<SqlitePool> {
     Ok(pool)
 }
 
+pub async fn copy_database(source: &Path, destination: &Path) -> Result<()> {
+    if let Some(parent) = destination.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let options = SqliteConnectOptions::new()
+        .filename(source)
+        .read_only(true)
+        .foreign_keys(true);
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(options)
+        .await?;
+    let result = sqlx::query("VACUUM INTO ?")
+        .bind(destination.to_string_lossy().as_ref())
+        .execute(&pool)
+        .await;
+    pool.close().await;
+    result?;
+    Ok(())
+}
+
 pub async fn import_sessions(pool: &SqlitePool, sessions: &[NormalizedSession]) -> Result<usize> {
     let mut tx = pool.begin().await?;
     for session in sessions {

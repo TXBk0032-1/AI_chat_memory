@@ -41,29 +41,18 @@ pub fn run() {
             let legacy = find_legacy_database();
             let service = tauri::async_runtime::block_on(async {
                 let settings = Arc::new(SettingsStore::load(settings_path).await?);
-                let mut settings_value = settings.get().await;
+                let settings_value = settings.get().await;
                 let configured_dir = settings_value
                     .data_directory
                     .as_ref()
                     .map(std::path::PathBuf::from);
-                let database_dir = resolve_database_directory(
+                let database_dir = prepare_database_directory(
                     configured_dir.as_deref(),
                     executable_dir.as_deref(),
                     working_dir.as_deref(),
                     &data_dir,
-                );
-                if configured_dir.as_ref().is_some_and(|path| path != &database_dir) {
-                    tracing::warn!(configured=?configured_dir, fallback=%database_dir.display(), "configured data directory was unavailable; using fallback database directory");
-                }
-                if settings_value
-                    .data_directory
-                    .as_deref()
-                    .is_none_or(|path| std::path::Path::new(path) != database_dir)
-                {
-                    settings_value.data_directory =
-                        Some(database_dir.to_string_lossy().into_owned());
-                    settings.update(settings_value).await?;
-                }
+                )
+                .await;
                 tokio::fs::create_dir_all(&database_dir).await?;
                 let database_path = database_dir.join("chat_memory.db");
                 let pool = database::connect(&database_path).await?;
@@ -168,7 +157,7 @@ pub fn run() {
         .expect("error while running Tauri application");
 }
 
-fn resolve_database_directory(
+async fn prepare_database_directory(
     configured: Option<&std::path::Path>,
     executable_dir: Option<&std::path::Path>,
     working_dir: Option<&std::path::Path>,
@@ -179,11 +168,38 @@ fn resolve_database_directory(
     {
         return path.to_path_buf();
     }
-    for path in [executable_dir, working_dir].into_iter().flatten() {
-        if path.join("chat_memory.db").is_file() {
-            return path.to_path_buf();
+
+    let runtime_database = [executable_dir, working_dir]
+        .into_iter()
+        .flatten()
+        .map(|path| path.join("chat_memory.db"))
+        .find(|path| path.is_file());
+
+    if let (Some(target_dir), Some(source)) = (configured, runtime_database.as_deref()) {
+        let destination = target_dir.join("chat_memory.db");
+        match database::copy_database(source, &destination).await {
+            Ok(()) => {
+                tracing::info!(source=%source.display(), destination=%destination.display(), "migrated fallback database to configured directory");
+                return target_dir.to_path_buf();
+            }
+            Err(error) => {
+                tracing::error!(%error, source=%source.display(), configured=%target_dir.display(), "failed to migrate fallback database to configured directory; using source temporarily");
+                return source.parent().unwrap_or(app_data_dir).to_path_buf();
+            }
         }
     }
+
+    if let Some(path) = configured {
+        match tokio::fs::create_dir_all(path).await {
+            Ok(()) => return path.to_path_buf(),
+            Err(error) => {
+                tracing::error!(%error, configured=%path.display(), "configured data directory is unavailable; using application data directory temporarily");
+            }
+        }
+    } else if let Some(source) = runtime_database {
+        return source.parent().unwrap_or(app_data_dir).to_path_buf();
+    }
+
     app_data_dir.to_path_buf()
 }
 
@@ -204,38 +220,52 @@ fn find_legacy_database() -> std::path::PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_database_directory;
+    use super::prepare_database_directory;
 
-    #[test]
-    fn falls_back_to_runtime_database_when_configured_directory_is_missing() {
+    #[tokio::test]
+    async fn migrates_runtime_database_to_missing_configured_directory() {
         let root = std::env::temp_dir().join(format!("acm-path-test-{}", std::process::id()));
         let runtime = root.join("runtime");
+        let configured = root.join("configured");
         let app_data = root.join("app-data");
         std::fs::create_dir_all(&runtime).unwrap();
-        std::fs::write(runtime.join("chat_memory.db"), []).unwrap();
-        let resolved = resolve_database_directory(
-            Some(&root.join("missing")),
-            Some(&runtime),
-            None,
-            &app_data,
-        );
-        assert_eq!(resolved, runtime);
+        let source_pool = crate::database::connect(&runtime.join("chat_memory.db"))
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO sessions (id, platform, platform_session_id, title) VALUES ('1', 'deepseek', 'source', 'migrated')")
+            .execute(&source_pool)
+            .await
+            .unwrap();
+        source_pool.close().await;
+        let resolved =
+            prepare_database_directory(Some(&configured), Some(&runtime), None, &app_data).await;
+        assert_eq!(resolved, configured);
+        let migrated_pool = crate::database::connect(&resolved.join("chat_memory.db"))
+            .await
+            .unwrap();
+        let title: String = sqlx::query_scalar("SELECT title FROM sessions WHERE id = '1'")
+            .fetch_one(&migrated_pool)
+            .await
+            .unwrap();
+        assert_eq!(title, "migrated");
+        migrated_pool.close().await;
         let _ = std::fs::remove_dir_all(root);
     }
 
-    #[test]
-    fn uses_app_data_when_no_existing_runtime_database_is_found() {
+    #[tokio::test]
+    async fn uses_app_data_when_no_existing_runtime_database_is_found() {
         let root = std::env::temp_dir().join(format!("acm-path-empty-{}", std::process::id()));
         let runtime = root.join("runtime");
         let app_data = root.join("app-data");
         std::fs::create_dir_all(&runtime).unwrap();
-        let resolved = resolve_database_directory(
+        let resolved = prepare_database_directory(
             Some(&root.join("missing")),
             Some(&runtime),
             None,
             &app_data,
-        );
-        assert_eq!(resolved, app_data);
+        )
+        .await;
+        assert_eq!(resolved, root.join("missing"));
         let _ = std::fs::remove_dir_all(root);
     }
 }
