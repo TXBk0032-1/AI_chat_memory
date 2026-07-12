@@ -106,6 +106,11 @@ i.deepseek { background: #5273e6; } i.doubao { background: #e36f53; } i.kimi { b
 .load-more { width: calc(100% - 36px); height: 34px; margin: 12px 18px 18px; border: 1px solid #d2d7d9; border-radius: 4px; color: #596166; background: #fff; font-size: 11px; }
 .detail-pane { display: flex; flex-direction: column; }
 .detail-header { min-height: 112px; display: flex; padding: 20px 24px 16px; border-bottom: 1px solid #e2e5e6; }
+.detail-actions { position: relative; margin-left: auto; }
+.detail-menu { position: absolute; z-index: 20; top: 38px; right: 0; width: 164px; padding: 5px; border: 1px solid #d9dee0; border-radius: 6px; background: #fff; box-shadow: 0 10px 28px #1f2a2f24; }
+.detail-menu button { width: 100%; min-height: 32px; padding: 0 9px; border: 0; border-radius: 4px; display: flex; align-items: center; gap: 7px; color: #343b3f; background: transparent; text-align: left; font-size: 12px; }
+.detail-menu button:hover { background: #f1f4f4; }
+.detail-menu button.danger { color: #a33c36; }
 .detail-title { min-width: 0; flex: 1; }
 .platform-badge { display: inline-flex; align-items: center; gap: 6px; color: #697176; font-size: 10px; font-weight: 650; text-transform: uppercase; }
 .detail-title h2 { margin: 9px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #252a2d; font-size: 17px; font-weight: 680; letter-spacing: 0; }
@@ -151,6 +156,15 @@ i.deepseek { background: #5273e6; } i.doubao { background: #e36f53; } i.kimi { b
 
 .dialog-backdrop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 22px; background: #11181cb8; }
 .settings-dialog { width: min(650px, 92vw); max-height: 90vh; display: flex; flex-direction: column; border-radius: 7px; overflow: hidden; background: #fff; box-shadow: 0 18px 50px #1017193d; }
+.info-dialog, .delete-dialog { width: min(480px, calc(100vw - 40px)); overflow: hidden; border: 1px solid #d6dbdd; border-radius: 7px; background: #fff; box-shadow: 0 22px 70px #10191e38; }
+.info-dialog > header, .delete-dialog > header { padding: 18px 20px; display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; border-bottom: 1px solid #e6e9ea; }
+.info-dialog h2, .delete-dialog h2 { margin: 0; font-size: 16px; }
+.delete-dialog p { margin: 8px 0 0; color: #697176; font-size: 12px; line-height: 1.6; }
+.info-dialog dl { margin: 0; padding: 18px 20px; display: grid; grid-template-columns: 94px minmax(0, 1fr); gap: 12px 16px; font-size: 12px; }
+.info-dialog dt { color: #7d8589; }
+.info-dialog dd { min-width: 0; margin: 0; color: #2d3437; overflow-wrap: anywhere; }
+.info-dialog .identifier { font-family: "Cascadia Code", Consolas, monospace; font-size: 11px; user-select: text; }
+.info-dialog > footer, .delete-dialog > footer { padding: 13px 20px; display: flex; justify-content: flex-end; gap: 9px; border-top: 1px solid #e6e9ea; background: #fafbfb; }
 .settings-modal-enter-active, .settings-modal-leave-active { transition: background-color .2s ease, opacity .2s ease; }
 .settings-modal-enter-active .settings-dialog { transition: opacity .22s ease-out, transform .22s cubic-bezier(.2, .8, .2, 1); }
 .settings-modal-leave-active .settings-dialog { transition: opacity .16s ease-in, transform .16s ease-in; }

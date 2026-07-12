@@ -75,6 +75,9 @@ const dateTo = ref('')
 const showFilters = ref(false)
 const showSettings = ref(false)
 const showClosePrompt = ref(false)
+const showDeletePrompt = ref(false)
+const showDetailMenu = ref(false)
+const showSessionInfo = ref(false)
 const pendingCloseBehavior = ref<'hide_to_tray' | 'exit' | null>(null)
 const detailMode = ref<'conversation' | 'branches'>('conversation')
 const expandedThinking = ref(new Set<string>())
@@ -150,10 +153,12 @@ function toggleThinking(messageId: string) {
 }
 
 async function removeSession() {
-  if (!selected.value || !confirm(`删除“${selected.value.title || '未命名对话'}”？此操作无法撤销。`)) return
+  if (!selected.value) return
   try {
     await invoke('delete_session', { id: selected.value.id })
     selected.value = null
+    showDeletePrompt.value = false
+    showDetailMenu.value = false
     await loadSessions()
   } catch (reason) {
     error.value = String(reason)
@@ -322,7 +327,6 @@ onBeforeUnmount(() => {
 
       <nav aria-label="主要导航">
         <button class="nav-item active"><Inbox :size="17" /><span>全部对话</span><em>{{ total }}</em></button>
-        <button class="nav-item" @click="importZip"><FileArchive :size="17" /><span>导入文件</span></button>
       </nav>
 
       <div class="sidebar-section">
@@ -385,7 +389,7 @@ onBeforeUnmount(() => {
             :class="['session-row', { selected: selected?.id === session.id }]"
             @click="selectSession(session.id)"
           >
-            <span class="session-title"><strong>{{ session.title || '未命名对话' }}</strong><small>{{ session.platform_session_id }}</small></span>
+            <span class="session-title"><strong>{{ session.title || '未命名对话' }}</strong></span>
             <span class="platform-cell"><i :class="session.platform"></i>{{ platformName(session.platform) }}</span>
             <time>{{ formatDate(session.updated_at, true) }}</time>
           </button>
@@ -402,7 +406,13 @@ onBeforeUnmount(() => {
           <template v-else-if="selected">
             <div class="detail-header">
               <div class="detail-title"><span class="platform-badge"><i :class="selected.platform"></i>{{ platformName(selected.platform) }}</span><h2>{{ selected.title || '未命名对话' }}</h2><p>{{ selected.messages.length }} 条消息 · {{ formatDate(selected.updated_at) }}</p></div>
-              <button class="icon-button" title="更多操作"><MoreHorizontal :size="19" /></button>
+              <div class="detail-actions">
+                <button class="icon-button" title="更多操作" aria-haspopup="menu" :aria-expanded="showDetailMenu" @click="showDetailMenu=!showDetailMenu"><MoreHorizontal :size="19" /></button>
+                <div v-if="showDetailMenu" class="detail-menu" role="menu">
+                  <button role="menuitem" @click="showSessionInfo=true; showDetailMenu=false">对话详细信息</button>
+                  <button class="danger" role="menuitem" @click="showDeletePrompt=true; showDetailMenu=false"><Trash2 :size="14" />删除对话</button>
+                </div>
+              </div>
             </div>
             <div v-if="hasBranches" class="segmented-control">
               <button :class="{ active: detailMode === 'conversation' }" @click="detailMode='conversation'"><MessageSquareText :size="15" />对话</button>
@@ -427,7 +437,6 @@ onBeforeUnmount(() => {
                 </div>
               </Transition>
             </div>
-            <footer class="detail-footer"><button class="danger-button" @click="removeSession"><Trash2 :size="15" />删除对话</button></footer>
           </template>
           <div v-else class="detail-placeholder"><MessageSquareText :size="34" /><strong>选择一条对话</strong><span>消息内容会显示在这里</span></div>
         </aside>
@@ -460,6 +469,25 @@ onBeforeUnmount(() => {
           </section>
         </div>
         <footer><button class="secondary-button" @click="showSettings=false">取消</button><button class="primary-button" @click="saveSettings">保存设置</button></footer>
+        </section>
+      </div>
+    </Transition>
+
+    <Transition name="settings-modal">
+      <div v-if="showSessionInfo && selected" class="dialog-backdrop" @click.self="showSessionInfo=false">
+        <section class="info-dialog" role="dialog" aria-modal="true" aria-labelledby="info-title">
+          <header><h2 id="info-title">对话详细信息</h2><button class="icon-button" title="关闭" @click="showSessionInfo=false"><X :size="18" /></button></header>
+          <dl><dt>标题</dt><dd>{{ selected.title || '未命名对话' }}</dd><dt>来源</dt><dd>{{ platformName(selected.platform) }}</dd><dt>来源会话 ID</dt><dd class="identifier">{{ selected.platform_session_id }}</dd><dt>创建时间</dt><dd>{{ formatDate(selected.created_at) }}</dd><dt>更新时间</dt><dd>{{ formatDate(selected.updated_at) }}</dd><dt>消息数量</dt><dd>{{ selected.messages.length }}</dd></dl>
+          <footer><button class="primary-button" @click="showSessionInfo=false">关闭</button></footer>
+        </section>
+      </div>
+    </Transition>
+
+    <Transition name="settings-modal">
+      <div v-if="showDeletePrompt && selected" class="dialog-backdrop" @click.self="showDeletePrompt=false">
+        <section class="delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-title">
+          <header><div><h2 id="delete-title">删除对话</h2><p>“{{ selected.title || '未命名对话' }}”及其全部消息将被永久删除，此操作无法撤销。</p></div></header>
+          <footer><button class="secondary-button" @click="showDeletePrompt=false">取消</button><button class="danger-button" @click="removeSession"><Trash2 :size="15" />确认删除</button></footer>
         </section>
       </div>
     </Transition>
