@@ -99,8 +99,8 @@ if ($Stage -eq "release") {
     $exe = Get-Item (Join-Path $Rust "target/release/ai-chat-memory-desktop.exe")
     if (-not $msi -or -not $exe) { throw "Release build completed without expected artifacts" }
 
-    Copy-Item $msi.FullName $Artifacts -Force
-    Copy-Item $exe.FullName $Artifacts -Force
+    $artifactMsi = Copy-Item $msi.FullName $Artifacts -Force -PassThru
+    $artifactExe = Copy-Item $exe.FullName $Artifacts -Force -PassThru
     $commit = (git -C $Root rev-parse HEAD).Trim()
     $version = (Get-Content (Join-Path $App "package.json") -Raw | ConvertFrom-Json).version
     $manifest = [ordered]@{
@@ -108,7 +108,7 @@ if ($Stage -eq "release") {
         commit = $commit
         built_at_utc = [DateTime]::UtcNow.ToString("o")
         rust = $rustVersion
-        artifacts = @(Get-ChildItem $Artifacts -File | ForEach-Object {
+        artifacts = @($artifactMsi, $artifactExe | ForEach-Object {
             [ordered]@{ name = $_.Name; bytes = $_.Length; sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
         })
     }
