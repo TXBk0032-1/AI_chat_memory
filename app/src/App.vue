@@ -467,11 +467,11 @@ function render(value: string, message?: Message) {
   const source = (value || '')
     .replace(/\\\[([\s\S]*?)\\\]/g, (_, formula) => `\n$$${formula}$$\n`)
     .replace(/\\\((.+?)\\\)/g, (_, formula) => `$${formula}$`)
-  return highlightRenderedHtml(markdown.render(source).replace(/\[reference:(\d+)\]/gi, (label, rawIndex) => {
+  return highlightRenderedHtml(markdown.render(source).replace(/\[reference:(\d+)\]/gi, (_match, rawIndex) => {
       const index = Number(rawIndex)
       const reference = resolveReference(index, message)
       const url = referenceValue(reference, ['url', 'link', 'href'])
-      if (!/^https?:\/\//i.test(url)) return label
+      if (!/^https?:\/\//i.test(url)) return `<span class="reference-missing" title="该引用来源未随历史记录保存">[${index}]</span>`
       const title = referenceValue(reference, ['title', 'name']) || `引用 ${index}`
       const summary = referenceValue(reference, ['snippet', 'summary', 'description', 'content']).replace(/\s+/g, ' ').slice(0, 280)
       const safeTitle = markdown.utils.escapeHtml(title)

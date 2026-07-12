@@ -158,6 +158,7 @@ i.deepseek { background: #5273e6; } i.doubao { background: #e36f53; } i.kimi { b
 .markdown tr:last-child td { border-bottom: 0; }
 .markdown th { color: #394145; background: #f0f2f3; font-weight: 650; }
 .reference-link { position: relative; color: #176fae; text-decoration: underline; text-underline-offset: 2px; }
+.reference-missing { display: inline-block; margin: 0 1px; color: #7a8388; font-size: .86em; vertical-align: super; cursor: help; }
 .reference-link::after { content: attr(data-summary); position: absolute; z-index: 30; left: 0; bottom: calc(100% + 8px); width: min(320px, 70vw); padding: 9px 11px; border: 1px solid #d4dade; border-radius: 5px; color: #30373b; background: #fff; box-shadow: 0 8px 24px #17252c26; font-size: 11px; line-height: 1.55; opacity: 0; visibility: hidden; transform: translateY(4px); transition: opacity .1s ease, transform .1s ease, visibility 0s; pointer-events: none; }
 .reference-link[data-summary=""]::after { display: none; }
 .reference-link:hover::after { opacity: 1; visibility: visible; transform: translateY(0); transition-delay: 1.2s; }

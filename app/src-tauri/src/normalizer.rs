@@ -89,6 +89,11 @@ pub fn normalize_session(platform: &str, raw: &Value) -> Result<NormalizedSessio
 }
 
 fn normalize_deepseek_messages(raw: Option<&Value>) -> Vec<NormalizedMessage> {
+    let references = raw
+        .and_then(|value| value.get("_references"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     raw.and_then(|v| v.pointer("/data/biz_data/chat_messages")).and_then(Value::as_array)
         .into_iter().flatten().filter_map(|m| {
             let fragments = m.get("fragments")?.as_array()?;
@@ -97,7 +102,7 @@ fn normalize_deepseek_messages(raw: Option<&Value>) -> Vec<NormalizedMessage> {
             let content = fragments.iter().filter(|f| f.get("type").and_then(Value::as_str) != Some("THINK"))
                 .filter_map(|f| f.get("content").and_then(Value::as_str)).collect::<Vec<_>>().join("\n");
             Some(NormalizedMessage { role: m.get("role").and_then(Value::as_str).unwrap_or("user").into(), content,
-                metadata: json!({"model": m.get("model"), "thinking": if thinking.is_empty() { Value::Null } else { Value::String(thinking) }}),
+                metadata: json!({"model": m.get("model"), "references": references, "thinking": if thinking.is_empty() { Value::Null } else { Value::String(thinking) }}),
                 created_at: normalize_timestamp(m.get("inserted_at")).or_else(|| normalize_timestamp(m.get("create_time"))) })
         }).collect()
 }
@@ -274,6 +279,31 @@ mod tests {
         assert_eq!(doubao.messages[0].role, "assistant");
         let kimi = normalize_session("kimi", &json!({"id":"k","name":"K","_conversation":{"messages":[{"role":"user","blocks":[{"text":{"content":"q"}}]}]}})).unwrap();
         assert_eq!(kimi.messages[0].content, "q");
+    }
+
+    #[test]
+    fn preserves_references_captured_by_deepseek_userscript() {
+        let session = normalize_session(
+            "deepseek",
+            &json!({
+                "id": "d",
+                "title": "D",
+                "_conversation": {
+                    "_references": [{"cite_index": 35, "url": "https://example.com", "title": "Example", "snippet": "Summary"}],
+                    "data": {"biz_data": {"chat_messages": [{"role": "assistant", "fragments": [{"type": "RESPONSE", "content": "answer [reference:35]"}]}]}}
+                }
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(
+            session.messages[0].metadata["references"][0]["cite_index"],
+            35
+        );
+        assert_eq!(
+            session.messages[0].metadata["references"][0]["url"],
+            "https://example.com"
+        );
     }
 
     #[test]

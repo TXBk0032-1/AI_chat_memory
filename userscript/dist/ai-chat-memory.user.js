@@ -134,7 +134,47 @@
 
         constructor() {
             super();
+            this.referenceCacheKey = 'deepseek_reference_cache_v1';
             this._captureToken();
+        }
+
+        _extractReferences(value) {
+            const references = [];
+            const seen = new Set();
+            const visit = item => {
+                if (Array.isArray(item)) return item.forEach(visit);
+                if (!item || typeof item !== 'object' || seen.has(item)) return;
+                seen.add(item);
+                const url = typeof item.url === 'string' ? item.url : typeof item.link === 'string' ? item.link : '';
+                const citeIndex = Number(item.cite_index ?? item.citeIndex ?? item.index);
+                if (/^https?:\/\//i.test(url) && Number.isInteger(citeIndex) && citeIndex >= 0) {
+                    references.push({
+                        cite_index: citeIndex,
+                        url,
+                        title: String(item.title ?? item.name ?? ''),
+                        snippet: String(item.snippet ?? item.summary ?? item.description ?? '')
+                    });
+                }
+                Object.values(item).forEach(visit);
+            };
+            visit(value);
+            return references;
+        }
+
+        _cacheReferences(value) {
+            const sessionId = this.getCurrentSessionId();
+            const found = this._extractReferences(value);
+            if (!sessionId || !found.length) return;
+            const cache = GM_getValue(this.referenceCacheKey, {});
+            const merged = new Map((cache[sessionId] || []).map(item => [item.cite_index, item]));
+            found.forEach(item => merged.set(item.cite_index, item));
+            cache[sessionId] = [...merged.values()].sort((a, b) => a.cite_index - b.cite_index);
+            GM_setValue(this.referenceCacheKey, cache);
+            console.log(`🔗 DeepSeek: 已缓存 ${cache[sessionId].length} 条网页引用`);
+        }
+
+        _referencesForSession(sessionId) {
+            return GM_getValue(this.referenceCacheKey, {})[sessionId] || [];
         }
 
         _captureToken() {
@@ -142,6 +182,7 @@
 
             const originalFetch = unsafeWindow.fetch;
             const tokenKey = this.tokenKey;
+            const adapter = this;
             unsafeWindow.fetch = function(...args) {
                 const options = args[1] || {};
                 const headers = options.headers || {};
@@ -152,7 +193,9 @@
                 if (match && match[1].trim() !== '') {
                     saveToken(tokenKey, match[1], 'DeepSeek');
                 }
-                return originalFetch.apply(this, args);
+                const request = originalFetch.apply(this, args);
+                request.then(response => response.clone().json().then(json => adapter._cacheReferences(json)).catch(() => {})).catch(() => {});
+                return request;
             };
 
             const XHR = unsafeWindow.XMLHttpRequest;
@@ -169,6 +212,9 @@
                         saveToken(tokenKey, match[1], 'DeepSeek');
                     }
                 }
+                this.addEventListener('load', () => {
+                    try { adapter._cacheReferences(JSON.parse(this.responseText)); } catch (e) {}
+                });
                 return origSend.apply(this, args);
             };
         }
@@ -260,7 +306,9 @@
         }
 
         async fetchConversation(id) {
-            return this._xhr(`https://chat.deepseek.com/api/v0/chat/history_messages?chat_session_id=${id}`);
+            const conversation = await this._xhr(`https://chat.deepseek.com/api/v0/chat/history_messages?chat_session_id=${id}`);
+            conversation._references = this._referencesForSession(id);
+            return conversation;
         }
 
         async createOfficialExportTask() {
