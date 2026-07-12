@@ -497,12 +497,14 @@
             hasMore = page.hasMore;
 
             let hitOld = false;
+            const lastUpdatedSeconds = toEpochSeconds(lastUpdatedAt);
             for (const s of sessions) {
+                const sessionUpdatedSeconds = toEpochSeconds(s.updated_at);
                 if (s.pinned) {
-                    if (s.updated_at > lastUpdatedAt) newSessions.push(s);
+                    if (sessionUpdatedSeconds > lastUpdatedSeconds) newSessions.push(s);
                     continue;
                 }
-                if (lastUpdatedAt && s.updated_at <= lastUpdatedAt) {
+                if (lastUpdatedSeconds && sessionUpdatedSeconds <= lastUpdatedSeconds) {
                     hitOld = true;
                     break;
                 }
@@ -513,6 +515,14 @@
             console.log(`📋 增量: 本页 ${sessions.length} 条, 新会话累计 ${newSessions.length}`);
         }
         return newSessions;
+    }
+
+    function toEpochSeconds(value) {
+        if (value === null || value === undefined || value === '') return 0;
+        const numeric = Number(value);
+        if (Number.isFinite(numeric)) return Math.abs(numeric) > 1e11 ? numeric / 1000 : numeric;
+        const milliseconds = Date.parse(String(value));
+        return Number.isFinite(milliseconds) ? milliseconds / 1000 : 0;
     }
 
     let syncAbort = false;
