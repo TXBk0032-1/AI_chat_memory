@@ -30,8 +30,7 @@ nav { display: grid; gap: 3px; }
 .sidebar-section { margin-top: 28px; }
 .sidebar-section > p { margin: 0 10px 8px; color: #78858b; font-size: 10px; font-weight: 700; text-transform: uppercase; }
 .source-picker { position: relative; display: grid; isolation: isolate; }
-.source-highlight { position: absolute; z-index: 0; inset: 0 0 auto; height: 34px; border-radius: 5px; background: #3a484d; box-shadow: inset 3px 0 #f5f7f7, 0 4px 12px #10171922; transition: transform .32s cubic-bezier(.2, .9, .25, 1.12), box-shadow .24s ease; pointer-events: none; }
-.source-highlight.filtered { box-shadow: inset 3px 0 #71d0b2, 0 4px 12px #10171922; }
+.source-highlight { position: absolute; z-index: 0; inset: 0 0 auto; height: 34px; border-radius: 5px; background: color-mix(in srgb, var(--source-accent) 18%, #344147); box-shadow: inset 3px 0 var(--source-accent), 0 4px 12px #10171922; transition: transform .32s cubic-bezier(.2, .9, .25, 1.12), background-color .28s ease, box-shadow .28s ease; pointer-events: none; }
 .source-item { position: relative; z-index: 1; height: 34px; grid-template-columns: 18px 1fr; gap: 5px; padding: 0 10px; border-radius: 5px; font-size: 13px; transition: color .2s ease, transform .2s ease; }
 .source-item:hover { color: #f2f6f5; }
 .source-item.active { color: #fff; font-weight: 650; transform: translateX(2px); }
@@ -84,14 +83,18 @@ i.deepseek { background: #5273e6; } i.doubao { background: #e36f53; } i.kimi { b
 .alert-bar { min-height: 38px; display: flex; align-items: center; gap: 8px; padding: 0 26px; color: #8d302c; background: #fff0ef; border-bottom: 1px solid #f1c7c4; font-size: 12px; }
 .alert-bar span { flex: 1; }
 .alert-bar button { border: 0; display: grid; place-items: center; color: inherit; background: transparent; }
-.content-grid { min-height: 0; flex: 1; display: grid; grid-template-columns: minmax(440px, 42%) minmax(420px, 1fr); }
+.content-grid { min-height: 0; flex: 1; display: grid; grid-template-columns: minmax(340px, var(--session-pane-width, 520px)) 7px minmax(380px, 1fr); }
+.pane-resizer { position: relative; z-index: 5; cursor: col-resize; touch-action: none; background: #eef1f2; }
+.pane-resizer::after { content: ""; position: absolute; inset: 0 2px; background: #c6cccf; opacity: 0; transition: opacity .18s ease, inset .18s ease; }
+.pane-resizer:hover::after, .pane-resizer:focus-visible::after, .content-grid.resizing .pane-resizer::after { inset: 0 1px; opacity: 1; }
+.content-grid.resizing { cursor: col-resize; user-select: none; }
 .session-pane, .detail-pane { min-width: 0; min-height: 0; background: #fff; }
 .session-pane { overflow-y: auto; border-right: 1px solid #dfe3e5; }
 .table-head, .session-row { display: grid; grid-template-columns: minmax(190px, 1fr) 102px 108px; gap: 14px; align-items: center; }
 .table-head { position: sticky; top: 0; z-index: 2; height: 34px; padding: 0 18px; color: #8b9397; background: #f7f8f8; border-bottom: 1px solid #e1e4e6; font-size: 10px; font-weight: 650; text-transform: uppercase; }
-.session-row { width: 100%; min-height: 64px; padding: 9px 18px; border: 0; border-bottom: 1px solid #eceeef; color: #2d3336; background: #fff; text-align: left; }
+.session-row { position: relative; width: 100%; min-height: 64px; padding: 9px 18px; border: 0; border-bottom: 1px solid #eceeef; color: #2d3336; background: #fff; text-align: left; transition: color .2s ease, background-color .28s ease, box-shadow .32s cubic-bezier(.2, .8, .2, 1), transform .22s ease; }
 .session-row:hover { background: #f7f9f9; }
-.session-row.selected { background: #eaf4f1; box-shadow: inset 3px 0 #198169; }
+.session-row.selected { background: #eaf4f1; box-shadow: inset 3px 0 #198169, 0 5px 15px #173b3210; transform: translateX(2px); }
 .session-title { min-width: 0; }
 .session-title strong, .session-title small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .session-title strong { font-size: 13px; font-weight: 620; }
@@ -227,7 +230,7 @@ i.deepseek { background: #5273e6; } i.doubao { background: #e36f53; } i.kimi { b
 
 @media (max-width: 1050px) {
   .app-frame { grid-template-columns: 190px minmax(0, 1fr); }
-  .content-grid { grid-template-columns: minmax(360px, 44%) minmax(360px, 1fr); }
+  .content-grid { grid-template-columns: minmax(340px, var(--session-pane-width, 440px)) 7px minmax(360px, 1fr); }
   .table-head, .session-row { grid-template-columns: minmax(170px, 1fr) 92px; }
   .table-head span:last-child, .session-row time { display: none; }
 }
