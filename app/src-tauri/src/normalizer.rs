@@ -311,7 +311,13 @@ mod tests {
         .unwrap();
 
         assert_eq!(session.messages[0].metadata["search_result_count"], 1);
-        assert_eq!(session.messages[0].metadata["references"][0]["url"], "https://example.com");
-        assert_eq!(session.messages[0].metadata["references"][0]["snippet"], "Summary");
+        assert_eq!(
+            session.messages[0].metadata["references"][0]["url"],
+            "https://example.com"
+        );
+        assert_eq!(
+            session.messages[0].metadata["references"][0]["snippet"],
+            "Summary"
+        );
     }
 }
