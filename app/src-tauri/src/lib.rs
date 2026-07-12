@@ -11,11 +11,10 @@ use service::AppService;
 use settings::SettingsStore;
 use std::sync::Arc;
 use tauri::{
-    Manager, WindowEvent,
+    Emitter, Manager, WindowEvent,
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
-use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 use tokio::sync::RwLock;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -45,7 +44,8 @@ pub fn run() {
                     .map(std::path::PathBuf::from)
                     .unwrap_or(data_dir);
                 if settings_value.data_directory.is_none() {
-                    settings_value.data_directory = Some(database_dir.to_string_lossy().into_owned());
+                    settings_value.data_directory =
+                        Some(database_dir.to_string_lossy().into_owned());
                     settings.update(settings_value).await?;
                 }
                 tokio::fs::create_dir_all(&database_dir).await?;
@@ -128,35 +128,9 @@ pub fn run() {
                     crate::models::CloseBehavior::Exit => {}
                     crate::models::CloseBehavior::Ask => {
                         api.prevent_close();
-                        let window = window.clone();
-                        app.dialog()
-                            .message("以后关闭窗口时要隐藏到系统托盘吗？选择“退出应用”将直接结束本地同步服务。")
-                            .title("关闭窗口")
-                            .buttons(MessageDialogButtons::OkCancelCustom(
-                                "隐藏到托盘".into(),
-                                "退出应用".into(),
-                            ))
-                            .show(move |hide| {
-                                let app = window.app_handle().clone();
-                                tauri::async_runtime::spawn(async move {
-                                    let service = app.state::<AppService>();
-                                    let mut settings = service.settings.get().await;
-                                    settings.close_behavior = if hide {
-                                        crate::models::CloseBehavior::HideToTray
-                                    } else {
-                                        crate::models::CloseBehavior::Exit
-                                    };
-                                    if let Err(error) = service.settings.update(settings).await {
-                                        tracing::error!(%error, "failed to save close behavior");
-                                        return;
-                                    }
-                                    if hide {
-                                        let _ = window.hide();
-                                    } else {
-                                        app.exit(0);
-                                    }
-                                });
-                            });
+                        let _ = window.emit("close-behavior-requested", ());
+                        let _ = window.show();
+                        let _ = window.set_focus();
                     }
                 }
             }
@@ -170,8 +144,9 @@ pub fn run() {
             commands::save_settings,
             commands::rotate_secret,
             commands::get_api_status,
-            commands::migrate_legacy_database
-            ,commands::move_data_directory
+            commands::migrate_legacy_database,
+            commands::move_data_directory,
+            commands::confirm_close_behavior
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");

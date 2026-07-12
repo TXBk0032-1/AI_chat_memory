@@ -175,6 +175,24 @@ i.deepseek { background: #5273e6; } i.doubao { background: #e36f53; } i.kimi { b
 .secret-field { display: flex; align-items: center; gap: 7px; margin-top: 14px; }
 .secret-field code { min-width: 0; flex: 1; height: 34px; padding: 9px 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 1px solid #d4d9db; border-radius: 4px; color: #4b5458; background: #f7f8f8; font-size: 10px; }
 .settings-dialog > footer { min-height: 64px; display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 0 22px; border-top: 1px solid #e0e4e5; background: #fafbfb; }
+.close-prompt-backdrop { z-index: 30; }
+.close-prompt { width: min(470px, 90vw); overflow: hidden; border-radius: 7px; background: #fff; box-shadow: 0 22px 65px #0b11154d; }
+.close-prompt > header { padding: 22px 22px 18px; border-bottom: 1px solid #e3e6e7; }
+.close-prompt h2 { margin: 0; color: #252b2e; font-size: 17px; letter-spacing: 0; }
+.close-prompt header p { margin: 8px 0 0; color: #747d81; font-size: 11px; line-height: 1.6; }
+.close-options { display: grid; gap: 9px; padding: 18px 22px; }
+.close-options label { min-height: 64px; display: grid; grid-template-columns: 18px 1fr; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid #d5dadd; border-radius: 5px; background: #fff; cursor: pointer; transition: border-color .18s ease, background-color .18s ease, box-shadow .18s ease; }
+.close-options label:hover { border-color: #9eaaa7; background: #fafcfc; }
+.close-options label.selected { border-color: #3e927d; background: #f0f8f5; box-shadow: 0 0 0 2px #3e927d18; }
+.close-options input { width: 15px; height: 15px; accent-color: #167961; }
+.close-options strong, .close-options small { display: block; }
+.close-options strong { color: #30373a; font-size: 12px; }
+.close-options small { margin-top: 4px; color: #7b8488; font-size: 10px; line-height: 1.4; }
+.close-prompt > footer { min-height: 62px; display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 0 22px; border-top: 1px solid #e3e6e7; background: #fafbfb; }
+.settings-modal-enter-active .close-prompt { transition: opacity .22s ease-out, transform .22s cubic-bezier(.2, .8, .2, 1); }
+.settings-modal-leave-active .close-prompt { transition: opacity .16s ease-in, transform .16s ease-in; }
+.settings-modal-enter-from .close-prompt { opacity: 0; transform: translateY(12px) scale(.98); }
+.settings-modal-leave-to .close-prompt { opacity: 0; transform: translateY(7px) scale(.988); }
 .spinning { animation: spin .9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 

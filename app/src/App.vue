@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { open } from '@tauri-apps/plugin-dialog'
 import {
   Archive,
@@ -73,6 +74,8 @@ const dateFrom = ref('')
 const dateTo = ref('')
 const showFilters = ref(false)
 const showSettings = ref(false)
+const showClosePrompt = ref(false)
+const pendingCloseBehavior = ref<'hide_to_tray' | 'exit' | null>(null)
 const detailMode = ref<'conversation' | 'branches'>('conversation')
 const settings = ref<SettingsModel>({ setup_complete: false, secret_enabled: false, allowed_origins: [], migrated_legacy_database: false, close_behavior: 'ask', tray_click_behavior: 'show_menu' })
 const originText = ref('')
@@ -82,6 +85,7 @@ const apiStatus = ref<ApiStatus>({ state: 'starting' })
 const secretCopied = ref(false)
 const pageSize = 100
 let statusTimer: number | undefined
+let unlistenCloseRequest: UnlistenFn | undefined
 
 const filtered = computed(() => Boolean(query.value || platform.value || dateFrom.value || dateTo.value))
 const hasBranches = computed(() => selected.value?.messages.some((message) => metadata(message, 'source') === 'deepseek_export') ?? false)
@@ -214,6 +218,21 @@ async function changeDataDirectory() {
   }
 }
 
+async function confirmClose() {
+  if (!pendingCloseBehavior.value) return
+  try {
+    await invoke('confirm_close_behavior', { behavior: pendingCloseBehavior.value })
+    showClosePrompt.value = false
+  } catch (reason) {
+    error.value = String(reason)
+  }
+}
+
+function cancelClose() {
+  showClosePrompt.value = false
+  pendingCloseBehavior.value = null
+}
+
 function resetFilters() {
   query.value = ''
   platform.value = ''
@@ -269,12 +288,19 @@ function branchDepth(message: Message) {
 }
 
 onMounted(async () => {
+  unlistenCloseRequest = await listen('close-behavior-requested', () => {
+    pendingCloseBehavior.value = null
+    showClosePrompt.value = true
+  })
   settings.value = await invoke('get_settings')
   await refreshApiStatus()
   statusTimer = window.setInterval(refreshApiStatus, 3000)
   await loadSessions()
 })
-onBeforeUnmount(() => window.clearInterval(statusTimer))
+onBeforeUnmount(() => {
+  window.clearInterval(statusTimer)
+  unlistenCloseRequest?.()
+})
 </script>
 
 <template>
@@ -422,6 +448,19 @@ onBeforeUnmount(() => window.clearInterval(statusTimer))
           </section>
         </div>
         <footer><button class="secondary-button" @click="showSettings=false">取消</button><button class="primary-button" @click="saveSettings">保存设置</button></footer>
+        </section>
+      </div>
+    </Transition>
+
+    <Transition name="settings-modal">
+      <div v-if="showClosePrompt" class="dialog-backdrop close-prompt-backdrop">
+        <section class="close-prompt" role="alertdialog" aria-modal="true" aria-labelledby="close-prompt-title">
+          <header><h2 id="close-prompt-title">关闭对话归档</h2><p>请选择关闭窗口后要执行的操作。你的选择会保存，也可以稍后在设置中修改。</p></header>
+          <div class="close-options">
+            <label :class="{ selected: pendingCloseBehavior === 'hide_to_tray' }"><input type="checkbox" :checked="pendingCloseBehavior === 'hide_to_tray'" @change="pendingCloseBehavior='hide_to_tray'" /><span><strong>退出到托盘</strong><small>隐藏主窗口，本地同步服务继续运行。</small></span></label>
+            <label :class="{ selected: pendingCloseBehavior === 'exit' }"><input type="checkbox" :checked="pendingCloseBehavior === 'exit'" @change="pendingCloseBehavior='exit'" /><span><strong>完全关闭</strong><small>退出应用并停止本地同步服务。</small></span></label>
+          </div>
+          <footer><button class="secondary-button" @click="cancelClose">取消</button><button class="primary-button" :disabled="!pendingCloseBehavior" @click="confirmClose">确认</button></footer>
         </section>
       </div>
     </Transition>

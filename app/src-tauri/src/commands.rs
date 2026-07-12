@@ -2,7 +2,7 @@ use crate::{
     models::{ApiStatus, AppSettings, ImportResponse, SearchQuery, SessionDetail, SessionList},
     service::AppService,
 };
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 fn message(error: crate::error::AppError) -> String {
     error.to_string()
@@ -104,5 +104,29 @@ pub async fn move_data_directory(
     settings.data_directory = Some(directory.to_string_lossy().into_owned());
     service.settings.update(settings).await.map_err(message)?;
     app.request_restart();
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn confirm_close_behavior(
+    app: AppHandle,
+    service: State<'_, AppService>,
+    behavior: crate::models::CloseBehavior,
+) -> Result<(), String> {
+    if matches!(behavior, crate::models::CloseBehavior::Ask) {
+        return Err("请选择关闭后的行为".into());
+    }
+    let mut settings = service.settings.get().await;
+    settings.close_behavior = behavior.clone();
+    service.settings.update(settings).await.map_err(message)?;
+    match behavior {
+        crate::models::CloseBehavior::HideToTray => {
+            if let Some(window) = app.get_webview_window("main") {
+                window.hide().map_err(|error| error.to_string())?;
+            }
+        }
+        crate::models::CloseBehavior::Exit => app.exit(0),
+        crate::models::CloseBehavior::Ask => unreachable!(),
+    }
     Ok(())
 }
