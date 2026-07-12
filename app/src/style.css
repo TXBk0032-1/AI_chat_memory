@@ -12,7 +12,8 @@ button, input, textarea { font: inherit; }
 button { cursor: pointer; }
 button:disabled { cursor: default; opacity: .55; }
 
-.app-frame { min-height: 100vh; display: grid; grid-template-columns: 224px minmax(0, 1fr); background: #f4f5f6; }
+.app-frame { min-height: 100vh; display: grid; grid-template-columns: 224px minmax(0, 1fr); background: #f4f5f6; -webkit-user-select: none; user-select: none; }
+input, textarea, .message-block .markdown { -webkit-user-select: text; user-select: text; }
 .sidebar { height: 100vh; display: flex; flex-direction: column; padding: 20px 14px 14px; background: #20272c; color: #f7f8f8; border-right: 1px solid #161c20; }
 .identity { display: flex; align-items: center; gap: 11px; padding: 0 8px 22px; }
 .identity-mark { width: 34px; height: 34px; display: grid; place-items: center; color: #152a25; background: #71d0b2; border-radius: 7px; }
