@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { open } from '@tauri-apps/plugin-dialog'
@@ -67,6 +67,22 @@ const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true }).us
   engine: katex,
   delimiters: ['dollars', 'brackets'],
 })
+const defaultFence = markdown.renderer.rules.fence
+markdown.renderer.rules.fence = (tokens, index, options, environment, renderer) => {
+  const token = tokens[index]
+  if (token.info.trim().toLowerCase() === 'mermaid') {
+    return `<div class="mermaid-diagram" data-mermaid-source="${encodeURIComponent(token.content)}"><pre>${markdown.utils.escapeHtml(token.content)}</pre></div>`
+  }
+  return defaultFence ? defaultFence(tokens, index, options, environment, renderer) : renderer.renderToken(tokens, index, options)
+}
+let mermaidInstance: typeof import('mermaid')['default'] | null = null
+async function loadMermaid() {
+  if (!mermaidInstance) {
+    mermaidInstance = (await import('mermaid')).default
+    mermaidInstance.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'neutral', fontFamily: 'Inter, Segoe UI, Microsoft YaHei, sans-serif' })
+  }
+  return mermaidInstance
+}
 const sessions = ref<SessionSummary[]>([])
 const selected = ref<SessionDetail | null>(null)
 const loading = ref(false)
@@ -105,6 +121,7 @@ let unlistenCloseRequest: UnlistenFn | undefined
 let resizeStartX = 0
 let resizeStartWidth = 0
 let toastTimer: number | undefined
+let mermaidRenderVersion = 0
 
 const filtered = computed(() => Boolean(query.value || platform.value || dateFrom.value || dateTo.value))
 const hasBranches = computed(() => selected.value?.messages.some((message) => metadata(message, 'source') === 'deepseek_export') ?? false)
@@ -229,6 +246,29 @@ function toggleThinking(messageId: string) {
   if (next.has(messageId)) next.delete(messageId)
   else next.add(messageId)
   expandedThinking.value = next
+}
+
+async function renderMermaidDiagrams() {
+  const version = ++mermaidRenderVersion
+  await nextTick()
+  const diagrams = [...document.querySelectorAll<HTMLElement>('.mermaid-diagram:not([data-rendered])')]
+  if (!diagrams.length) return
+  const mermaid = await loadMermaid()
+  for (const [index, element] of diagrams.entries()) {
+    if (version !== mermaidRenderVersion) return
+    const source = decodeURIComponent(element.dataset.mermaidSource || '')
+    if (!source) continue
+    try {
+      const { svg, bindFunctions } = await mermaid.render(`mermaid-${version}-${index}`, source)
+      element.innerHTML = svg
+      element.dataset.rendered = 'true'
+      bindFunctions?.(element)
+    } catch (reason) {
+      element.classList.add('mermaid-error')
+      element.dataset.rendered = 'error'
+      element.title = String(reason)
+    }
+  }
 }
 
 async function removeSession() {
@@ -471,12 +511,13 @@ function render(value: string, message?: Message) {
       const index = Number(rawIndex)
       const reference = resolveReference(index, message)
       const url = referenceValue(reference, ['url', 'link', 'href'])
-      if (!/^https?:\/\//i.test(url)) return `<span class="reference-missing" title="该引用来源未随历史记录保存">[${index}]</span>`
+      if (!/^https?:\/\//i.test(url)) return `<span class="reference-marker reference-missing" title="该引用来源未随历史记录保存">${index}</span>`
       const title = referenceValue(reference, ['title', 'name']) || `引用 ${index}`
       const summary = referenceValue(reference, ['snippet', 'summary', 'description', 'content']).replace(/\s+/g, ' ').slice(0, 280)
       const safeTitle = markdown.utils.escapeHtml(title)
       const safeSummary = markdown.utils.escapeHtml(summary)
-      return `<a class="reference-link" href="${markdown.utils.escapeHtml(url)}" target="_blank" rel="noopener noreferrer" data-summary="${safeSummary}">${safeTitle}</a>`
+      const safeUrl = markdown.utils.escapeHtml(url)
+      return `<a class="reference-link reference-marker" href="${safeUrl}" target="_blank" rel="noopener noreferrer">${index}<span class="reference-preview"><strong>${safeTitle}</strong><span>${safeSummary || '暂无摘要'}</span><small>${safeUrl}</small></span></a>`
     }))
 }
 
@@ -512,6 +553,7 @@ onMounted(async () => {
   statusTimer = window.setInterval(refreshApiStatus, 3000)
   await loadSessions()
 })
+watch([selected, expandedThinking, detailMode], () => { void renderMermaidDiagrams() }, { flush: 'post' })
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', handleContextMenuKey)
   document.removeEventListener('scroll', hideContextMenu, true)
