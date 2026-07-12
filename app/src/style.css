@@ -127,6 +127,12 @@ i.deepseek { background: #5273e6; } i.doubao { background: #e36f53; } i.kimi { b
 
 .dialog-backdrop { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: 22px; background: #11181cb8; }
 .settings-dialog { width: min(650px, 92vw); max-height: 90vh; display: flex; flex-direction: column; border-radius: 7px; overflow: hidden; background: #fff; box-shadow: 0 18px 50px #1017193d; }
+.settings-modal-enter-active, .settings-modal-leave-active { transition: background-color .2s ease, opacity .2s ease; }
+.settings-modal-enter-active .settings-dialog { transition: opacity .22s ease-out, transform .22s cubic-bezier(.2, .8, .2, 1); }
+.settings-modal-leave-active .settings-dialog { transition: opacity .16s ease-in, transform .16s ease-in; }
+.settings-modal-enter-from, .settings-modal-leave-to { opacity: 0; background-color: #11181b00; }
+.settings-modal-enter-from .settings-dialog { opacity: 0; transform: translateY(14px) scale(.975); }
+.settings-modal-leave-to .settings-dialog { opacity: 0; transform: translateY(8px) scale(.985); }
 .settings-dialog > header { min-height: 76px; display: flex; align-items: center; padding: 0 22px; border-bottom: 1px solid #e0e4e5; }
 .settings-dialog > header > div { flex: 1; }
 .settings-dialog h2 { margin: 0; font-size: 17px; letter-spacing: 0; }
@@ -153,6 +159,10 @@ i.deepseek { background: #5273e6; } i.doubao { background: #e36f53; } i.kimi { b
 .settings-dialog > footer { min-height: 64px; display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 0 22px; border-top: 1px solid #e0e4e5; background: #fafbfb; }
 .spinning { animation: spin .9s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-modal-enter-active, .settings-modal-leave-active, .settings-modal-enter-active .settings-dialog, .settings-modal-leave-active .settings-dialog { transition-duration: .01ms; }
+}
 
 @media (max-width: 1050px) {
   .app-frame { grid-template-columns: 190px minmax(0, 1fr); }

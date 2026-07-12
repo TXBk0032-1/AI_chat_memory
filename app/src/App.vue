@@ -371,8 +371,9 @@ onBeforeUnmount(() => window.clearInterval(statusTimer))
       </section>
     </main>
 
-    <div v-if="showSettings" class="dialog-backdrop" @click.self="showSettings=false">
-      <section class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <Transition name="settings-modal">
+      <div v-if="showSettings" class="dialog-backdrop" @click.self="showSettings=false">
+        <section class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
         <header><div><h2 id="settings-title">应用设置</h2><p>配置本地同步服务和数据迁移</p></div><button class="icon-button" title="关闭" @click="showSettings=false"><X :size="18" /></button></header>
         <div class="settings-content">
           <section class="setting-group">
@@ -389,7 +390,8 @@ onBeforeUnmount(() => window.clearInterval(statusTimer))
           </section>
         </div>
         <footer><button class="secondary-button" @click="showSettings=false">取消</button><button class="primary-button" @click="saveSettings">保存设置</button></footer>
-      </section>
-    </div>
+        </section>
+      </div>
+    </Transition>
   </div>
 </template>
