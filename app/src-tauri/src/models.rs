@@ -88,6 +88,13 @@ pub enum ApiStatus {
     Failed(String),
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct DesktopApiStatus {
+    pub service: ApiStatus,
+    pub userscript_connected: bool,
+    pub last_userscript_request_at: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub setup_complete: bool,

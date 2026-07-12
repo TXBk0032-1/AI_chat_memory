@@ -1,5 +1,7 @@
 use crate::{
-    models::{ApiStatus, AppSettings, ImportResponse, SearchQuery, SessionDetail, SessionList},
+    models::{
+        AppSettings, DesktopApiStatus, ImportResponse, SearchQuery, SessionDetail, SessionList,
+    },
     service::AppService,
 };
 use tauri::{AppHandle, Manager, State};
@@ -66,8 +68,8 @@ pub async fn rotate_secret(service: State<'_, AppService>) -> Result<AppSettings
 }
 
 #[tauri::command]
-pub async fn get_api_status(service: State<'_, AppService>) -> Result<ApiStatus, String> {
-    Ok(service.api_status().await)
+pub async fn get_api_status(service: State<'_, AppService>) -> Result<DesktopApiStatus, String> {
+    Ok(service.desktop_api_status().await)
 }
 
 #[tauri::command]

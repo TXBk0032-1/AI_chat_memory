@@ -61,6 +61,7 @@ pub fn run() {
                     pool,
                     settings,
                     api_status: Arc::new(RwLock::new(crate::models::ApiStatus::Starting)),
+                    last_userscript_request_at: Arc::new(RwLock::new(None)),
                 })
             })?;
             if legacy.exists()

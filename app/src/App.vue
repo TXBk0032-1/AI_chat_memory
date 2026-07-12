@@ -57,7 +57,7 @@ type SettingsModel = {
   close_behavior: 'ask' | 'hide_to_tray' | 'exit'
   tray_click_behavior: 'show_menu' | 'open_window' | 'no_action'
 }
-type ApiStatus = { state: string; message?: string }
+type ApiStatus = { service: { state: string; message?: string }; userscript_connected: boolean; last_userscript_request_at?: number }
 
 const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true }).use(texmath, {
   engine: katex,
@@ -85,7 +85,7 @@ const settings = ref<SettingsModel>({ setup_complete: false, secret_enabled: fal
 const originText = ref('')
 const total = ref(0)
 const page = ref(0)
-const apiStatus = ref<ApiStatus>({ state: 'starting' })
+const apiStatus = ref<ApiStatus>({ service: { state: 'starting' }, userscript_connected: false })
 const secretCopied = ref(false)
 const sessionPaneWidth = ref(520)
 const resizingPanes = ref(false)
@@ -97,7 +97,7 @@ let resizeStartWidth = 0
 
 const filtered = computed(() => Boolean(query.value || platform.value || dateFrom.value || dateTo.value))
 const hasBranches = computed(() => selected.value?.messages.some((message) => metadata(message, 'source') === 'deepseek_export') ?? false)
-const statusLabel = computed(() => apiStatus.value.state === 'running' ? '同步服务运行中' : apiStatus.value.state === 'failed' ? '同步服务异常' : '同步服务启动中')
+const statusLabel = computed(() => apiStatus.value.service.state === 'running' ? '同步服务运行中' : apiStatus.value.service.state === 'failed' ? '同步服务异常' : '同步服务启动中')
 const sourceIndex = computed(() => ['', 'deepseek', 'doubao', 'kimi'].indexOf(platform.value))
 const sourceAccent = computed(() => ({ deepseek: '#4d8fe8', doubao: '#e05c62', kimi: '#39a878' } as Record<string, string>)[platform.value] ?? '#f5f7f7')
 
@@ -385,9 +385,9 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="sidebar-footer">
-        <div class="service-state" :class="apiStatus.state">
+        <div class="service-state" :class="apiStatus.service.state">
           <span class="status-dot"></span>
-          <div><strong>{{ statusLabel }}</strong><small>127.0.0.1:19820</small></div>
+          <div><strong>{{ statusLabel }}</strong><small :class="['connection-label', { connected: apiStatus.userscript_connected }]">{{ apiStatus.userscript_connected ? '网页脚本已连接' : '等待网页脚本连接' }}</small></div>
         </div>
         <button class="icon-button" title="设置" @click="openSettings"><Settings :size="18" /></button>
       </div>
@@ -417,9 +417,9 @@ onBeforeUnmount(() => {
         </section>
       </Transition>
 
-      <div v-if="error || apiStatus.state === 'failed'" class="alert-bar">
+      <div v-if="error || apiStatus.service.state === 'failed'" class="alert-bar">
         <Server :size="17" />
-        <span>{{ error || `本地同步服务启动失败：${apiStatus.message || '未知错误'}` }}</span>
+        <span>{{ error || `本地同步服务启动失败：${apiStatus.service.message || '未知错误'}` }}</span>
         <button title="关闭" @click="error=''"><X :size="15" /></button>
       </div>
 

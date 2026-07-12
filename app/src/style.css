@@ -46,6 +46,7 @@ i.deepseek { background: #5273e6; } i.doubao { background: #e36f53; } i.kimi { b
 .service-state strong, .service-state small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .service-state strong { color: #d6dcdf; font-size: 11px; font-weight: 600; }
 .service-state small { margin-top: 2px; color: #77858b; font-size: 9px; }
+.service-state .connection-label.connected { color: #55c49e; }
 
 .workspace { height: 100vh; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
 .workspace-header { min-height: 86px; display: flex; align-items: center; padding: 0 26px; background: #fff; border-bottom: 1px solid #dfe3e5; }

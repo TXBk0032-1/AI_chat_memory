@@ -50,6 +50,9 @@ async fn authorize(
     if let Err(reason) = authorization_error(request.method(), origin, &headers, &settings) {
         return (StatusCode::FORBIDDEN, reason).into_response();
     }
+    if request.method() != Method::OPTIONS {
+        service.mark_userscript_request().await;
+    }
     let mut response = if request.method() == Method::OPTIONS {
         StatusCode::NO_CONTENT.into_response()
     } else {

@@ -1,6 +1,11 @@
 use serde_json::Value;
 use sqlx::SqlitePool;
-use std::{io::Read, path::Path, sync::Arc};
+use std::{
+    io::Read,
+    path::Path,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use tokio::sync::RwLock;
 
 use crate::{
@@ -16,6 +21,7 @@ pub struct AppService {
     pub pool: SqlitePool,
     pub settings: Arc<SettingsStore>,
     pub api_status: Arc<RwLock<ApiStatus>>,
+    pub last_userscript_request_at: Arc<RwLock<Option<u64>>>,
 }
 
 impl AppService {
@@ -84,5 +90,25 @@ impl AppService {
     }
     pub async fn set_api_status(&self, status: ApiStatus) {
         *self.api_status.write().await = status;
+    }
+    pub async fn mark_userscript_request(&self) {
+        *self.last_userscript_request_at.write().await = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|value| value.as_secs());
+    }
+    pub async fn desktop_api_status(&self) -> DesktopApiStatus {
+        let last = *self.last_userscript_request_at.read().await;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|value| value.as_secs());
+        DesktopApiStatus {
+            service: self.api_status().await,
+            userscript_connected: last
+                .zip(now)
+                .is_some_and(|(last, now)| now.saturating_sub(last) <= 15),
+            last_userscript_request_at: last,
+        }
     }
 }
