@@ -33,11 +33,14 @@
     }
 
     function normalizeBridgeUrl(value) {
-        const url = new URL(String(value || '').trim());
+        let normalized = String(value || '').trim();
+        if (!normalized) throw new Error('后端地址不能为空');
+        if (!/^https?:\/\//i.test(normalized)) normalized = `http://${normalized}`;
+        const url = new URL(normalized);
         if (!['http:', 'https:'].includes(url.protocol)) {
             throw new Error('后端地址仅支持 http:// 或 https://');
         }
-        return url.toString().replace(/\/$/, '');
+        return url.toString().replace(/\/+$/, '');
     }
 
     function getBridgeUrl() {
@@ -49,7 +52,33 @@
         }
     }
 
-    const BRIDGE_URL = getBridgeUrl();
+    const CONFIGURED_BRIDGE_URL = getBridgeUrl();
+    let activeBridgeUrl = CONFIGURED_BRIDGE_URL;
+
+    function bridgeUrlCandidates() {
+        const candidates = [CONFIGURED_BRIDGE_URL];
+        if (!/\/api\/v1$/i.test(CONFIGURED_BRIDGE_URL)) {
+            candidates.push(`${CONFIGURED_BRIDGE_URL}/api/v1`);
+        }
+        return candidates;
+    }
+
+    function secretError() {
+        const configured = String(GM_getValue(BRIDGE_SECRET_KEY, '') || '').trim();
+        return configured
+            ? '本地服务密钥错误，请通过脚本菜单重新填写密钥'
+            : '本地服务已启用密钥验证，请通过脚本菜单填写密钥';
+    }
+
+    async function bridgeFetch(path, options = {}) {
+        const response = await fetch(`${activeBridgeUrl}${path}`, options);
+        if (response.status === 403) {
+            const reason = await response.clone().text();
+            if (reason === 'invalid_secret') throw new Error(secretError());
+            throw new Error(`本地服务拒绝请求: ${reason || '安全策略不匹配'}`);
+        }
+        return response;
+    }
     const PLATFORM = location.hostname.includes('deepseek') ? 'deepseek'
                    : location.hostname.includes('doubao') ? 'doubao'
                    : location.hostname.includes('kimi') ? 'kimi' : null;
@@ -403,7 +432,7 @@
                   : new DoubaoAdapter();
 
     GM_registerMenuCommand('设置后端地址', () => {
-        const value = prompt('请输入后端 API 地址（包含 /api/v1）', BRIDGE_URL);
+        const value = prompt('请输入后端地址；可省略 http:// 和 /api/v1', CONFIGURED_BRIDGE_URL);
         if (value === null) return;
         try {
             GM_setValue(BRIDGE_URL_KEY, normalizeBridgeUrl(value));
@@ -432,10 +461,25 @@
     }
 
     async function checkServer() {
-        try {
-            const res = await fetch(`${BRIDGE_URL}/health`, { headers: bridgeHeaders() });
-            return res.ok;
-        } catch { return false; }
+        let lastError = null;
+        for (const candidate of bridgeUrlCandidates()) {
+            try {
+                const res = await fetch(`${candidate}/health`, { headers: bridgeHeaders() });
+                if (res.status === 403) {
+                    const reason = await res.text();
+                    if (reason === 'invalid_secret') return { state: 'secret', message: secretError() };
+                    return { state: 'rejected', message: `本地服务拒绝请求: ${reason || '安全策略不匹配'}` };
+                }
+                if (res.ok) {
+                    activeBridgeUrl = candidate;
+                    return { state: 'connected', url: candidate };
+                }
+                lastError = `HTTP ${res.status}`;
+            } catch (error) {
+                lastError = error.message || String(error);
+            }
+        }
+        return { state: 'unreachable', message: lastError || '无法连接本地服务' };
     }
 
     async function fetchSessionsIncremental(lastUpdatedAt) {
@@ -502,7 +546,7 @@
         if (syncAbort) { ui.setStatus('⏹ 已停止'); return; }
 
         ui.setProgress(4, 4, '导入官方 ZIP...');
-        const importRes = await fetch(`${BRIDGE_URL}/sessions/import/deepseek-export`, {
+        const importRes = await bridgeFetch('/sessions/import/deepseek-export', {
             method: 'POST',
             headers: bridgeHeaders({ 'Content-Type': 'application/zip' }),
             body: zipBlob
@@ -537,7 +581,7 @@
         if (syncAbort) { ui.setStatus('⏹ 已停止'); return; }
 
         ui.setProgress(1, 1, '推送到服务端...');
-        const res = await fetch(`${BRIDGE_URL}/sessions/import`, {
+        const res = await bridgeFetch('/sessions/import', {
             method: 'POST',
             headers: bridgeHeaders({ 'Content-Type': 'application/json' }),
             body: JSON.stringify({ platform: PLATFORM, sessions: results })
@@ -548,8 +592,9 @@
     }
 
     async function syncToServer(fullSync = false) {
-        if (!await checkServer()) {
-            ui.setStatus('❌ 服务未运行');
+        const connection = await checkServer();
+        if (connection.state !== 'connected') {
+            ui.setStatus(`❌ ${connection.message}`);
             return;
         }
         syncAbort = false;
@@ -566,7 +611,7 @@
                 ui.setStatus(`全量获取 ${sessions.length} 个会话`);
             } else {
                 ui.setStatus('查询同步状态...');
-                const statusRes = await fetch(`${BRIDGE_URL}/sessions/sync-status?platform=${PLATFORM}`, { headers: bridgeHeaders() });
+                const statusRes = await bridgeFetch(`/sessions/sync-status?platform=${PLATFORM}`, { headers: bridgeHeaders() });
                 if (!statusRes.ok) throw new Error(`同步状态查询失败 ${statusRes.status}: ${await statusRes.text()}`);
                 const { last_updated_at } = await statusRes.json();
 
@@ -621,9 +666,14 @@
 
         // 服务状态轮询
         async function pollServer() {
-            const ok = await checkServer();
+            const connection = await checkServer();
+            const ok = connection.state === 'connected';
             const el = srvSpan();
-            if (el) { el.textContent = ok ? '🟢 运行中' : '🔴 未连接'; el.style.color = ok ? '#4caf50' : '#f44336'; }
+            if (el) {
+                el.textContent = ok ? '🟢 运行中' : connection.state === 'secret' ? '🟡 请填写密钥' : '🔴 连接失败';
+                el.title = ok ? activeBridgeUrl : connection.message;
+                el.style.color = ok ? '#4caf50' : connection.state === 'secret' ? '#ffb300' : '#f44336';
+            }
             const sb = syncBtn(), fb = fullBtn();
             if (sb && sb.dataset.syncing !== '1') { sb.disabled = !ok; sb.style.opacity = ok ? '1' : '0.5'; }
             if (fb && !fb.dataset.fullDisabled) { fb.disabled = !ok; fb.style.opacity = ok ? '1' : '0.5'; }
