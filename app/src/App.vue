@@ -83,6 +83,10 @@ async function loadMermaid() {
   }
   return mermaidInstance
 }
+
+function normalizeMermaidSource(source: string) {
+  return source.replace(/[“”]/g, '"')
+}
 const sessions = ref<SessionSummary[]>([])
 const selected = ref<SessionDetail | null>(null)
 const loading = ref(false)
@@ -256,7 +260,7 @@ async function renderMermaidDiagrams() {
   const mermaid = await loadMermaid()
   for (const [index, element] of diagrams.entries()) {
     if (version !== mermaidRenderVersion) return
-    const source = decodeURIComponent(element.dataset.mermaidSource || '')
+    const source = normalizeMermaidSource(decodeURIComponent(element.dataset.mermaidSource || ''))
     if (!source) continue
     try {
       const { svg, bindFunctions } = await mermaid.render(`mermaid-${version}-${index}`, source)
