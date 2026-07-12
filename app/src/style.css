@@ -9,7 +9,8 @@
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 760px; min-height: 100vh; overflow: hidden; }
 button, input, textarea, select { font: inherit; }
-button { cursor: pointer; }
+button { cursor: pointer; outline: none; }
+button:focus-visible, [role="button"]:focus-visible, summary:focus-visible { outline: 2px solid #258a72; outline-offset: 2px; }
 button:disabled { cursor: default; opacity: .55; }
 
 .app-frame { min-height: 100vh; display: grid; grid-template-columns: 224px minmax(0, 1fr); background: #f4f5f6; -webkit-user-select: none; user-select: none; }
