@@ -87,14 +87,19 @@ const total = ref(0)
 const page = ref(0)
 const apiStatus = ref<ApiStatus>({ state: 'starting' })
 const secretCopied = ref(false)
+const sessionPaneWidth = ref(520)
+const resizingPanes = ref(false)
 const pageSize = 100
 let statusTimer: number | undefined
 let unlistenCloseRequest: UnlistenFn | undefined
+let resizeStartX = 0
+let resizeStartWidth = 0
 
 const filtered = computed(() => Boolean(query.value || platform.value || dateFrom.value || dateTo.value))
 const hasBranches = computed(() => selected.value?.messages.some((message) => metadata(message, 'source') === 'deepseek_export') ?? false)
 const statusLabel = computed(() => apiStatus.value.state === 'running' ? '同步服务运行中' : apiStatus.value.state === 'failed' ? '同步服务异常' : '同步服务启动中')
 const sourceIndex = computed(() => ['', 'deepseek', 'doubao', 'kimi'].indexOf(platform.value))
+const sourceAccent = computed(() => ({ deepseek: '#4d8fe8', doubao: '#e05c62', kimi: '#39a878' } as Record<string, string>)[platform.value] ?? '#f5f7f7')
 
 function epoch(value: string, end = false) {
   if (!value) return null
@@ -260,6 +265,24 @@ function selectPlatform(value: string) {
   void loadSessions()
 }
 
+function startPaneResize(event: PointerEvent) {
+  resizingPanes.value = true
+  resizeStartX = event.clientX
+  resizeStartWidth = sessionPaneWidth.value
+  const target = event.currentTarget as HTMLElement
+  target.setPointerCapture(event.pointerId)
+}
+
+function resizePanes(event: PointerEvent) {
+  if (!resizingPanes.value) return
+  const workspaceWidth = document.querySelector<HTMLElement>('.content-grid')?.clientWidth ?? 1000
+  sessionPaneWidth.value = Math.min(Math.max(resizeStartWidth + event.clientX - resizeStartX, 340), workspaceWidth - 380)
+}
+
+function stopPaneResize() {
+  resizingPanes.value = false
+}
+
 async function refreshApiStatus() {
   apiStatus.value = await invoke('get_api_status')
 }
@@ -332,7 +355,7 @@ onBeforeUnmount(() => {
       <div class="sidebar-section">
         <p>来源</p>
         <div class="source-picker">
-          <span :class="['source-highlight', { filtered: platform !== '' }]" :style="{ transform: `translateY(${sourceIndex * 34}px)` }"></span>
+          <span class="source-highlight" :style="{ transform: `translateY(${sourceIndex * 34}px)`, '--source-accent': sourceAccent }"></span>
           <button :class="['source-item', { active: platform === '' }]" @click="selectPlatform('')"><i class="all"></i><span>全部来源</span></button>
           <button :class="['source-item', { active: platform === 'deepseek' }]" @click="selectPlatform('deepseek')"><i class="deepseek"></i><span>DeepSeek</span></button>
           <button :class="['source-item', { active: platform === 'doubao' }]" @click="selectPlatform('doubao')"><i class="doubao"></i><span>豆包</span></button>
@@ -379,7 +402,7 @@ onBeforeUnmount(() => {
         <button title="关闭" @click="error=''"><X :size="15" /></button>
       </div>
 
-      <section class="content-grid">
+      <section :class="['content-grid', { resizing: resizingPanes }]" :style="{ '--session-pane-width': `${sessionPaneWidth}px` }">
         <div class="session-pane">
           <div class="table-head"><span>对话</span><span>来源</span><span>更新时间</span></div>
           <div v-if="loading && !sessions.length" class="loading-state"><LoaderCircle class="spinning" :size="22" /><span>正在读取对话</span></div>
@@ -400,6 +423,8 @@ onBeforeUnmount(() => {
           </div>
           <button v-if="sessions.length < total" class="load-more" :disabled="loading" @click="loadMore">{{ loading ? '加载中' : `加载更多（剩余 ${total-sessions.length} 条）` }}</button>
         </div>
+
+        <div class="pane-resizer" role="separator" aria-label="调整对话列表和内容宽度" aria-orientation="vertical" tabindex="0" @pointerdown="startPaneResize" @pointermove="resizePanes" @pointerup="stopPaneResize" @pointercancel="stopPaneResize"></div>
 
         <aside class="detail-pane">
           <div v-if="detailLoading" class="loading-state"><LoaderCircle class="spinning" :size="22" /><span>正在打开对话</span></div>
