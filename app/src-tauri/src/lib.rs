@@ -33,17 +33,33 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
+            let executable_dir = std::env::current_exe()
+                .ok()
+                .and_then(|path| path.parent().map(std::path::Path::to_path_buf));
+            let working_dir = std::env::current_dir().ok();
             let settings_path = data_dir.join("settings.json");
             let legacy = find_legacy_database();
             let service = tauri::async_runtime::block_on(async {
                 let settings = Arc::new(SettingsStore::load(settings_path).await?);
                 let mut settings_value = settings.get().await;
-                let database_dir = settings_value
+                let configured_dir = settings_value
                     .data_directory
                     .as_ref()
-                    .map(std::path::PathBuf::from)
-                    .unwrap_or(data_dir);
-                if settings_value.data_directory.is_none() {
+                    .map(std::path::PathBuf::from);
+                let database_dir = resolve_database_directory(
+                    configured_dir.as_deref(),
+                    executable_dir.as_deref(),
+                    working_dir.as_deref(),
+                    &data_dir,
+                );
+                if configured_dir.as_ref().is_some_and(|path| path != &database_dir) {
+                    tracing::warn!(configured=?configured_dir, fallback=%database_dir.display(), "configured data directory was unavailable; using fallback database directory");
+                }
+                if settings_value
+                    .data_directory
+                    .as_deref()
+                    .is_none_or(|path| std::path::Path::new(path) != database_dir)
+                {
                     settings_value.data_directory =
                         Some(database_dir.to_string_lossy().into_owned());
                     settings.update(settings_value).await?;
@@ -152,6 +168,25 @@ pub fn run() {
         .expect("error while running Tauri application");
 }
 
+fn resolve_database_directory(
+    configured: Option<&std::path::Path>,
+    executable_dir: Option<&std::path::Path>,
+    working_dir: Option<&std::path::Path>,
+    app_data_dir: &std::path::Path,
+) -> std::path::PathBuf {
+    if let Some(path) = configured
+        && path.is_dir()
+    {
+        return path.to_path_buf();
+    }
+    for path in [executable_dir, working_dir].into_iter().flatten() {
+        if path.join("chat_memory.db").is_file() {
+            return path.to_path_buf();
+        }
+    }
+    app_data_dir.to_path_buf()
+}
+
 fn find_legacy_database() -> std::path::PathBuf {
     let start = std::env::current_dir().unwrap_or_default();
     for directory in start.ancestors() {
@@ -165,4 +200,42 @@ fn find_legacy_database() -> std::path::PathBuf {
         }
     }
     start.join("legacy/python/server/data/chat_memory.db")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_database_directory;
+
+    #[test]
+    fn falls_back_to_runtime_database_when_configured_directory_is_missing() {
+        let root = std::env::temp_dir().join(format!("acm-path-test-{}", std::process::id()));
+        let runtime = root.join("runtime");
+        let app_data = root.join("app-data");
+        std::fs::create_dir_all(&runtime).unwrap();
+        std::fs::write(runtime.join("chat_memory.db"), []).unwrap();
+        let resolved = resolve_database_directory(
+            Some(&root.join("missing")),
+            Some(&runtime),
+            None,
+            &app_data,
+        );
+        assert_eq!(resolved, runtime);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn uses_app_data_when_no_existing_runtime_database_is_found() {
+        let root = std::env::temp_dir().join(format!("acm-path-empty-{}", std::process::id()));
+        let runtime = root.join("runtime");
+        let app_data = root.join("app-data");
+        std::fs::create_dir_all(&runtime).unwrap();
+        let resolved = resolve_database_directory(
+            Some(&root.join("missing")),
+            Some(&runtime),
+            None,
+            &app_data,
+        );
+        assert_eq!(resolved, app_data);
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
