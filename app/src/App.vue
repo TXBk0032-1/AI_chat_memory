@@ -83,6 +83,7 @@ let statusTimer: number | undefined
 const filtered = computed(() => Boolean(query.value || platform.value || dateFrom.value || dateTo.value))
 const hasBranches = computed(() => selected.value?.messages.some((message) => metadata(message, 'source') === 'deepseek_export') ?? false)
 const statusLabel = computed(() => apiStatus.value.state === 'running' ? '同步服务运行中' : apiStatus.value.state === 'failed' ? '同步服务异常' : '同步服务启动中')
+const sourceIndex = computed(() => ['', 'deepseek', 'doubao', 'kimi'].indexOf(platform.value))
 
 function epoch(value: string, end = false) {
   if (!value) return null
@@ -207,6 +208,11 @@ function resetFilters() {
   void loadSessions()
 }
 
+function selectPlatform(value: string) {
+  platform.value = value
+  void loadSessions()
+}
+
 async function refreshApiStatus() {
   apiStatus.value = await invoke('get_api_status')
 }
@@ -272,10 +278,13 @@ onBeforeUnmount(() => window.clearInterval(statusTimer))
 
       <div class="sidebar-section">
         <p>来源</p>
-        <button :class="['source-item', { active: platform === '' }]" @click="platform=''; loadSessions()"><i class="all"></i><span>全部来源</span></button>
-        <button :class="['source-item', { active: platform === 'deepseek' }]" @click="platform='deepseek'; loadSessions()"><i class="deepseek"></i><span>DeepSeek</span></button>
-        <button :class="['source-item', { active: platform === 'doubao' }]" @click="platform='doubao'; loadSessions()"><i class="doubao"></i><span>豆包</span></button>
-        <button :class="['source-item', { active: platform === 'kimi' }]" @click="platform='kimi'; loadSessions()"><i class="kimi"></i><span>Kimi</span></button>
+        <div class="source-picker">
+          <span class="source-highlight" :style="{ transform: `translateY(${sourceIndex * 34}px)` }"></span>
+          <button :class="['source-item', { active: platform === '' }]" @click="selectPlatform('')"><i class="all"></i><span>全部来源</span></button>
+          <button :class="['source-item', { active: platform === 'deepseek' }]" @click="selectPlatform('deepseek')"><i class="deepseek"></i><span>DeepSeek</span></button>
+          <button :class="['source-item', { active: platform === 'doubao' }]" @click="selectPlatform('doubao')"><i class="doubao"></i><span>豆包</span></button>
+          <button :class="['source-item', { active: platform === 'kimi' }]" @click="selectPlatform('kimi')"><i class="kimi"></i><span>Kimi</span></button>
+        </div>
       </div>
 
       <div class="sidebar-footer">
