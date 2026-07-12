@@ -32,8 +32,10 @@ deepseek_data-*.zip
 Thumbs.db
 .idea/
 .vscode/
+.vs/
 *.code-workspace
 
 # Local assistant settings
 .claude/settings.local.json
 hatch-runs/
+artifacts/

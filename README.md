@@ -54,3 +54,26 @@ userscript 请求必须满足：
 ## 旧服务
 
 旧 FastAPI 服务位于 `legacy/python/`。它仅作为迁移对照，不是桌面应用运行依赖。
+
+## 本地 CI/CD
+
+轻量流水线位于 `scripts/ci.ps1`，不依赖 Docker 或外部 CI 服务：
+
+```powershell
+# 格式、Clippy、userscript 语法、Vue 类型和前端构建
+.\scripts\ci.ps1 check
+
+# check + Rust 测试
+.\scripts\ci.ps1 test
+
+# test + Windows MSI/EXE + SHA-256 manifest
+.\scripts\ci.ps1 release
+```
+
+release 产物输出到 `artifacts/`。使用 `-Clean` 可清理 Rust/前端缓存后执行完全构建。
+
+可选启用 pre-push hook：
+
+```powershell
+.\scripts\install-hooks.ps1
+```
