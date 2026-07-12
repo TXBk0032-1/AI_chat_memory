@@ -12,6 +12,7 @@ import {
   Check,
   ChevronDown,
   Clipboard,
+  Copy,
   FileArchive,
   GitBranch,
   Inbox,
@@ -97,6 +98,7 @@ const searchHitIndex = ref(-1)
 const loopSearch = ref(false)
 const toast = ref('')
 const activeBranchNode = ref('')
+const contextMenu = ref({ visible: false, x: 0, y: 0, selectedText: '' })
 const pageSize = 100
 let statusTimer: number | undefined
 let unlistenCloseRequest: UnlistenFn | undefined
@@ -355,6 +357,50 @@ function stopPaneResize() {
   resizingPanes.value = false
 }
 
+function hideContextMenu() {
+  contextMenu.value.visible = false
+}
+
+function handleContextMenu(event: MouseEvent) {
+  event.preventDefault()
+  const target = event.target as HTMLElement
+  if (!target.closest('.detail-pane')) {
+    hideContextMenu()
+    return
+  }
+  const selectedText = window.getSelection()?.toString().trim() || ''
+  const menuWidth = 176
+  const menuHeight = 82
+  contextMenu.value = {
+    visible: true,
+    x: Math.min(event.clientX, window.innerWidth - menuWidth - 8),
+    y: Math.min(event.clientY, window.innerHeight - menuHeight - 8),
+    selectedText,
+  }
+}
+
+async function copyContextSelection() {
+  if (!contextMenu.value.selectedText) return
+  await navigator.clipboard.writeText(contextMenu.value.selectedText)
+  hideContextMenu()
+}
+
+function selectConversationContent() {
+  const conversation = document.querySelector('.conversation-view')
+  if (!conversation) return
+  const range = document.createRange()
+  range.selectNodeContents(conversation)
+  const selection = window.getSelection()
+  selection?.removeAllRanges()
+  selection?.addRange(range)
+  contextMenu.value.selectedText = selection?.toString().trim() || ''
+  hideContextMenu()
+}
+
+function handleContextMenuKey(event: KeyboardEvent) {
+  if (event.key === 'Escape') hideContextMenu()
+}
+
 async function openMarkdownLink(event: MouseEvent) {
   const link = (event.target as HTMLElement).closest<HTMLAnchorElement>('a.reference-link')
   if (!link || !/^https?:\/\//i.test(link.href)) return
@@ -455,6 +501,8 @@ function branchDepth(message: Message) {
 }
 
 onMounted(async () => {
+  window.addEventListener('keydown', handleContextMenuKey)
+  document.addEventListener('scroll', hideContextMenu, true)
   unlistenCloseRequest = await listen('close-behavior-requested', () => {
     pendingCloseBehavior.value = null
     showClosePrompt.value = true
@@ -465,6 +513,8 @@ onMounted(async () => {
   await loadSessions()
 })
 onBeforeUnmount(() => {
+  window.removeEventListener('keydown', handleContextMenuKey)
+  document.removeEventListener('scroll', hideContextMenu, true)
   window.clearInterval(statusTimer)
   window.clearTimeout(toastTimer)
   unlistenCloseRequest?.()
@@ -472,7 +522,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="app-frame">
+  <div class="app-frame" @click="hideContextMenu" @contextmenu="handleContextMenu">
     <aside class="sidebar">
       <div class="identity">
         <div class="identity-mark"><MessageSquareText :size="20" /></div>
@@ -675,6 +725,10 @@ onBeforeUnmount(() => {
         </section>
       </div>
     </Transition>
+    <div v-if="contextMenu.visible" class="context-menu" role="menu" :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }" @click.stop>
+      <button role="menuitem" :disabled="!contextMenu.selectedText" @click="copyContextSelection"><Copy :size="15" /><span>复制</span><kbd>Ctrl+C</kbd></button>
+      <button role="menuitem" @click="selectConversationContent"><Clipboard :size="15" /><span>全选对话内容</span><kbd>Ctrl+A</kbd></button>
+    </div>
     <Transition name="toast"><div v-if="toast" class="toast" role="status">{{ toast }}</div></Transition>
   </div>
 </template>
