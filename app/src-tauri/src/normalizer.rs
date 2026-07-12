@@ -15,12 +15,23 @@ fn text(value: Option<&Value>) -> Option<String> {
     })
 }
 
-fn iso_to_timestamp(value: Option<&Value>) -> Option<String> {
+fn normalize_timestamp(value: Option<&Value>) -> Option<String> {
     let raw = text(value)?;
-    DateTime::parse_from_rfc3339(&raw)
-        .map(|dt| format!("{}", dt.timestamp_millis() as f64 / 1000.0))
+    let trimmed = raw.trim();
+    if let Ok(number) = trimmed.parse::<f64>() {
+        if !number.is_finite() {
+            return None;
+        }
+        let seconds = if number.abs() > 100_000_000_000.0 {
+            number / 1000.0
+        } else {
+            number
+        };
+        return Some(seconds.to_string());
+    }
+    DateTime::parse_from_rfc3339(trimmed)
+        .map(|dt| (dt.timestamp_millis() as f64 / 1000.0).to_string())
         .ok()
-        .or(Some(raw))
 }
 
 pub fn normalize_session(platform: &str, raw: &Value) -> Result<NormalizedSession> {
@@ -32,8 +43,8 @@ pub fn normalize_session(platform: &str, raw: &Value) -> Result<NormalizedSessio
         "deepseek" => (
             text(obj.get("id")),
             text(obj.get("title")).unwrap_or_default(),
-            text(obj.get("created_at")),
-            text(obj.get("updated_at")),
+            normalize_timestamp(obj.get("created_at")),
+            normalize_timestamp(obj.get("updated_at")),
             normalize_deepseek_messages(conversation),
         ),
         "doubao" => {
@@ -41,23 +52,23 @@ pub fn normalize_session(platform: &str, raw: &Value) -> Result<NormalizedSessio
             (
                 conv.and_then(|v| text(v.get("conversation_id"))),
                 conv.and_then(|v| text(v.get("name"))).unwrap_or_default(),
-                conv.and_then(|v| text(v.get("create_time"))),
-                conv.and_then(|v| text(v.get("update_time"))),
+                conv.and_then(|v| normalize_timestamp(v.get("create_time"))),
+                conv.and_then(|v| normalize_timestamp(v.get("update_time"))),
                 normalize_doubao_messages(conversation),
             )
         }
         "kimi" => (
             text(obj.get("id")),
             text(obj.get("name")).unwrap_or_default(),
-            iso_to_timestamp(obj.get("createTime")),
-            iso_to_timestamp(obj.get("updateTime")),
+            normalize_timestamp(obj.get("createTime")),
+            normalize_timestamp(obj.get("updateTime")),
             normalize_kimi_messages(conversation),
         ),
         _ => (
             text(obj.get("id")).or_else(|| Some(Uuid::new_v4().to_string())),
             text(obj.get("title")).unwrap_or_default(),
-            text(obj.get("created_at")),
-            text(obj.get("updated_at")),
+            normalize_timestamp(obj.get("created_at")),
+            normalize_timestamp(obj.get("updated_at")),
             normalize_generic_messages(obj.get("messages")),
         ),
     };
@@ -87,7 +98,7 @@ fn normalize_deepseek_messages(raw: Option<&Value>) -> Vec<NormalizedMessage> {
                 .filter_map(|f| f.get("content").and_then(Value::as_str)).collect::<Vec<_>>().join("\n");
             Some(NormalizedMessage { role: m.get("role").and_then(Value::as_str).unwrap_or("user").into(), content,
                 metadata: json!({"model": m.get("model"), "thinking": if thinking.is_empty() { Value::Null } else { Value::String(thinking) }}),
-                created_at: text(m.get("inserted_at")).or_else(|| text(m.get("create_time"))) })
+                created_at: normalize_timestamp(m.get("inserted_at")).or_else(|| normalize_timestamp(m.get("create_time"))) })
         }).collect()
 }
 
@@ -112,7 +123,7 @@ fn normalize_doubao_messages(raw: Option<&Value>) -> Vec<NormalizedMessage> {
                 .into(),
                 content,
                 metadata: json!({}),
-                created_at: text(m.get("create_time")),
+                created_at: normalize_timestamp(m.get("create_time")),
             }
         })
         .collect()
@@ -140,7 +151,7 @@ fn normalize_kimi_messages(raw: Option<&Value>) -> Vec<NormalizedMessage> {
                 role: role.into(),
                 content,
                 metadata: json!({}),
-                created_at: iso_to_timestamp(m.get("createTime")),
+                created_at: normalize_timestamp(m.get("createTime")),
             })
         })
         .collect()
@@ -159,7 +170,7 @@ fn normalize_generic_messages(raw: Option<&Value>) -> Vec<NormalizedMessage> {
                     .unwrap_or_default()
                     .into(),
                 metadata: m.get("metadata").cloned().unwrap_or_else(|| json!({})),
-                created_at: text(m.get("created_at")),
+                created_at: normalize_timestamp(m.get("created_at")),
             })
         })
         .collect()
@@ -225,7 +236,7 @@ pub fn normalize_deepseek_export(raw: &Value) -> Result<NormalizedSession> {
                 "fragment_types":types,"tool_types":tool_types,"search_result_count":search_result_count,
                 "model":message.get("model"),"files":message.get("files").cloned().unwrap_or_else(||json!([])),
                 "thinking":if thinking.is_empty(){Value::Null}else{Value::String(thinking.join("\n"))}}),
-            created_at: text(message.get("inserted_at")).or_else(|| text(raw.get("updated_at"))).or_else(|| text(raw.get("inserted_at"))) });
+            created_at: normalize_timestamp(message.get("inserted_at")).or_else(|| normalize_timestamp(raw.get("updated_at"))).or_else(|| normalize_timestamp(raw.get("inserted_at"))) });
     }
     messages.sort_by(|a, b| a.created_at.cmp(&b.created_at));
     let platform_session_id = text(raw.get("id"))
@@ -236,8 +247,9 @@ pub fn normalize_deepseek_export(raw: &Value) -> Result<NormalizedSession> {
         platform: "deepseek".into(),
         platform_session_id,
         title: text(raw.get("title")).unwrap_or_default(),
-        created_at: text(raw.get("inserted_at")),
-        updated_at: text(raw.get("updated_at")).or_else(|| text(raw.get("inserted_at"))),
+        created_at: normalize_timestamp(raw.get("inserted_at")),
+        updated_at: normalize_timestamp(raw.get("updated_at"))
+            .or_else(|| normalize_timestamp(raw.get("inserted_at"))),
         imported_at: Utc::now().to_rfc3339(),
         messages,
         raw_data: raw.clone(),
@@ -258,5 +270,21 @@ mod tests {
         assert_eq!(doubao.messages[0].role, "assistant");
         let kimi = normalize_session("kimi", &json!({"id":"k","name":"K","_conversation":{"messages":[{"role":"user","blocks":[{"text":{"content":"q"}}]}]}})).unwrap();
         assert_eq!(kimi.messages[0].content, "q");
+    }
+
+    #[test]
+    fn normalizes_iso_seconds_and_milliseconds_to_epoch_seconds() {
+        assert_eq!(
+            normalize_timestamp(Some(&json!("2026-06-08T01:35:06.105+08:00"))),
+            Some("1780853706.105".into())
+        );
+        assert_eq!(
+            normalize_timestamp(Some(&json!(1780853706105_i64))),
+            Some("1780853706.105".into())
+        );
+        assert_eq!(
+            normalize_timestamp(Some(&json!(1780853706.105))),
+            Some("1780853706.105".into())
+        );
     }
 }

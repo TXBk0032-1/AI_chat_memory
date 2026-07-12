@@ -26,7 +26,29 @@ pub async fn connect(path: &Path) -> Result<SqlitePool> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);")
         .execute(&pool)
         .await?;
+    normalize_stored_timestamps(&pool).await?;
     Ok(pool)
+}
+
+const TIMESTAMP_SQL: &str = "CASE WHEN trim({column}) <> '' AND trim({column}) NOT GLOB '*[^0-9.]*' THEN ROUND(CASE WHEN CAST({column} AS REAL) > 100000000000 THEN CAST({column} AS REAL) / 1000.0 ELSE CAST({column} AS REAL) END, 3) ELSE ROUND((julianday({column}) - 2440587.5) * 86400.0, 3) END";
+
+fn timestamp_expression(column: &str) -> String {
+    TIMESTAMP_SQL.replace("{column}", column)
+}
+
+async fn normalize_stored_timestamps(pool: &SqlitePool) -> Result<()> {
+    for (table, column) in [
+        ("sessions", "created_at"),
+        ("sessions", "updated_at"),
+        ("messages", "created_at"),
+    ] {
+        let expression = timestamp_expression(column);
+        let sql = format!(
+            "UPDATE {table} SET {column} = CAST(({expression}) AS TEXT) WHERE {column} IS NOT NULL AND ({expression}) IS NOT NULL"
+        );
+        sqlx::query(&sql).execute(pool).await?;
+    }
+    Ok(())
 }
 
 pub async fn copy_database(source: &Path, destination: &Path) -> Result<()> {
@@ -79,18 +101,44 @@ pub async fn import_sessions(pool: &SqlitePool, sessions: &[NormalizedSession]) 
 }
 
 pub async fn search(pool: &SqlitePool, query: &SearchQuery) -> Result<Vec<SessionSummary>> {
-    let rows = sqlx::query("SELECT s.id, s.platform, s.platform_session_id, s.title, s.created_at, s.updated_at, s.imported_at FROM sessions s WHERE (? IS NULL OR s.platform = ?) AND (? IS NULL OR (CASE WHEN s.updated_at GLOB '[0-9]*' THEN CAST(s.updated_at AS REAL) ELSE CAST(strftime('%s', s.updated_at) AS REAL) END) >= CAST(? AS REAL)) AND (? IS NULL OR (CASE WHEN s.updated_at GLOB '[0-9]*' THEN CAST(s.updated_at AS REAL) ELSE CAST(strftime('%s', s.updated_at) AS REAL) END) <= CAST(? AS REAL)) AND (? IS NULL OR s.title LIKE '%' || ? || '%' OR EXISTS (SELECT 1 FROM messages m WHERE m.session_id=s.id AND m.content LIKE '%' || ? || '%')) ORDER BY (CASE WHEN s.updated_at GLOB '[0-9]*' THEN CAST(s.updated_at AS REAL) ELSE CAST(strftime('%s', s.updated_at) AS REAL) END) DESC LIMIT ? OFFSET ?")
-        .bind(&query.platform).bind(&query.platform).bind(&query.date_from).bind(&query.date_from)
-        .bind(&query.date_to).bind(&query.date_to).bind(&query.q).bind(&query.q).bind(&query.q)
-        .bind(query.limit.unwrap_or(500).clamp(1, 1000)).bind(query.offset.unwrap_or(0).max(0)).fetch_all(pool).await?;
+    let timestamp = timestamp_expression("s.updated_at");
+    let sql = format!(
+        "SELECT s.id, s.platform, s.platform_session_id, s.title, s.created_at, s.updated_at, s.imported_at FROM sessions s WHERE (? IS NULL OR s.platform = ?) AND (? IS NULL OR ({timestamp}) >= CAST(? AS REAL)) AND (? IS NULL OR ({timestamp}) <= CAST(? AS REAL)) AND (? IS NULL OR s.title LIKE '%' || ? || '%' OR EXISTS (SELECT 1 FROM messages m WHERE m.session_id=s.id AND m.content LIKE '%' || ? || '%')) ORDER BY ({timestamp}) DESC LIMIT ? OFFSET ?"
+    );
+    let rows = sqlx::query(&sql)
+        .bind(&query.platform)
+        .bind(&query.platform)
+        .bind(&query.date_from)
+        .bind(&query.date_from)
+        .bind(&query.date_to)
+        .bind(&query.date_to)
+        .bind(&query.q)
+        .bind(&query.q)
+        .bind(&query.q)
+        .bind(query.limit.unwrap_or(500).clamp(1, 1000))
+        .bind(query.offset.unwrap_or(0).max(0))
+        .fetch_all(pool)
+        .await?;
     Ok(rows.into_iter().map(summary_from_row).collect())
 }
 
 pub async fn count(pool: &SqlitePool, query: &SearchQuery) -> Result<i64> {
-    Ok(sqlx::query_scalar("SELECT COUNT(*) FROM sessions s WHERE (? IS NULL OR s.platform = ?) AND (? IS NULL OR (CASE WHEN s.updated_at GLOB '[0-9]*' THEN CAST(s.updated_at AS REAL) ELSE CAST(strftime('%s', s.updated_at) AS REAL) END) >= CAST(? AS REAL)) AND (? IS NULL OR (CASE WHEN s.updated_at GLOB '[0-9]*' THEN CAST(s.updated_at AS REAL) ELSE CAST(strftime('%s', s.updated_at) AS REAL) END) <= CAST(? AS REAL)) AND (? IS NULL OR s.title LIKE '%' || ? || '%' OR EXISTS (SELECT 1 FROM messages m WHERE m.session_id=s.id AND m.content LIKE '%' || ? || '%'))")
-        .bind(&query.platform).bind(&query.platform).bind(&query.date_from).bind(&query.date_from)
-        .bind(&query.date_to).bind(&query.date_to).bind(&query.q).bind(&query.q).bind(&query.q)
-        .fetch_one(pool).await?)
+    let timestamp = timestamp_expression("s.updated_at");
+    let sql = format!(
+        "SELECT COUNT(*) FROM sessions s WHERE (? IS NULL OR s.platform = ?) AND (? IS NULL OR ({timestamp}) >= CAST(? AS REAL)) AND (? IS NULL OR ({timestamp}) <= CAST(? AS REAL)) AND (? IS NULL OR s.title LIKE '%' || ? || '%' OR EXISTS (SELECT 1 FROM messages m WHERE m.session_id=s.id AND m.content LIKE '%' || ? || '%'))"
+    );
+    Ok(sqlx::query_scalar(&sql)
+        .bind(&query.platform)
+        .bind(&query.platform)
+        .bind(&query.date_from)
+        .bind(&query.date_from)
+        .bind(&query.date_to)
+        .bind(&query.date_to)
+        .bind(&query.q)
+        .bind(&query.q)
+        .bind(&query.q)
+        .fetch_one(pool)
+        .await?)
 }
 
 pub async fn migrate_from_legacy(pool: &SqlitePool, source: &Path) -> Result<()> {
@@ -159,12 +207,12 @@ pub async fn delete_session(pool: &SqlitePool, id: &str) -> Result<()> {
 }
 
 pub async fn sync_status(pool: &SqlitePool, platform: &str) -> Result<Option<String>> {
-    Ok(
-        sqlx::query_scalar("SELECT MAX(updated_at) FROM sessions WHERE platform = ?")
-            .bind(platform)
-            .fetch_one(pool)
-            .await?,
+    Ok(sqlx::query_scalar(
+        "SELECT CAST(MAX(CAST(updated_at AS REAL)) AS TEXT) FROM sessions WHERE platform = ?",
     )
+    .bind(platform)
+    .fetch_one(pool)
+    .await?)
 }
 
 fn summary_from_row(row: sqlx::sqlite::SqliteRow) -> SessionSummary {
@@ -263,5 +311,53 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn normalizes_mixed_timestamps_and_filters_by_epoch_range() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE sessions (id TEXT PRIMARY KEY, platform TEXT NOT NULL, platform_session_id TEXT NOT NULL, title TEXT, created_at TEXT, updated_at TEXT, imported_at TEXT, raw_data TEXT, UNIQUE(platform, platform_session_id)); CREATE TABLE messages (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT, metadata TEXT, created_at TEXT, seq INTEGER);")
+            .execute(&pool)
+            .await
+            .unwrap();
+        for (id, updated_at) in [
+            ("iso", "2026-06-08T01:35:06.105+08:00"),
+            ("seconds", "1780853706.105"),
+            ("milliseconds", "1780853706105"),
+            ("older", "1749317706.105"),
+        ] {
+            sqlx::query("INSERT INTO sessions (id, platform, platform_session_id, title, updated_at) VALUES (?, 'deepseek', ?, ?, ?)")
+                .bind(id)
+                .bind(id)
+                .bind(id)
+                .bind(updated_at)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        normalize_stored_timestamps(&pool).await.unwrap();
+        let rows = search(
+            &pool,
+            &SearchQuery {
+                date_from: Some("1780853706".into()),
+                date_to: Some("1780853707".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().all(|row| row.id != "older"));
+        let distinct: i64 = sqlx::query_scalar(
+            "SELECT COUNT(DISTINCT updated_at) FROM sessions WHERE id != 'older'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(distinct, 1);
     }
 }
