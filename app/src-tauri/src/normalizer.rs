@@ -199,6 +199,7 @@ pub fn normalize_deepseek_export(raw: &Value) -> Result<NormalizedSession> {
         let mut types = Vec::new();
         let mut tool_types = Vec::new();
         let mut search_result_count = 0usize;
+        let mut references = Vec::new();
         for fragment in &fragments {
             let kind = fragment
                 .get("type")
@@ -222,6 +223,9 @@ pub fn normalize_deepseek_export(raw: &Value) -> Result<NormalizedSession> {
                 .get("results")
                 .and_then(Value::as_array)
                 .map_or(0, Vec::len);
+            if let Some(results) = fragment.get("results").and_then(Value::as_array) {
+                references.extend(results.iter().cloned());
+            }
         }
         let (role, content) = if !user.is_empty() {
             ("user", user.join("\n"))
@@ -233,7 +237,7 @@ pub fn normalize_deepseek_export(raw: &Value) -> Result<NormalizedSession> {
         messages.push(NormalizedMessage { role: role.into(), content,
             metadata: json!({"source":"deepseek_export","node_id":node.get("id").and_then(Value::as_str).unwrap_or(node_id),
                 "parent_node_id":node.get("parent"),"children_node_ids":node.get("children").cloned().unwrap_or_else(|| json!([])),
-                "fragment_types":types,"tool_types":tool_types,"search_result_count":search_result_count,
+                "fragment_types":types,"tool_types":tool_types,"search_result_count":search_result_count,"references":references,
                 "model":message.get("model"),"files":message.get("files").cloned().unwrap_or_else(||json!([])),
                 "thinking":if thinking.is_empty(){Value::Null}else{Value::String(thinking.join("\n"))}}),
             created_at: normalize_timestamp(message.get("inserted_at")).or_else(|| normalize_timestamp(raw.get("updated_at"))).or_else(|| normalize_timestamp(raw.get("inserted_at"))) });
@@ -286,5 +290,28 @@ mod tests {
             normalize_timestamp(Some(&json!(1780853706.105))),
             Some("1780853706.105".into())
         );
+    }
+
+    #[test]
+    fn preserves_deepseek_export_references_for_rendering() {
+        let session = normalize_deepseek_export(&json!({
+            "id": "conversation",
+            "mapping": {
+                "node": {
+                    "id": "node",
+                    "message": {
+                        "fragments": [
+                            {"type": "RESPONSE", "content": "answer [reference:0]"},
+                            {"type": "SEARCH", "results": [{"title": "Source", "url": "https://example.com", "snippet": "Summary"}]}
+                        ]
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(session.messages[0].metadata["search_result_count"], 1);
+        assert_eq!(session.messages[0].metadata["references"][0]["url"], "https://example.com");
+        assert_eq!(session.messages[0].metadata["references"][0]["snippet"], "Summary");
     }
 }

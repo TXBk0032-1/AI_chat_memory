@@ -61,7 +61,7 @@ type ApiStatus = { state: string; message?: string }
 
 const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true }).use(texmath, {
   engine: katex,
-  delimiters: 'dollars',
+  delimiters: ['dollars', 'brackets'],
 })
 const sessions = ref<SessionSummary[]>([])
 const selected = ref<SessionDetail | null>(null)
@@ -305,8 +305,29 @@ function roleName(value: string) {
   return value === 'user' ? '你' : value === 'assistant' ? 'AI' : value
 }
 
-function render(value: string) {
-  return markdown.render(value || '')
+function referenceValue(reference: unknown, keys: string[]) {
+  if (!reference || typeof reference !== 'object') return ''
+  const item = reference as Record<string, unknown>
+  for (const key of keys) if (typeof item[key] === 'string') return item[key] as string
+  return ''
+}
+
+function render(value: string, message?: Message) {
+  const references = Array.isArray(message?.metadata?.references) ? message.metadata.references : []
+  const source = (value || '')
+    .replace(/\\\[([\s\S]*?)\\\]/g, (_, formula) => `\n$$${formula}$$\n`)
+    .replace(/\\\((.+?)\\\)/g, (_, formula) => `$${formula}$`)
+  return markdown.render(source).replace(/\[reference:(\d+)\]/gi, (label, rawIndex) => {
+      const index = Number(rawIndex)
+      const reference = references[index] ?? references[index - 1]
+      const url = referenceValue(reference, ['url', 'link', 'href'])
+      if (!/^https?:\/\//i.test(url)) return label
+      const title = referenceValue(reference, ['title', 'name']) || `引用 ${index}`
+      const summary = referenceValue(reference, ['snippet', 'summary', 'description', 'content']).replace(/\s+/g, ' ').slice(0, 280)
+      const safeTitle = markdown.utils.escapeHtml(title)
+      const safeSummary = markdown.utils.escapeHtml(summary)
+      return `<a class="reference-link" href="${markdown.utils.escapeHtml(url)}" target="_blank" rel="noopener noreferrer" data-summary="${safeSummary}">${safeTitle}</a>`
+    })
 }
 
 function metadata(message: Message, key: string) {
@@ -452,7 +473,7 @@ onBeforeUnmount(() => {
                       <button class="thinking-toggle" :aria-expanded="expandedThinking.has(message.id)" @click="toggleThinking(message.id)">查看思考过程</button>
                       <div class="thinking-reveal" :aria-hidden="!expandedThinking.has(message.id)"><div><div class="markdown" v-html="render(metadata(message, 'thinking') || '')"></div></div></div>
                     </section>
-                    <div class="markdown" v-html="render(message.content)"></div>
+                    <div class="markdown" v-html="render(message.content, message)"></div>
                   </article>
                 </div>
                 <div v-else key="branches" class="branch-list">
