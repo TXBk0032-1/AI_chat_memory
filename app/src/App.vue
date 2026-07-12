@@ -279,7 +279,7 @@ onBeforeUnmount(() => window.clearInterval(statusTimer))
       <div class="sidebar-section">
         <p>来源</p>
         <div class="source-picker">
-          <span class="source-highlight" :style="{ transform: `translateY(${sourceIndex * 34}px)` }"></span>
+          <span :class="['source-highlight', { filtered: platform !== '' }]" :style="{ transform: `translateY(${sourceIndex * 34}px)` }"></span>
           <button :class="['source-item', { active: platform === '' }]" @click="selectPlatform('')"><i class="all"></i><span>全部来源</span></button>
           <button :class="['source-item', { active: platform === 'deepseek' }]" @click="selectPlatform('deepseek')"><i class="deepseek"></i><span>DeepSeek</span></button>
           <button :class="['source-item', { active: platform === 'doubao' }]" @click="selectPlatform('doubao')"><i class="doubao"></i><span>豆包</span></button>
@@ -307,16 +307,18 @@ onBeforeUnmount(() => window.clearInterval(statusTimer))
 
       <section class="control-bar">
         <label class="search-field"><Search :size="17" /><input v-model="query" placeholder="搜索标题和消息内容" @keyup.enter="loadSessions()" /><button v-if="query" title="清除搜索" @click="query=''; loadSessions()"><X :size="15" /></button></label>
-        <button :class="['filter-button', { active: showFilters || filtered }]" @click="showFilters=!showFilters"><CalendarDays :size="16" />日期筛选<ChevronDown :size="14" /></button>
+        <button :class="['filter-button', { active: showFilters || filtered, expanded: showFilters }]" :aria-expanded="showFilters" @click="showFilters=!showFilters"><CalendarDays :size="16" />日期筛选<ChevronDown class="filter-chevron" :size="14" /></button>
         <span class="result-count">{{ sessions.length }} / {{ total }}</span>
       </section>
 
-      <section v-if="showFilters" class="filter-panel">
-        <label><span>开始日期</span><input v-model="dateFrom" type="date" /></label>
-        <label><span>结束日期</span><input v-model="dateTo" type="date" /></label>
-        <button class="primary-button compact" @click="loadSessions()">应用</button>
-        <button v-if="filtered" class="text-button" @click="resetFilters">清除条件</button>
-      </section>
+      <Transition name="filter-panel">
+        <section v-if="showFilters" class="filter-panel">
+          <label><span>开始日期</span><input v-model="dateFrom" type="date" /></label>
+          <label><span>结束日期</span><input v-model="dateTo" type="date" /></label>
+          <button class="primary-button compact" @click="loadSessions()">应用</button>
+          <button v-if="filtered" class="text-button" @click="resetFilters">清除条件</button>
+        </section>
+      </Transition>
 
       <div v-if="error || apiStatus.state === 'failed'" class="alert-bar">
         <Server :size="17" />

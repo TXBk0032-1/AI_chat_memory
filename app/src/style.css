@@ -29,7 +29,8 @@ nav { display: grid; gap: 3px; }
 .sidebar-section { margin-top: 28px; }
 .sidebar-section > p { margin: 0 10px 8px; color: #78858b; font-size: 10px; font-weight: 700; text-transform: uppercase; }
 .source-picker { position: relative; display: grid; isolation: isolate; }
-.source-highlight { position: absolute; z-index: 0; inset: 0 0 auto; height: 34px; border-radius: 5px; background: #3a484d; box-shadow: inset 3px 0 #71d0b2, 0 4px 12px #10171922; transition: transform .32s cubic-bezier(.2, .9, .25, 1.12); pointer-events: none; }
+.source-highlight { position: absolute; z-index: 0; inset: 0 0 auto; height: 34px; border-radius: 5px; background: #3a484d; box-shadow: inset 3px 0 #f5f7f7, 0 4px 12px #10171922; transition: transform .32s cubic-bezier(.2, .9, .25, 1.12), box-shadow .24s ease; pointer-events: none; }
+.source-highlight.filtered { box-shadow: inset 3px 0 #71d0b2, 0 4px 12px #10171922; }
 .source-item { position: relative; z-index: 1; height: 34px; grid-template-columns: 18px 1fr; gap: 5px; padding: 0 10px; border-radius: 5px; font-size: 13px; transition: color .2s ease, transform .2s ease; }
 .source-item:hover { color: #f2f6f5; }
 .source-item.active { color: #fff; font-weight: 650; transform: translateX(2px); }
@@ -68,8 +69,14 @@ i.deepseek { background: #5273e6; } i.doubao { background: #e36f53; } i.kimi { b
 .search-field button { width: 26px; height: 26px; padding: 0; border: 0; display: grid; place-items: center; color: #899196; background: transparent; }
 .filter-button { border: 1px solid #cbd1d4; color: #555d62; background: #fff; }
 .filter-button.active { color: #126c56; border-color: #72a99b; background: #f2f8f6; }
+.filter-chevron { transition: transform .24s cubic-bezier(.2, .8, .2, 1); }
+.filter-button.expanded .filter-chevron { transform: rotate(180deg); }
 .result-count { margin-left: auto; color: #8a9296; font-size: 11px; }
 .filter-panel { display: flex; align-items: flex-end; gap: 10px; padding: 12px 26px; background: #fafbfb; border-bottom: 1px solid #dfe3e5; }
+.filter-panel-enter-active { overflow: hidden; transition: max-height .26s cubic-bezier(.2, .8, .2, 1), opacity .2s ease, transform .26s cubic-bezier(.2, .8, .2, 1), padding .26s ease; }
+.filter-panel-leave-active { overflow: hidden; transition: max-height .2s ease-in, opacity .16s ease, transform .2s ease-in, padding .2s ease; }
+.filter-panel-enter-from, .filter-panel-leave-to { max-height: 0; padding-top: 0; padding-bottom: 0; opacity: 0; transform: translateY(-8px); }
+.filter-panel-enter-to, .filter-panel-leave-from { max-height: 80px; opacity: 1; transform: translateY(0); }
 .filter-panel label span { display: block; margin-bottom: 5px; color: #6f777b; font-size: 10px; font-weight: 650; }
 .filter-panel input { height: 32px; padding: 0 8px; border: 1px solid #cbd1d4; border-radius: 4px; background: #fff; color: #30363a; font-size: 12px; }
 .text-button { border: 0; color: #55716a; background: transparent; }
@@ -167,7 +174,7 @@ i.deepseek { background: #5273e6; } i.doubao { background: #e36f53; } i.kimi { b
 @keyframes spin { to { transform: rotate(360deg); } }
 
 @media (prefers-reduced-motion: reduce) {
-  .settings-modal-enter-active, .settings-modal-leave-active, .settings-modal-enter-active .settings-dialog, .settings-modal-leave-active .settings-dialog, .source-highlight, .source-item, .source-item i { transition-duration: .01ms; }
+  .settings-modal-enter-active, .settings-modal-leave-active, .settings-modal-enter-active .settings-dialog, .settings-modal-leave-active .settings-dialog, .source-highlight, .source-item, .source-item i, .filter-chevron, .filter-panel-enter-active, .filter-panel-leave-active { transition-duration: .01ms; }
 }
 
 @media (max-width: 1050px) {
