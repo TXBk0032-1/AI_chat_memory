@@ -81,6 +81,14 @@ pub struct SessionList {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "state", content = "message", rename_all = "snake_case")]
+pub enum ApiStatus {
+    Starting,
+    Running,
+    Failed(String),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub setup_complete: bool,
     pub secret_enabled: bool,

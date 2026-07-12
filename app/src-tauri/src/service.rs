@@ -1,6 +1,7 @@
 use serde_json::Value;
 use sqlx::SqlitePool;
-use std::{io::Read, sync::Arc};
+use std::{io::Read, path::Path, sync::Arc};
+use tokio::sync::RwLock;
 
 use crate::{
     database,
@@ -14,6 +15,7 @@ use crate::{
 pub struct AppService {
     pub pool: SqlitePool,
     pub settings: Arc<SettingsStore>,
+    pub api_status: Arc<RwLock<ApiStatus>>,
 }
 
 impl AppService {
@@ -29,10 +31,21 @@ impl AppService {
         })
     }
     pub async fn import_deepseek_zip(&self, bytes: Vec<u8>) -> Result<ImportResponse> {
+        if bytes.len() > 128 * 1024 * 1024 {
+            return Err(AppError::InvalidData("ZIP 文件超过 128 MB 限制".into()));
+        }
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
         let mut file = archive
             .by_name("conversations.json")
             .map_err(|_| AppError::InvalidData("ZIP 中缺少 conversations.json".into()))?;
+        if file.size() > 512 * 1024 * 1024 {
+            return Err(AppError::InvalidData(
+                "conversations.json 解压后超过 512 MB 限制".into(),
+            ));
+        }
+        if file.compressed_size() > 0 && file.size() / file.compressed_size() > 200 {
+            return Err(AppError::InvalidData("ZIP 压缩比异常".into()));
+        }
         let mut content = String::new();
         file.read_to_string(&mut content)?;
         let conversations: Vec<Value> = serde_json::from_str(&content)?;
@@ -46,8 +59,8 @@ impl AppService {
         })
     }
     pub async fn list(&self, query: SearchQuery) -> Result<SessionList> {
+        let total = database::count(&self.pool, &query).await? as usize;
         let sessions = database::search(&self.pool, &query).await?;
-        let total = sessions.len();
         Ok(SessionList { sessions, total })
     }
     pub async fn detail(&self, id: &str) -> Result<SessionDetail> {
@@ -58,5 +71,18 @@ impl AppService {
     }
     pub async fn sync_status(&self, platform: &str) -> Result<Option<String>> {
         database::sync_status(&self.pool, platform).await
+    }
+    pub async fn migrate_legacy(&self, path: &Path) -> Result<()> {
+        database::migrate_from_legacy(&self.pool, path).await?;
+        let mut settings = self.settings.get().await;
+        settings.migrated_legacy_database = true;
+        self.settings.update(settings).await?;
+        Ok(())
+    }
+    pub async fn api_status(&self) -> ApiStatus {
+        self.api_status.read().await.clone()
+    }
+    pub async fn set_api_status(&self, status: ApiStatus) {
+        *self.api_status.write().await = status;
     }
 }

@@ -1,5 +1,5 @@
 use rand::RngCore;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tokio::sync::RwLock;
 
 use crate::{
@@ -15,7 +15,16 @@ pub struct SettingsStore {
 impl SettingsStore {
     pub async fn load(path: PathBuf) -> Result<Self> {
         let value = if path.exists() {
-            serde_json::from_slice(&tokio::fs::read(&path).await?)?
+            match serde_json::from_slice(&tokio::fs::read(&path).await?) {
+                Ok(value) => value,
+                Err(error) => {
+                    let corrupt = path
+                        .with_extension(format!("corrupt-{}.json", chrono::Utc::now().timestamp()));
+                    tokio::fs::rename(&path, &corrupt).await?;
+                    tracing::error!(%error, path=%corrupt.display(), "settings were corrupt; restored defaults");
+                    AppSettings::default()
+                }
+            }
         } else {
             AppSettings::default()
         };
@@ -38,7 +47,20 @@ impl SettingsStore {
         if let Some(parent) = self.path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
-        tokio::fs::write(&self.path, serde_json::to_vec_pretty(&value)?).await?;
+        let temporary = self.path.with_extension("json.tmp");
+        let backup = self.path.with_extension("json.bak");
+        tokio::fs::write(&temporary, serde_json::to_vec_pretty(&value)?).await?;
+        if self.path.exists() {
+            let _ = tokio::fs::remove_file(&backup).await;
+            tokio::fs::rename(&self.path, &backup).await?;
+        }
+        if let Err(error) = tokio::fs::rename(&temporary, &self.path).await {
+            if backup.exists() {
+                let _ = tokio::fs::rename(&backup, &self.path).await;
+            }
+            return Err(error.into());
+        }
+        let _ = tokio::fs::remove_file(&backup).await;
         *self.value.write().await = value.clone();
         Ok(value)
     }
@@ -48,26 +70,6 @@ impl SettingsStore {
         value.secret = Some(generate_secret());
         self.update(value).await
     }
-}
-
-pub async fn migrate_legacy_database(
-    legacy: &Path,
-    target: &Path,
-    store: &SettingsStore,
-) -> Result<bool> {
-    let mut settings = store.get().await;
-    if settings.migrated_legacy_database || target.exists() || !legacy.exists() {
-        return Ok(false);
-    }
-    if let Some(parent) = target.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    let temp = target.with_extension("db.migrating");
-    tokio::fs::copy(legacy, &temp).await?;
-    tokio::fs::rename(&temp, target).await?;
-    settings.migrated_legacy_database = true;
-    store.update(settings).await?;
-    Ok(true)
 }
 
 fn validate_origins(origins: &[String]) -> Result<()> {
@@ -93,27 +95,21 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn migrates_once_without_touching_source() {
+    async fn recovers_from_corrupt_settings() {
         let root = std::env::temp_dir().join(format!("acm-test-{}", std::process::id()));
         let _ = tokio::fs::remove_dir_all(&root).await;
         tokio::fs::create_dir_all(&root).await.unwrap();
-        let legacy = root.join("legacy.db");
-        let target = root.join("data/app.db");
-        tokio::fs::write(&legacy, b"sqlite-data").await.unwrap();
-        let store = SettingsStore::load(root.join("settings.json"))
-            .await
-            .unwrap();
-        assert!(
-            migrate_legacy_database(&legacy, &target, &store)
-                .await
+        let path = root.join("settings.json");
+        tokio::fs::write(&path, b"not-json").await.unwrap();
+        let store = SettingsStore::load(path).await.unwrap();
+        assert!(!store.get().await.setup_complete);
+        assert!(root.read_dir().unwrap().any(|entry| {
+            entry
                 .unwrap()
-        );
-        assert_eq!(tokio::fs::read(&legacy).await.unwrap(), b"sqlite-data");
-        assert!(
-            !migrate_legacy_database(&legacy, &target, &store)
-                .await
-                .unwrap()
-        );
+                .file_name()
+                .to_string_lossy()
+                .starts_with("settings.corrupt-")
+        }));
         let _ = tokio::fs::remove_dir_all(root).await;
     }
 }

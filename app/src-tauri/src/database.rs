@@ -1,5 +1,5 @@
 use sqlx::{
-    Row, SqlitePool,
+    Acquire, Row, SqlitePool,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
 };
 use std::path::Path;
@@ -58,11 +58,41 @@ pub async fn import_sessions(pool: &SqlitePool, sessions: &[NormalizedSession]) 
 }
 
 pub async fn search(pool: &SqlitePool, query: &SearchQuery) -> Result<Vec<SessionSummary>> {
-    let rows = sqlx::query("SELECT s.id, s.platform, s.platform_session_id, s.title, s.created_at, s.updated_at, s.imported_at FROM sessions s WHERE (? IS NULL OR s.platform = ?) AND (? IS NULL OR s.updated_at >= ?) AND (? IS NULL OR s.updated_at <= ?) AND (? IS NULL OR s.title LIKE '%' || ? || '%' OR EXISTS (SELECT 1 FROM messages m WHERE m.session_id=s.id AND m.content LIKE '%' || ? || '%')) ORDER BY s.updated_at DESC LIMIT ? OFFSET ?")
+    let rows = sqlx::query("SELECT s.id, s.platform, s.platform_session_id, s.title, s.created_at, s.updated_at, s.imported_at FROM sessions s WHERE (? IS NULL OR s.platform = ?) AND (? IS NULL OR (CASE WHEN s.updated_at GLOB '[0-9]*' THEN CAST(s.updated_at AS REAL) ELSE CAST(strftime('%s', s.updated_at) AS REAL) END) >= CAST(? AS REAL)) AND (? IS NULL OR (CASE WHEN s.updated_at GLOB '[0-9]*' THEN CAST(s.updated_at AS REAL) ELSE CAST(strftime('%s', s.updated_at) AS REAL) END) <= CAST(? AS REAL)) AND (? IS NULL OR s.title LIKE '%' || ? || '%' OR EXISTS (SELECT 1 FROM messages m WHERE m.session_id=s.id AND m.content LIKE '%' || ? || '%')) ORDER BY (CASE WHEN s.updated_at GLOB '[0-9]*' THEN CAST(s.updated_at AS REAL) ELSE CAST(strftime('%s', s.updated_at) AS REAL) END) DESC LIMIT ? OFFSET ?")
         .bind(&query.platform).bind(&query.platform).bind(&query.date_from).bind(&query.date_from)
         .bind(&query.date_to).bind(&query.date_to).bind(&query.q).bind(&query.q).bind(&query.q)
         .bind(query.limit.unwrap_or(500).clamp(1, 1000)).bind(query.offset.unwrap_or(0).max(0)).fetch_all(pool).await?;
     Ok(rows.into_iter().map(summary_from_row).collect())
+}
+
+pub async fn count(pool: &SqlitePool, query: &SearchQuery) -> Result<i64> {
+    Ok(sqlx::query_scalar("SELECT COUNT(*) FROM sessions s WHERE (? IS NULL OR s.platform = ?) AND (? IS NULL OR (CASE WHEN s.updated_at GLOB '[0-9]*' THEN CAST(s.updated_at AS REAL) ELSE CAST(strftime('%s', s.updated_at) AS REAL) END) >= CAST(? AS REAL)) AND (? IS NULL OR (CASE WHEN s.updated_at GLOB '[0-9]*' THEN CAST(s.updated_at AS REAL) ELSE CAST(strftime('%s', s.updated_at) AS REAL) END) <= CAST(? AS REAL)) AND (? IS NULL OR s.title LIKE '%' || ? || '%' OR EXISTS (SELECT 1 FROM messages m WHERE m.session_id=s.id AND m.content LIKE '%' || ? || '%'))")
+        .bind(&query.platform).bind(&query.platform).bind(&query.date_from).bind(&query.date_from)
+        .bind(&query.date_to).bind(&query.date_to).bind(&query.q).bind(&query.q).bind(&query.q)
+        .fetch_one(pool).await?)
+}
+
+pub async fn migrate_from_legacy(pool: &SqlitePool, source: &Path) -> Result<()> {
+    if !source.exists() {
+        return Err(AppError::NotFound("legacy database".into()));
+    }
+    let canonical = source.canonicalize()?;
+    let mut connection = pool.acquire().await?;
+    sqlx::query("ATTACH DATABASE ? AS legacy")
+        .bind(canonical.to_string_lossy().as_ref())
+        .execute(&mut *connection)
+        .await?;
+    let result = async {
+        let mut tx = connection.begin().await?;
+        sqlx::query("INSERT INTO sessions (id, platform, platform_session_id, title, created_at, updated_at, imported_at, raw_data) SELECT id, platform, platform_session_id, title, created_at, updated_at, imported_at, raw_data FROM legacy.sessions WHERE true ON CONFLICT(platform, platform_session_id) DO NOTHING").execute(&mut *tx).await?;
+        sqlx::query("INSERT INTO messages (id, session_id, role, content, metadata, created_at, seq) SELECT s.id || '_' || m.seq, s.id, m.role, m.content, m.metadata, m.created_at, m.seq FROM legacy.messages m JOIN legacy.sessions ls ON ls.id=m.session_id JOIN sessions s ON s.platform=ls.platform AND s.platform_session_id=ls.platform_session_id WHERE true ON CONFLICT(id) DO NOTHING").execute(&mut *tx).await?;
+        tx.commit().await
+    }.await;
+    let _ = sqlx::query("DETACH DATABASE legacy")
+        .execute(&mut *connection)
+        .await;
+    result?;
+    Ok(())
 }
 
 pub async fn get_session(pool: &SqlitePool, id: &str) -> Result<SessionDetail> {

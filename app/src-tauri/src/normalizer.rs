@@ -186,6 +186,8 @@ pub fn normalize_deepseek_export(raw: &Value) -> Result<NormalizedSession> {
         let mut assistant = Vec::new();
         let mut thinking = Vec::new();
         let mut types = Vec::new();
+        let mut tool_types = Vec::new();
+        let mut search_result_count = 0usize;
         for fragment in &fragments {
             let kind = fragment
                 .get("type")
@@ -202,6 +204,13 @@ pub fn normalize_deepseek_export(raw: &Value) -> Result<NormalizedSession> {
                     _ => {}
                 }
             }
+            if !matches!(kind, "REQUEST" | "RESPONSE" | "THINK" | "") {
+                tool_types.push(kind.to_string());
+            }
+            search_result_count += fragment
+                .get("results")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
         }
         let (role, content) = if !user.is_empty() {
             ("user", user.join("\n"))
@@ -213,7 +222,9 @@ pub fn normalize_deepseek_export(raw: &Value) -> Result<NormalizedSession> {
         messages.push(NormalizedMessage { role: role.into(), content,
             metadata: json!({"source":"deepseek_export","node_id":node.get("id").and_then(Value::as_str).unwrap_or(node_id),
                 "parent_node_id":node.get("parent"),"children_node_ids":node.get("children").cloned().unwrap_or_else(|| json!([])),
-                "fragment_types":types,"thinking":if thinking.is_empty(){Value::Null}else{Value::String(thinking.join("\n"))}}),
+                "fragment_types":types,"tool_types":tool_types,"search_result_count":search_result_count,
+                "model":message.get("model"),"files":message.get("files").cloned().unwrap_or_else(||json!([])),
+                "thinking":if thinking.is_empty(){Value::Null}else{Value::String(thinking.join("\n"))}}),
             created_at: text(message.get("inserted_at")).or_else(|| text(raw.get("updated_at"))).or_else(|| text(raw.get("inserted_at"))) });
     }
     messages.sort_by(|a, b| a.created_at.cmp(&b.created_at));

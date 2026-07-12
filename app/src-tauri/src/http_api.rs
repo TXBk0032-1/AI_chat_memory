@@ -1,7 +1,7 @@
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{Query, Request, State},
+    extract::{DefaultBodyLimit, Query, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -25,10 +25,14 @@ pub async fn serve(service: AppService) -> crate::error::Result<()> {
         .route("/api/v1/sessions/import/deepseek-export", post(import_zip))
         .route("/api/v1/sessions/sync-status", get(sync_status))
         .fallback(options)
+        .layer(DefaultBodyLimit::max(128 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(service.clone(), authorize))
         .layer(TraceLayer::new_for_http())
-        .with_state(service);
+        .with_state(service.clone());
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 19820))).await?;
+    service
+        .set_api_status(crate::models::ApiStatus::Running)
+        .await;
     axum::serve(listener, app)
         .await
         .map_err(std::io::Error::other)?;

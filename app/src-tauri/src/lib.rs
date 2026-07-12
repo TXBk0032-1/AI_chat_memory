@@ -15,6 +15,7 @@ use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
 };
+use tokio::sync::RwLock;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -35,17 +36,28 @@ pub fn run() {
             let settings_path = data_dir.join("settings.json");
             let database_path = data_dir.join("chat_memory.db");
             let legacy = find_legacy_database();
-            let (service, migrated) = tauri::async_runtime::block_on(async {
+            let service = tauri::async_runtime::block_on(async {
                 let settings = Arc::new(SettingsStore::load(settings_path).await?);
-                let migrated =
-                    settings::migrate_legacy_database(&legacy, &database_path, &settings).await?;
                 let pool = database::connect(&database_path).await?;
-                Ok::<_, crate::error::AppError>((AppService { pool, settings }, migrated))
+                Ok::<_, crate::error::AppError>(AppService {
+                    pool,
+                    settings,
+                    api_status: Arc::new(RwLock::new(crate::models::ApiStatus::Starting)),
+                })
             })?;
-            tracing::info!(migrated, path=%database_path.display(), "application database ready");
+            if legacy.exists()
+                && !tauri::async_runtime::block_on(service.settings.get()).migrated_legacy_database
+                && let Err(error) = tauri::async_runtime::block_on(service.migrate_legacy(&legacy))
+            {
+                tracing::error!(%error, "automatic legacy migration failed");
+            }
+            tracing::info!(path=%database_path.display(), "application database ready");
             app.manage(service.clone());
             tauri::async_runtime::spawn(async move {
-                if let Err(error) = http_api::serve(service).await {
+                if let Err(error) = http_api::serve(service.clone()).await {
+                    service
+                        .set_api_status(crate::models::ApiStatus::Failed(error.to_string()))
+                        .await;
                     tracing::error!(%error,"local API stopped");
                 }
             });
@@ -81,7 +93,9 @@ pub fn run() {
             commands::import_deepseek_zip,
             commands::get_settings,
             commands::save_settings,
-            commands::rotate_secret
+            commands::rotate_secret,
+            commands::get_api_status,
+            commands::migrate_legacy_database
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");

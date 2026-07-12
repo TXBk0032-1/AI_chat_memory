@@ -1,5 +1,5 @@
 use crate::{
-    models::{AppSettings, ImportResponse, SearchQuery, SessionDetail, SessionList},
+    models::{ApiStatus, AppSettings, ImportResponse, SearchQuery, SessionDetail, SessionList},
     service::AppService,
 };
 use tauri::State;
@@ -31,6 +31,12 @@ pub async fn import_deepseek_zip(
     service: State<'_, AppService>,
     path: String,
 ) -> Result<ImportResponse, String> {
+    let metadata = tokio::fs::metadata(&path)
+        .await
+        .map_err(|e| e.to_string())?;
+    if metadata.len() > 128 * 1024 * 1024 {
+        return Err("ZIP 文件超过 128 MB 限制".into());
+    }
     let bytes = tokio::fs::read(path).await.map_err(|e| e.to_string())?;
     service.import_deepseek_zip(bytes).await.map_err(message)
 }
@@ -48,4 +54,20 @@ pub async fn save_settings(
 #[tauri::command]
 pub async fn rotate_secret(service: State<'_, AppService>) -> Result<AppSettings, String> {
     service.settings.rotate_secret().await.map_err(message)
+}
+
+#[tauri::command]
+pub async fn get_api_status(service: State<'_, AppService>) -> Result<ApiStatus, String> {
+    Ok(service.api_status().await)
+}
+
+#[tauri::command]
+pub async fn migrate_legacy_database(
+    service: State<'_, AppService>,
+    path: String,
+) -> Result<(), String> {
+    service
+        .migrate_legacy(std::path::Path::new(&path))
+        .await
+        .map_err(message)
 }
