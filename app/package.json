@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
+    "test": "vitest run",
     "preview": "vite preview",
     "tauri": "tauri",
     "ci:check": "powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/ci.ps1 check",
@@ -13,6 +14,7 @@
     "ci:release": "powershell -NoProfile -ExecutionPolicy Bypass -File ../scripts/ci.ps1 release"
   },
   "dependencies": {
+    "@tanstack/vue-virtual": "^3.13.32",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-dialog": "^2.7.1",
     "@tauri-apps/plugin-opener": "^2",
@@ -29,6 +31,7 @@
     "@vitejs/plugin-vue": "^5.2.1",
     "typescript": "~5.6.2",
     "vite": "^6.0.3",
+    "vitest": "^4.1.10",
     "vue-tsc": "^2.1.10"
   }
 }

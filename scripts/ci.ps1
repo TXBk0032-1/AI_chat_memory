@@ -89,6 +89,10 @@ Invoke-Step "Type-check and build frontend" {
 }
 
 if ($Stage -in "test", "release") {
+    Invoke-Step "Run frontend tests" {
+        Push-Location $App
+        try { npm test } finally { Pop-Location }
+    }
     Invoke-Step "Run Rust tests" {
         Push-Location $Rust
         try { cargo test --all-features } finally { Pop-Location }

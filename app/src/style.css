@@ -141,6 +141,11 @@ i.deepseek { background: #5273e6; } i.doubao { background: #e36f53; } i.kimi { b
 .search-navigation label { margin-left: 6px; display: flex; align-items: center; gap: 4px; color: #5f686c; font-size: 10px; }
 .message-list { min-height: 0; flex: 1; overflow-y: auto; padding: 8px 24px 28px; }
 .message-list { position: relative; }
+.virtual-conversation { position: relative; width: 100%; min-height: 100%; }
+.virtual-message { position: absolute; top: 0; left: 0; width: 100%; }
+.message-placeholder { min-height: 170px; display: flex; align-items: center; justify-content: center; gap: 8px; color: #8a9498; font-size: 11px; }
+.load-progress { color: #35816b; font-weight: 600; }
+.inline-retry { margin-left: 7px; padding: 0; border: 0; color: #28745f; background: transparent; cursor: pointer; font: inherit; font-weight: 700; text-decoration: underline; }
 .search-scroll-markers { position: sticky; z-index: 8; top: 0; float: right; width: 5px; height: 100%; margin-right: -21px; pointer-events: none; }
 .search-scroll-markers i { position: absolute; right: 0; width: 5px; height: 3px; border-radius: 2px 0 0 2px; background: #e6b800; box-shadow: 0 0 0 1px #fff; }
 .conversation-view, .branch-list { transform-origin: 50% 20%; }
@@ -362,6 +367,9 @@ html[data-theme="dark"] .reference-preview small { color: #6bc9ad; }
 html[data-theme="dark"] .thinking { color: #aeb8b5; border-color: #46514d; background: #272e2c; }
 html[data-theme="dark"] .thinking.open { border-color: #55736a; background: #263530; }
 html[data-theme="dark"] .thinking .markdown { color: #bfc7c4; }
+html[data-theme="dark"] .message-placeholder { color: #7f8a8f; }
+html[data-theme="dark"] .load-progress { color: #66b99d; }
+html[data-theme="dark"] .inline-retry { color: #72c3a8; }
 html[data-theme="dark"] .branch-list > header strong,
 html[data-theme="dark"] .branch-row { color: #d8dfe1; }
 html[data-theme="dark"] .branch-row:hover { background: #292f32; }

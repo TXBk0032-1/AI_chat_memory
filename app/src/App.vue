@@ -30,30 +30,24 @@ import {
   Trash2,
   X,
 } from 'lucide-vue-next'
-import MarkdownIt from 'markdown-it'
-import texmath from 'markdown-it-texmath'
-import katex from 'katex'
+import { useVirtualizer } from '@tanstack/vue-virtual'
 import 'katex/dist/katex.min.css'
+import MessageBlock from './MessageBlock.vue'
+import {
+  expandSearchHits,
+  loadReadingPosition,
+  mergeMessageBatch,
+  saveReadingPosition,
+  type BranchNode,
+  type Message,
+  type SearchHit,
+  type SearchMatch,
+  type SessionOpen,
+  type SessionSummary,
+} from './conversation'
+import { escapeTitle } from './markdown'
 import './style.css'
 
-type SessionSummary = {
-  id: string
-  platform: string
-  platform_session_id: string
-  title: string
-  created_at?: string
-  updated_at?: string
-  imported_at?: string
-}
-type Message = {
-  id: string
-  role: string
-  content: string
-  metadata: Record<string, unknown>
-  created_at?: string
-  seq: number
-}
-type SessionDetail = SessionSummary & { messages: Message[]; raw_data?: unknown }
 type SettingsModel = {
   setup_complete: boolean
   secret_enabled: boolean
@@ -67,18 +61,6 @@ type SettingsModel = {
 }
 type ApiStatus = { service: { state: string; message?: string }; userscript_connected: boolean; last_userscript_request_at?: number }
 
-const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true }).use(texmath, {
-  engine: katex,
-  delimiters: ['dollars', 'brackets'],
-})
-const defaultFence = markdown.renderer.rules.fence
-markdown.renderer.rules.fence = (tokens, index, options, environment, renderer) => {
-  const token = tokens[index]
-  if (token.info.trim().toLowerCase() === 'mermaid') {
-    return `<div class="mermaid-diagram" data-mermaid-source="${encodeURIComponent(token.content)}"><pre>${markdown.utils.escapeHtml(token.content)}</pre></div>`
-  }
-  return defaultFence ? defaultFence(tokens, index, options, environment, renderer) : renderer.renderToken(tokens, index, options)
-}
 let mermaidInstance: typeof import('mermaid')['default'] | null = null
 async function loadMermaid() {
   if (!mermaidInstance) {
@@ -92,11 +74,17 @@ function normalizeMermaidSource(source: string) {
   return source.replace(/[“”]/g, '"')
 }
 const sessions = ref<SessionSummary[]>([])
-const selected = ref<SessionDetail | null>(null)
+const selected = ref<SessionOpen | null>(null)
+const messageSlots = ref<Array<Message | undefined>>([])
+const sessionSearchHits = ref<SearchHit[]>([])
+const branchNodes = ref<BranchNode[]>([])
+const backgroundLoadFailed = ref(false)
+const messageListRef = ref<HTMLElement | null>(null)
 const loading = ref(false)
 const detailLoading = ref(false)
 const error = ref('')
 const query = ref('')
+const committedQuery = ref('')
 const platform = ref('')
 const dateFrom = ref('')
 const dateTo = ref('')
@@ -133,7 +121,40 @@ let toastTimer: number | undefined
 let mermaidRenderVersion = 0
 let systemThemeQuery: MediaQueryList | undefined
 let savedThemeBeforeSettings: SettingsModel['theme'] = 'system'
+let sessionLoadGeneration = 0
+let backgroundLoadTimer: number | undefined
+let readingPositionTimer: number | undefined
+let branchLoadGeneration = 0
+let searchLoadGeneration = 0
 const lastControlClicks = new WeakMap<Element, number>()
+const pendingMessageBatches = new Map<string, Promise<boolean>>()
+
+const virtualizerOptions = computed(() => ({
+  count: selected.value?.message_count ?? 0,
+  getScrollElement: () => messageListRef.value,
+  estimateSize: () => 190,
+  overscan: 5,
+  getItemKey: (index: number) => messageSlots.value[index]?.id ?? `${selected.value?.id ?? 'message'}-${index}`,
+}))
+const messageVirtualizer = useVirtualizer(virtualizerOptions)
+const virtualMessages = computed(() => messageVirtualizer.value.getVirtualItems())
+const virtualTotalSize = computed(() => messageVirtualizer.value.getTotalSize())
+
+function measureVirtualElement(element: unknown) {
+  if (element instanceof Element) messageVirtualizer.value.measureElement(element)
+}
+
+function clearSelectedSession() {
+  sessionLoadGeneration += 1
+  branchLoadGeneration += 1
+  searchLoadGeneration += 1
+  window.clearTimeout(backgroundLoadTimer)
+  selected.value = null
+  messageSlots.value = []
+  sessionSearchHits.value = []
+  branchNodes.value = []
+  expandedThinking.value = new Set()
+}
 
 function effectiveTheme(preference = settings.value.theme) {
   return preference === 'system' ? (systemThemeQuery?.matches ? 'dark' : 'light') : preference
@@ -180,31 +201,23 @@ function closeSettings(save = false) {
 }
 
 const filtered = computed(() => Boolean(query.value || platform.value || dateFrom.value || dateTo.value))
-const hasBranches = computed(() => selected.value?.messages.some((message) => metadata(message, 'source') === 'deepseek_export') ?? false)
+const hasBranches = computed(() => selected.value?.has_branches ?? false)
 const statusLabel = computed(() => apiStatus.value.service.state === 'running' ? '同步服务运行中' : apiStatus.value.service.state === 'failed' ? '同步服务异常' : '同步服务启动中')
 const sourceIndex = computed(() => ['', 'deepseek', 'doubao', 'kimi'].indexOf(platform.value))
 const sourceAccent = computed(() => ({ deepseek: '#4d8fe8', doubao: '#e05c62', kimi: '#39a878' } as Record<string, string>)[platform.value] ?? '#f5f7f7')
-const selectedMatches = computed(() => {
-  const needle = query.value.trim().toLocaleLowerCase()
-  if (!needle || !selected.value) return []
-  return selected.value.messages.flatMap((message) => {
-    const text = `${message.content}\n${metadata(message, 'thinking') || ''}`.toLocaleLowerCase()
-    const count = text.split(needle).length - 1
-    return Array.from({ length: count }, (_, index) => ({ messageId: message.id, index }))
-  })
-})
+const selectedMatches = computed<SearchMatch[]>(() => expandSearchHits(sessionSearchHits.value))
+const loadedMessageCount = computed(() => messageSlots.value.reduce((count, message) => count + (message ? 1 : 0), 0))
+const compactReferences = computed(() => new Map((selected.value?.references ?? []).map((reference) => [reference.cite_index, reference])))
 const branchPath = computed(() => {
   const path = new Set<string>()
-  const messages = selected.value?.messages ?? []
-  const byNode = new Map(messages.map((message) => [metadata(message, 'node_id'), message]))
-  let node = activeBranchNode.value || metadata(messages[messages.length - 1], 'node_id') || ''
+  const byNode = new Map(branchNodes.value.map((node) => [node.node_id, node]))
+  let node = activeBranchNode.value || branchNodes.value[branchNodes.value.length - 1]?.node_id || ''
   while (node && !path.has(node)) {
     path.add(node)
-    node = metadata(byNode.get(node)!, 'parent_node_id') || ''
+    node = byNode.get(node)?.parent_node_id || ''
   }
   return path
 })
-const sessionReferences = computed(() => collectReferences(selected.value?.raw_data))
 
 function epoch(value: string, end = false) {
   if (!value) return null
@@ -216,10 +229,11 @@ async function loadSessions(reset = true) {
   loading.value = true
   error.value = ''
   if (reset) page.value = 0
+  if (reset) committedQuery.value = query.value.trim()
   try {
     const result = await invoke<{ sessions: SessionSummary[]; total: number }>('search_sessions', {
       query: {
-        q: query.value || null,
+        q: committedQuery.value || null,
         platform: platform.value || null,
         date_from: epoch(dateFrom.value),
         date_to: epoch(dateTo.value, true),
@@ -229,8 +243,11 @@ async function loadSessions(reset = true) {
     })
     sessions.value = reset ? result.sessions : [...sessions.value, ...result.sessions]
     total.value = result.total
-    searchElapsed.value = query.value ? performance.now() - started : null
-    if (reset && selected.value && !result.sessions.some((item) => item.id === selected.value?.id)) selected.value = null
+    searchElapsed.value = committedQuery.value ? performance.now() - started : null
+    if (reset && selected.value && !result.sessions.some((item) => item.id === selected.value?.id)) {
+      persistReadingPosition()
+      clearSelectedSession()
+    }
   } catch (reason) {
     error.value = String(reason)
   } finally {
@@ -244,26 +261,96 @@ async function loadMore() {
 }
 
 async function selectSession(id: string) {
+  const generation = ++sessionLoadGeneration
+  window.clearTimeout(backgroundLoadTimer)
+  persistReadingPosition()
   detailLoading.value = true
   error.value = ''
+  sessionSearchHits.value = []
+  branchNodes.value = []
   try {
-    selected.value = await invoke<SessionDetail>('get_session', { id })
+    const readingPosition = loadReadingPosition(id)
+    const opened = await invoke<SessionOpen>('open_session', { id, anchorSeq: readingPosition?.seq ?? null })
+    if (generation !== sessionLoadGeneration) return
+    selected.value = opened
+    backgroundLoadFailed.value = false
+    messageSlots.value = mergeMessageBatch(Array.from({ length: opened.message_count }), opened.messages)
     detailMode.value = 'conversation'
     expandedThinking.value = new Set()
     searchHitIndex.value = -1
-    activeBranchNode.value = metadata(selected.value.messages[selected.value.messages.length - 1], 'node_id') || ''
+    activeBranchNode.value = ''
+    await nextTick()
+    const targetSeq = readingPosition?.seq ?? opened.start_seq
+    messageVirtualizer.value.scrollToIndex(targetSeq, { align: 'start' })
+    await nextTick()
+    if (readingPosition?.offset) messageListRef.value?.scrollBy({ top: readingPosition.offset })
+    void loadSearchHits(generation)
+    scheduleBackgroundLoad(generation)
   } catch (reason) {
+    if (generation !== sessionLoadGeneration) return
     error.value = String(reason)
   } finally {
-    detailLoading.value = false
+    if (generation === sessionLoadGeneration) detailLoading.value = false
   }
 }
 
-async function selectBranch(message: Message) {
-  activeBranchNode.value = metadata(message, 'node_id') || ''
+async function fetchMessageBatch(startSeq: number, generation = sessionLoadGeneration) {
+  if (!selected.value || generation !== sessionLoadGeneration) return false
+  const normalizedStart = Math.max(0, Math.floor(startSeq / 50) * 50)
+  const sessionId = selected.value.id
+  const batchKey = `${sessionId}:${normalizedStart}`
+  const pending = pendingMessageBatches.get(batchKey)
+  if (pending) return pending
+  const request = (async () => {
+    const messages = await invoke<Message[]>('get_session_messages', { id: sessionId, startSeq: normalizedStart, limit: 50 })
+    if (generation !== sessionLoadGeneration || selected.value?.id !== sessionId) return false
+    messageSlots.value = mergeMessageBatch(messageSlots.value, messages)
+    return messages.length > 0
+  })().finally(() => pendingMessageBatches.delete(batchKey))
+  pendingMessageBatches.set(batchKey, request)
+  return request
+}
+
+function nextMissingBatch() {
+  const index = messageSlots.value.findIndex((message) => !message)
+  return index < 0 ? null : Math.floor(index / 50) * 50
+}
+
+function scheduleBackgroundLoad(generation: number) {
+  window.clearTimeout(backgroundLoadTimer)
+  backgroundLoadTimer = window.setTimeout(async () => {
+    if (generation !== sessionLoadGeneration) return
+    const startSeq = nextMissingBatch()
+    if (startSeq === null) return
+    try {
+      await fetchMessageBatch(startSeq, generation)
+      scheduleBackgroundLoad(generation)
+    } catch (reason) {
+      if (generation === sessionLoadGeneration) {
+        backgroundLoadFailed.value = true
+        error.value = `后台加载对话失败：${String(reason)}`
+      }
+    }
+  }, 16)
+}
+
+function retryBackgroundLoad() {
+  backgroundLoadFailed.value = false
+  error.value = ''
+  scheduleBackgroundLoad(sessionLoadGeneration)
+}
+
+async function ensureMessageLoaded(seq: number) {
+  if (messageSlots.value[seq]) return
+  await fetchMessageBatch(Math.floor(seq / 50) * 50)
+}
+
+async function selectBranch(branch: BranchNode) {
+  activeBranchNode.value = branch.node_id
   detailMode.value = 'conversation'
+  await ensureMessageLoaded(branch.seq)
   await nextTick()
-  document.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(message.id)}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  messageVirtualizer.value.scrollToIndex(branch.seq, { align: 'center', behavior: 'smooth' })
 }
 
 function escapeRegExp(value: string) {
@@ -271,14 +358,14 @@ function escapeRegExp(value: string) {
 }
 
 function highlightRenderedHtml(html: string) {
-  const needle = query.value.trim()
+  const needle = committedQuery.value
   if (!needle) return html
   const pattern = new RegExp(escapeRegExp(needle), 'gi')
   return html.split(/(<[^>]+>)/g).map((part) => part.startsWith('<') ? part : part.replace(pattern, (match) => `<mark class="search-hit">${match}</mark>`)).join('')
 }
 
 function highlightTitle(value: string) {
-  return highlightRenderedHtml(markdown.utils.escapeHtml(value || '未命名对话'))
+  return highlightRenderedHtml(escapeTitle(value))
 }
 
 async function navigateSearch(direction: number) {
@@ -292,9 +379,48 @@ async function navigateSearch(direction: number) {
     toastTimer = window.setTimeout(() => { toast.value = '' }, 1800)
   }
   searchHitIndex.value = next
+  const match = selectedMatches.value[next]
+  await ensureMessageLoaded(match.seq)
+  if (match.field === 'thinking') {
+    const expanded = new Set(expandedThinking.value)
+    expanded.add(match.message_id)
+    expandedThinking.value = expanded
+  }
+  messageVirtualizer.value.scrollToIndex(match.seq, { align: 'center' })
   await nextTick()
-  const hits = document.querySelectorAll<HTMLElement>('.conversation-view mark.search-hit')
-  hits[next]?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  await nextTick()
+  const block = document.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(match.message_id)}"]`)
+  const field = block?.querySelector<HTMLElement>(`[data-search-field="${match.field}"]`)
+  const hits = field?.querySelectorAll<HTMLElement>('mark.search-hit')
+  hits?.[match.occurrence]?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+}
+
+async function loadSearchHits(generation = sessionLoadGeneration) {
+  const searchGeneration = ++searchLoadGeneration
+  if (!selected.value || !committedQuery.value) {
+    sessionSearchHits.value = []
+    return
+  }
+  const hits = await invoke<SearchHit[]>('search_session_hits', { id: selected.value.id, query: committedQuery.value })
+  if (generation === sessionLoadGeneration && searchGeneration === searchLoadGeneration) sessionSearchHits.value = hits
+}
+
+async function loadBranches() {
+  if (!selected.value || branchNodes.value.length) return
+  const generation = ++branchLoadGeneration
+  try {
+    const branches = await invoke<BranchNode[]>('get_session_branches', { id: selected.value.id })
+    if (generation !== branchLoadGeneration) return
+    branchNodes.value = branches
+    activeBranchNode.value ||= branches[branches.length - 1]?.node_id || ''
+  } catch (reason) {
+    error.value = String(reason)
+  }
+}
+
+function showBranches() {
+  detailMode.value = 'branches'
+  void loadBranches()
 }
 
 function toggleThinking(messageId: string) {
@@ -331,7 +457,7 @@ async function removeSession() {
   if (!selected.value) return
   try {
     await invoke('delete_session', { id: selected.value.id })
-    selected.value = null
+    clearSelectedSession()
     showDeletePrompt.value = false
     showDetailMenu.value = false
     await loadSessions()
@@ -555,75 +681,33 @@ function roleName(value: string) {
   return value === 'user' ? '你' : value === 'assistant' ? 'AI' : value
 }
 
-function referenceValue(reference: unknown, keys: string[]) {
-  if (!reference || typeof reference !== 'object') return ''
-  const item = reference as Record<string, unknown>
-  for (const key of keys) if (typeof item[key] === 'string') return item[key] as string
-  return ''
-}
-
-function collectReferences(value: unknown) {
-  const references = new Map<number, unknown>()
-  const visit = (item: unknown) => {
-    if (Array.isArray(item)) {
-      item.forEach(visit)
-      return
-    }
-    if (!item || typeof item !== 'object') return
-    const record = item as Record<string, unknown>
-    const url = referenceValue(record, ['url', 'link', 'href'])
-    const citeIndex = typeof record.cite_index === 'number' ? record.cite_index : Number(record.cite_index)
-    if (url && Number.isInteger(citeIndex) && citeIndex >= 0) references.set(citeIndex, record)
-    Object.values(record).forEach(visit)
-  }
-  visit(value)
-  return references
-}
-
-function resolveReference(index: number, message?: Message) {
-  const messageReferences = Array.isArray(message?.metadata?.references) ? message.metadata.references : []
-  return sessionReferences.value.get(index)
-    ?? messageReferences.find((reference) => Number((reference as Record<string, unknown>)?.cite_index) === index)
-    ?? messageReferences[index]
-    ?? messageReferences[index - 1]
-}
-
-function render(value: string, message?: Message) {
-  const source = (value || '')
-    .replace(/\\\[([\s\S]*?)\\\]/g, (_, formula) => `\n$$${formula}$$\n`)
-    .replace(/\\\((.+?)\\\)/g, (_, formula) => `$${formula}$`)
-  return highlightRenderedHtml(markdown.render(source).replace(/\[reference:(\d+)\]/gi, (_match, rawIndex) => {
-      const index = Number(rawIndex)
-      const reference = resolveReference(index, message)
-      const url = referenceValue(reference, ['url', 'link', 'href'])
-      if (!/^https?:\/\//i.test(url)) return `<span class="reference-marker reference-missing" title="该引用来源未随历史记录保存">${index}</span>`
-      const title = referenceValue(reference, ['title', 'name']) || `引用 ${index}`
-      const summary = referenceValue(reference, ['snippet', 'summary', 'description', 'content']).replace(/\s+/g, ' ').slice(0, 280)
-      const safeTitle = markdown.utils.escapeHtml(title)
-      const safeSummary = markdown.utils.escapeHtml(summary)
-      const safeUrl = markdown.utils.escapeHtml(url)
-      return `<a class="reference-link reference-marker" href="${safeUrl}" target="_blank" rel="noopener noreferrer">${index}<span class="reference-preview"><strong>${safeTitle}</strong><span>${safeSummary || '暂无摘要'}</span><small>${safeUrl}</small></span></a>`
-    }))
-}
-
-function metadata(message: Message, key: string) {
-  return message.metadata?.[key] as string | undefined
-}
-
-function metadataArray(message: Message, key: string) {
-  const value = message.metadata?.[key]
-  return Array.isArray(value) ? value : []
-}
-
-function branchDepth(message: Message) {
+function branchDepth(message: BranchNode) {
   let depth = 0
-  let parent = metadata(message, 'parent_node_id')
-  const map = new Map(selected.value?.messages.map((item) => [metadata(item, 'node_id'), item]))
+  let parent = message.parent_node_id
+  const map = new Map(branchNodes.value.map((item) => [item.node_id, item]))
   while (parent && map.has(parent) && depth < 12) {
     depth += 1
-    parent = metadata(map.get(parent)!, 'parent_node_id')
+    parent = map.get(parent)?.parent_node_id || ''
   }
   return depth
+}
+
+function persistReadingPosition() {
+  if (!selected.value || !messageListRef.value) return
+  const scrollTop = messageListRef.value.scrollTop
+  const first = virtualMessages.value.find((item) => item.end >= scrollTop)
+  if (!first) return
+  saveReadingPosition(selected.value.id, {
+    seq: first.index,
+    offset: Math.max(0, scrollTop - first.start),
+    updatedAt: Date.now(),
+  })
+}
+
+function handleMessageScroll() {
+  window.clearTimeout(readingPositionTimer)
+  readingPositionTimer = window.setTimeout(persistReadingPosition, 300)
+  hideContextMenu()
 }
 
 onMounted(async () => {
@@ -643,14 +727,23 @@ onMounted(async () => {
   statusTimer = window.setInterval(refreshApiStatus, 3000)
   await loadSessions()
 })
-watch([selected, expandedThinking, detailMode], () => { void renderMermaidDiagrams() }, { flush: 'post' })
+watch([messageSlots, expandedThinking, detailMode], () => { void renderMermaidDiagrams() }, { flush: 'post' })
+watch(committedQuery, () => {
+  searchHitIndex.value = -1
+  void loadSearchHits()
+})
 onBeforeUnmount(() => {
+  persistReadingPosition()
+  sessionLoadGeneration += 1
+  branchLoadGeneration += 1
   systemThemeQuery?.removeEventListener('change', handleSystemThemeChange)
   window.removeEventListener('keydown', handleContextMenuKey)
   document.removeEventListener('click', preventRapidControlClick, true)
   document.removeEventListener('scroll', hideContextMenu, true)
   window.clearInterval(statusTimer)
   window.clearTimeout(toastTimer)
+  window.clearTimeout(backgroundLoadTimer)
+  window.clearTimeout(readingPositionTimer)
   unlistenCloseRequest?.()
 })
 
@@ -752,7 +845,7 @@ function handleSystemThemeChange() {
           <div v-if="detailLoading" class="loading-state"><LoaderCircle class="spinning" :size="22" /><span>正在打开对话</span></div>
           <template v-else-if="selected">
             <div class="detail-header">
-              <div class="detail-title"><span class="platform-badge"><i :class="selected.platform"></i>{{ platformName(selected.platform) }}</span><h2>{{ selected.title || '未命名对话' }}</h2><p>{{ selected.messages.length }} 条消息 · {{ formatDate(selected.updated_at) }}</p></div>
+              <div class="detail-title"><span class="platform-badge"><i :class="selected.platform"></i>{{ platformName(selected.platform) }}</span><h2>{{ selected.title || '未命名对话' }}</h2><p>{{ selected.message_count }} 条消息 · {{ formatDate(selected.updated_at) }}<span v-if="loadedMessageCount < selected.message_count" class="load-progress"> · 已加载 {{ loadedMessageCount }}/{{ selected.message_count }}</span><button v-if="backgroundLoadFailed" class="inline-retry" @click="retryBackgroundLoad">重试</button></p></div>
               <div class="detail-actions" @click.stop>
                 <button class="icon-button" title="更多操作" aria-haspopup="menu" :aria-expanded="showDetailMenu" @click="toggleDetailMenu"><MoreHorizontal :size="19" /></button>
                 <div v-if="showDetailMenu" class="detail-menu" role="menu">
@@ -763,34 +856,47 @@ function handleSystemThemeChange() {
             </div>
             <div v-if="hasBranches" class="segmented-control">
               <button :class="{ active: detailMode === 'conversation' }" @click="detailMode='conversation'"><MessageSquareText :size="15" />对话</button>
-              <button :class="{ active: detailMode === 'branches' }" @click="detailMode='branches'"><GitBranch :size="15" />分支</button>
+              <button :class="{ active: detailMode === 'branches' }" @click="showBranches"><GitBranch :size="15" />分支</button>
             </div>
-            <div v-if="query && detailMode === 'conversation'" class="search-navigation">
+            <div v-if="committedQuery && detailMode === 'conversation'" class="search-navigation">
               <span>{{ selectedMatches.length ? `${Math.max(searchHitIndex + 1, 0)} / ${selectedMatches.length}` : '当前对话无正文命中' }}</span>
               <button class="icon-button" title="上一个命中" :disabled="!selectedMatches.length" @click="navigateSearch(-1)"><ArrowUp :size="15" /></button>
               <button class="icon-button" title="下一个命中" :disabled="!selectedMatches.length" @click="navigateSearch(1)"><ArrowDown :size="15" /></button>
               <label><input v-model="loopSearch" type="checkbox" />循环</label>
             </div>
-            <div class="message-list" @click="openMarkdownLink">
+            <div ref="messageListRef" class="message-list" @scroll.passive="handleMessageScroll" @click="openMarkdownLink">
               <div v-if="selectedMatches.length" class="search-scroll-markers" aria-hidden="true">
-                <i v-for="(match, index) in selectedMatches" :key="`${match.messageId}-${index}`" :style="{ top: `${((selected?.messages.findIndex(item => item.id === match.messageId) ?? 0) + 0.5) / Math.max(selected?.messages.length ?? 1, 1) * 100}%` }"></i>
+                <i v-for="(match, index) in selectedMatches" :key="`${match.message_id}-${match.field}-${index}`" :style="{ top: `${(match.seq + 0.5) / Math.max(selected.message_count, 1) * 100}%` }"></i>
               </div>
               <Transition name="detail-camera" mode="out-in">
-                <div v-if="detailMode === 'conversation'" key="conversation" class="conversation-view">
-                  <article v-for="message in selected.messages" :key="message.id" :data-message-id="message.id" :class="['message-block', message.role]">
-                    <div class="message-author"><span>{{ roleName(message.role) }}</span><time>{{ formatDate(message.created_at, true) }}</time></div>
-                    <section v-if="metadata(message, 'thinking')" :class="['thinking', { open: expandedThinking.has(message.id) }]">
-                      <button class="thinking-toggle" :aria-expanded="expandedThinking.has(message.id)" @click="toggleThinking(message.id)">查看思考过程</button>
-                      <div class="thinking-reveal" :aria-hidden="!expandedThinking.has(message.id)"><div><div class="markdown" v-html="render(metadata(message, 'thinking') || '')"></div></div></div>
-                    </section>
-                    <div class="markdown" v-html="render(message.content, message)"></div>
-                  </article>
+                <div v-if="detailMode === 'conversation'" key="conversation" class="conversation-view virtual-conversation" :style="{ height: `${virtualTotalSize}px` }">
+                  <div
+                    v-for="virtualMessage in virtualMessages"
+                    :key="String(virtualMessage.key)"
+                    :ref="measureVirtualElement"
+                    class="virtual-message"
+                    :data-index="virtualMessage.index"
+                    :style="{ transform: `translateY(${virtualMessage.start}px)` }"
+                  >
+                    <MessageBlock
+                      v-if="messageSlots[virtualMessage.index]"
+                      :message="messageSlots[virtualMessage.index]!"
+                      :references="compactReferences"
+                      :query="committedQuery"
+                      :expanded="expandedThinking.has(messageSlots[virtualMessage.index]!.id)"
+                      :formatted-date="formatDate(messageSlots[virtualMessage.index]!.created_at, true)"
+                      :role-label="roleName(messageSlots[virtualMessage.index]!.role)"
+                      @toggle-thinking="toggleThinking"
+                      @content-rendered="renderMermaidDiagrams"
+                    />
+                    <div v-else class="message-placeholder" @vue:mounted="ensureMessageLoaded(virtualMessage.index)"><LoaderCircle class="spinning" :size="16" /><span>加载消息</span></div>
+                  </div>
                 </div>
                 <div v-else key="branches" class="branch-list">
-                  <header><div><strong>对话分支</strong><span>{{ selected.messages.length }} 个节点</span></div><small>选择节点可返回对应消息</small></header>
+                  <header><div><strong>对话分支</strong><span>{{ branchNodes.length }} 个节点</span></div><small>选择节点可返回对应消息</small></header>
                   <div class="branch-tree">
-                    <button v-for="message in selected.messages" :key="message.id" :class="['branch-row', { current: activeBranchNode === metadata(message, 'node_id'), path: branchPath.has(metadata(message, 'node_id') || '') }]" :style="{ '--branch-depth': branchDepth(message) }" @click="selectBranch(message)">
-                      <i class="branch-rail"></i><span class="branch-node"></span><div><strong>{{ roleName(message.role) }}</strong><p>{{ message.content || metadata(message, 'thinking') || '空消息' }}</p><small>{{ metadataArray(message, 'children_node_ids').length }} 个后续节点</small></div>
+                    <button v-for="message in branchNodes" :key="message.message_id" :class="['branch-row', { current: activeBranchNode === message.node_id, path: branchPath.has(message.node_id) }]" :style="{ '--branch-depth': branchDepth(message) }" @click="selectBranch(message)">
+                      <i class="branch-rail"></i><span class="branch-node"></span><div><strong>{{ roleName(message.role) }}</strong><p>{{ message.preview || '空消息' }}</p><small>{{ message.children_node_ids.length }} 个后续节点</small></div>
                     </button>
                   </div>
                 </div>
@@ -844,7 +950,7 @@ function handleSystemThemeChange() {
       <div v-if="showSessionInfo && selected" class="dialog-backdrop" @click.self="showSessionInfo=false">
         <section class="info-dialog" role="dialog" aria-modal="true" aria-labelledby="info-title">
           <header><h2 id="info-title">对话详细信息</h2><button class="icon-button" title="关闭" @click="showSessionInfo=false"><X :size="18" /></button></header>
-          <dl><dt>标题</dt><dd>{{ selected.title || '未命名对话' }}</dd><dt>来源</dt><dd>{{ platformName(selected.platform) }}</dd><dt>来源会话 ID</dt><dd class="identifier">{{ selected.platform_session_id }}</dd><dt>创建时间</dt><dd>{{ formatDate(selected.created_at) }}</dd><dt>更新时间</dt><dd>{{ formatDate(selected.updated_at) }}</dd><dt>消息数量</dt><dd>{{ selected.messages.length }}</dd></dl>
+          <dl><dt>标题</dt><dd>{{ selected.title || '未命名对话' }}</dd><dt>来源</dt><dd>{{ platformName(selected.platform) }}</dd><dt>来源会话 ID</dt><dd class="identifier">{{ selected.platform_session_id }}</dd><dt>创建时间</dt><dd>{{ formatDate(selected.created_at) }}</dd><dt>更新时间</dt><dd>{{ formatDate(selected.updated_at) }}</dd><dt>消息数量</dt><dd>{{ selected.message_count }}</dd></dl>
         </section>
       </div>
     </Transition>
