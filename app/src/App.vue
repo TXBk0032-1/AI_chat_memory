@@ -50,7 +50,7 @@ import {
   type SessionSummary,
 } from './conversation'
 import { escapeTitle } from './markdown'
-import { branchConversation } from './branch-overview'
+import { branchMessageSeqs, branchReadingIndex, filterBranchMatches } from './branch-overview'
 import { loadSidebarCollapsed, saveSidebarCollapsed } from './sidebar'
 import './style.css'
 
@@ -137,12 +137,11 @@ let searchLoadGeneration = 0
 const lastControlClicks = new WeakMap<Element, number>()
 const pendingMessageBatches = new Map<string, Promise<boolean>>()
 
-const displayedMessageSeqs = computed(() => {
-  if (branchOverview.value && activeBranchNode.value) {
-    return branchConversation(branchOverview.value.nodes, activeBranchNode.value).map((node) => node.seq)
-  }
-  return Array.from({ length: selected.value?.message_count ?? 0 }, (_, seq) => seq)
-})
+const displayedMessageSeqs = computed(() => branchMessageSeqs(
+  branchOverview.value,
+  activeBranchNode.value,
+  selected.value?.message_count ?? 0,
+))
 const displayedSeqIndexes = computed(() => new Map(displayedMessageSeqs.value.map((seq, index) => [seq, index])))
 const virtualizerOptions = computed(() => ({
   count: displayedMessageSeqs.value.length,
@@ -230,8 +229,10 @@ const hasBranches = computed(() => selected.value?.has_branches ?? false)
 const statusLabel = computed(() => apiStatus.value.service.state === 'running' ? '同步服务运行中' : apiStatus.value.service.state === 'failed' ? '同步服务异常' : '同步服务启动中')
 const sourceIndex = computed(() => ['', 'deepseek', 'doubao', 'kimi'].indexOf(platform.value))
 const sourceAccent = computed(() => ({ deepseek: '#4d8fe8', doubao: '#e05c62', kimi: '#39a878' } as Record<string, string>)[platform.value] ?? '#f5f7f7')
-const selectedMatches = computed<SearchMatch[]>(() => expandSearchHits(sessionSearchHits.value)
-  .filter((match) => displayedSeqIndexes.value.has(match.seq)))
+const selectedMatches = computed<SearchMatch[]>(() => filterBranchMatches(
+  expandSearchHits(sessionSearchHits.value),
+  displayedMessageSeqs.value,
+))
 const loadedMessageCount = computed(() => messageSlots.value.reduce((count, message) => count + (message ? 1 : 0), 0))
 const compactReferences = computed(() => new Map((selected.value?.references ?? []).map((reference) => [reference.cite_index, reference])))
 function epoch(value: string, end = false) {
@@ -306,10 +307,8 @@ async function selectSession(id: string) {
     searchHitIndex.value = -1
     activeBranchNode.value = overview?.default_leaf_node_id ?? ''
     await nextTick()
-    const targetSeq = readingPosition && displayedSeqIndexes.value.has(readingPosition.seq)
-      ? readingPosition.seq
-      : displayedMessageSeqs.value[0] ?? opened.start_seq
-    messageVirtualizer.value.scrollToIndex(displayedSeqIndexes.value.get(targetSeq) ?? 0, { align: 'start' })
+    const readingIndex = branchReadingIndex(displayedMessageSeqs.value, readingPosition?.seq ?? null, opened.start_seq)
+    messageVirtualizer.value.scrollToIndex(readingIndex, { align: 'start' })
     await nextTick()
     if (readingPosition?.offset) messageListRef.value?.scrollBy({ top: readingPosition.offset })
     void loadSearchHits(generation)

@@ -313,6 +313,59 @@ mod tests {
     }
 
     #[test]
+    fn preserves_multi_version_root_order_and_selects_latest_leaf() {
+        let raw = json!({"mapping": {
+            "root": {"id":"root", "parent":null, "children":["q1", "q2", "q3", "q4"]},
+            "q1": {"id":"q1", "parent":"root", "children":["a1"]},
+            "a1": {"id":"a1", "parent":"q1", "children":[]},
+            "q2": {"id":"q2", "parent":"root", "children":["a2"]},
+            "a2": {"id":"a2", "parent":"q2", "children":[]},
+            "q3": {"id":"q3", "parent":"root", "children":["a3"]},
+            "a3": {"id":"a3", "parent":"q3", "children":[]},
+            "q4": {"id":"q4", "parent":"root", "children":["a4"]},
+            "a4": {"id":"a4", "parent":"q4", "children":["follow"]},
+            "follow": {"id":"follow", "parent":"a4", "children":["old", "latest"]},
+            "old": {"id":"old", "parent":"follow", "children":[]},
+            "latest": {"id":"latest", "parent":"follow", "children":["leaf"]},
+            "leaf": {"id":"leaf", "parent":"latest", "children":[]}
+        }});
+        let overview = build_overview(
+            vec![
+                node("a1", "q1", 0),
+                node("q1", "root", 1),
+                node("a2", "q2", 2),
+                node("q2", "root", 3),
+                node("a3", "q3", 4),
+                node("q3", "root", 5),
+                node("a4", "q4", 6),
+                node("q4", "root", 7),
+                node("follow", "a4", 8),
+                node("old", "follow", 9),
+                node("latest", "follow", 10),
+                node("leaf", "latest", 11),
+            ],
+            &raw,
+        );
+        let roots = overview
+            .nodes
+            .iter()
+            .filter(|node| node.parent_node_id.is_empty())
+            .map(|node| node.node_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(roots, ["q1", "q2", "q3", "q4"]);
+        assert_eq!(overview.default_leaf_node_id, "leaf");
+        assert_eq!(
+            overview
+                .nodes
+                .iter()
+                .find(|node| node.node_id == "follow")
+                .unwrap()
+                .children_node_ids,
+            ["old", "latest"]
+        );
+    }
+
+    #[test]
     fn handles_orphans_and_cycles_with_sequence_fallback() {
         let raw = json!({"mapping": {
             "a": {"id":"a", "parent":"b", "children":["b"]},

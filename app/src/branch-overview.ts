@@ -1,6 +1,6 @@
 import dagre from '@dagrejs/dagre'
 import { Position, type Edge, type Node } from '@vue-flow/core'
-import type { BranchNode, BranchOverview } from './conversation'
+import type { BranchNode, BranchOverview, SearchMatch } from './conversation'
 
 export const branchNodeWidth = 210
 export const branchNodeHeight = 76
@@ -31,18 +31,37 @@ export function branchConversation(nodes: BranchNode[], leafId: string): BranchN
   const conversation: BranchNode[] = []
   const visited = new Set<string>()
   let current = byId.get(leafId)
-  while (current && visited.add(current.node_id)) {
+  while (current && !visited.has(current.node_id)) {
+    visited.add(current.node_id)
     conversation.push(current)
     current = byId.get(current.parent_node_id)
   }
   return conversation.reverse()
 }
 
+export function branchMessageSeqs(overview: BranchOverview | null, activeLeafId: string, messageCount: number): number[] {
+  if (overview && activeLeafId) return branchConversation(overview.nodes, activeLeafId).map((node) => node.seq)
+  return Array.from({ length: messageCount }, (_, seq) => seq)
+}
+
+export function filterBranchMatches(matches: SearchMatch[], displayedSeqs: number[]): SearchMatch[] {
+  const visible = new Set(displayedSeqs)
+  return matches.filter((match) => visible.has(match.seq))
+}
+
+export function branchReadingIndex(displayedSeqs: number[], savedSeq: number | null, fallbackSeq: number): number {
+  const savedIndex = savedSeq === null ? -1 : displayedSeqs.indexOf(savedSeq)
+  if (savedIndex >= 0) return savedIndex
+  const fallbackIndex = displayedSeqs.indexOf(fallbackSeq)
+  return fallbackIndex >= 0 ? fallbackIndex : 0
+}
+
 export function branchLeaf(nodes: BranchNode[], startId: string): BranchNode | null {
   const byId = new Map(nodes.map((node) => [node.node_id, node]))
   let current = byId.get(startId)
   const visited = new Set<string>()
-  while (current && visited.add(current.node_id)) {
+  while (current && !visited.has(current.node_id)) {
+    visited.add(current.node_id)
     const child = current.children_node_ids[current.children_node_ids.length - 1]
     if (!child || !byId.has(child)) return current
     current = byId.get(child)
