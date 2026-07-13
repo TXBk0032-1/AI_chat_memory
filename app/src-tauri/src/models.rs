@@ -23,12 +23,49 @@ pub struct SessionSummary {
     pub imported_at: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SessionDetail {
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionOpen {
     #[serde(flatten)]
     pub summary: SessionSummary,
+    pub message_count: usize,
+    pub has_branches: bool,
+    pub start_seq: i64,
     pub messages: Vec<Message>,
-    pub raw_data: Option<Value>,
+    pub references: Vec<Reference>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct Reference {
+    pub cite_index: i64,
+    pub url: String,
+    pub title: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchHitField {
+    Content,
+    Thinking,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SessionSearchHit {
+    pub message_id: String,
+    pub seq: i64,
+    pub field: SearchHitField,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct BranchNode {
+    pub message_id: String,
+    pub seq: i64,
+    pub role: String,
+    pub node_id: String,
+    pub parent_node_id: String,
+    pub children_node_ids: Vec<String>,
+    pub preview: String,
 }
 
 #[derive(Debug, Clone)]

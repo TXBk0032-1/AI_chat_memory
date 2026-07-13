@@ -69,8 +69,26 @@ impl AppService {
         let sessions = database::search(&self.pool, &query).await?;
         Ok(SessionList { sessions, total })
     }
-    pub async fn detail(&self, id: &str) -> Result<SessionDetail> {
-        database::get_session(&self.pool, id).await
+    pub async fn open_session(&self, id: &str, anchor_seq: Option<i64>) -> Result<SessionOpen> {
+        database::open_session(&self.pool, id, anchor_seq).await
+    }
+    pub async fn session_messages(
+        &self,
+        id: &str,
+        start_seq: i64,
+        limit: i64,
+    ) -> Result<Vec<Message>> {
+        database::get_session_messages(&self.pool, id, start_seq, limit).await
+    }
+    pub async fn session_search_hits(
+        &self,
+        id: &str,
+        query: &str,
+    ) -> Result<Vec<SessionSearchHit>> {
+        database::search_session_hits(&self.pool, id, query).await
+    }
+    pub async fn session_branches(&self, id: &str) -> Result<Vec<BranchNode>> {
+        database::get_session_branches(&self.pool, id).await
     }
     pub async fn delete(&self, id: &str) -> Result<()> {
         database::delete_session(&self.pool, id).await

@@ -1,6 +1,7 @@
 use crate::{
     models::{
-        AppSettings, DesktopApiStatus, ImportResponse, SearchQuery, SessionDetail, SessionList,
+        AppSettings, BranchNode, DesktopApiStatus, ImportResponse, Message, SearchQuery,
+        SessionList, SessionOpen, SessionSearchHit,
     },
     service::AppService,
 };
@@ -18,11 +19,42 @@ pub async fn search_sessions(
     service.list(query).await.map_err(message)
 }
 #[tauri::command]
-pub async fn get_session(
+pub async fn open_session(
     service: State<'_, AppService>,
     id: String,
-) -> Result<SessionDetail, String> {
-    service.detail(&id).await.map_err(message)
+    anchor_seq: Option<i64>,
+) -> Result<SessionOpen, String> {
+    service.open_session(&id, anchor_seq).await.map_err(message)
+}
+#[tauri::command]
+pub async fn get_session_messages(
+    service: State<'_, AppService>,
+    id: String,
+    start_seq: i64,
+    limit: i64,
+) -> Result<Vec<Message>, String> {
+    service
+        .session_messages(&id, start_seq, limit)
+        .await
+        .map_err(message)
+}
+#[tauri::command]
+pub async fn search_session_hits(
+    service: State<'_, AppService>,
+    id: String,
+    query: String,
+) -> Result<Vec<SessionSearchHit>, String> {
+    service
+        .session_search_hits(&id, &query)
+        .await
+        .map_err(message)
+}
+#[tauri::command]
+pub async fn get_session_branches(
+    service: State<'_, AppService>,
+    id: String,
+) -> Result<Vec<BranchNode>, String> {
+    service.session_branches(&id).await.map_err(message)
 }
 #[tauri::command]
 pub async fn delete_session(service: State<'_, AppService>, id: String) -> Result<(), String> {

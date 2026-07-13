@@ -143,7 +143,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::search_sessions,
-            commands::get_session,
+            commands::open_session,
+            commands::get_session_messages,
+            commands::search_session_hits,
+            commands::get_session_branches,
             commands::delete_session,
             commands::import_deepseek_zip,
             commands::get_settings,
