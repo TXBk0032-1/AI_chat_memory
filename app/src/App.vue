@@ -124,6 +124,7 @@ const toast = ref('')
 const activeBranchNode = ref('')
 const contextMenu = ref({ visible: false, x: 0, y: 0, selectedText: '' })
 const pageSize = 100
+const clickDebounceMs = 250
 let statusTimer: number | undefined
 let unlistenCloseRequest: UnlistenFn | undefined
 let resizeStartX = 0
@@ -132,14 +133,19 @@ let toastTimer: number | undefined
 let mermaidRenderVersion = 0
 let systemThemeQuery: MediaQueryList | undefined
 let savedThemeBeforeSettings: SettingsModel['theme'] = 'system'
+const lastControlClicks = new WeakMap<Element, number>()
 
 function effectiveTheme(preference = settings.value.theme) {
   return preference === 'system' ? (systemThemeQuery?.matches ? 'dark' : 'light') : preference
 }
 
 function commitTheme(preference: SettingsModel['theme'], animate = true) {
+  const theme = effectiveTheme(preference)
+  if (document.documentElement.dataset.theme === theme) {
+    document.documentElement.style.colorScheme = theme
+    return
+  }
   const apply = () => {
-    const theme = effectiveTheme(preference)
     document.documentElement.dataset.theme = theme
     document.documentElement.style.colorScheme = theme
     mermaidInstance = null
@@ -453,8 +459,33 @@ function hideContextMenu() {
   contextMenu.value.visible = false
 }
 
+function hidePopupMenus() {
+  hideContextMenu()
+  showDetailMenu.value = false
+}
+
+function toggleDetailMenu() {
+  hideContextMenu()
+  showDetailMenu.value = !showDetailMenu.value
+}
+
+function preventRapidControlClick(event: MouseEvent) {
+  const target = event.target instanceof Element ? event.target : null
+  const control = target?.closest('button, a[href], select, .switch, .close-options label, [role="button"], [role="menuitem"], [role="radio"]')
+  if (!control) return
+  const now = performance.now()
+  const previous = lastControlClicks.get(control) ?? -Infinity
+  if (now - previous < clickDebounceMs) {
+    event.preventDefault()
+    event.stopImmediatePropagation()
+    return
+  }
+  lastControlClicks.set(control, now)
+}
+
 function handleContextMenu(event: MouseEvent) {
   event.preventDefault()
+  showDetailMenu.value = false
   const target = event.target as HTMLElement
   if (!target.closest('.detail-pane')) {
     hideContextMenu()
@@ -490,7 +521,9 @@ function selectConversationContent() {
 }
 
 function handleContextMenuKey(event: KeyboardEvent) {
-  if (event.key === 'Escape') hideContextMenu()
+  if (event.key !== 'Escape') return
+  hidePopupMenus()
+  showFilters.value = false
 }
 
 async function openMarkdownLink(event: MouseEvent) {
@@ -598,6 +631,7 @@ onMounted(async () => {
   systemThemeQuery.addEventListener('change', handleSystemThemeChange)
   commitTheme('system', false)
   window.addEventListener('keydown', handleContextMenuKey)
+  document.addEventListener('click', preventRapidControlClick, true)
   document.addEventListener('scroll', hideContextMenu, true)
   unlistenCloseRequest = await listen('close-behavior-requested', () => {
     pendingCloseBehavior.value = null
@@ -613,6 +647,7 @@ watch([selected, expandedThinking, detailMode], () => { void renderMermaidDiagra
 onBeforeUnmount(() => {
   systemThemeQuery?.removeEventListener('change', handleSystemThemeChange)
   window.removeEventListener('keydown', handleContextMenuKey)
+  document.removeEventListener('click', preventRapidControlClick, true)
   document.removeEventListener('scroll', hideContextMenu, true)
   window.clearInterval(statusTimer)
   window.clearTimeout(toastTimer)
@@ -625,7 +660,7 @@ function handleSystemThemeChange() {
 </script>
 
 <template>
-  <div class="app-frame" @click="hideContextMenu" @contextmenu="handleContextMenu">
+  <div class="app-frame" @click="hidePopupMenus" @contextmenu="handleContextMenu">
     <aside class="sidebar">
       <div class="identity">
         <div class="identity-mark"><MessageSquareText :size="20" /></div>
@@ -718,8 +753,8 @@ function handleSystemThemeChange() {
           <template v-else-if="selected">
             <div class="detail-header">
               <div class="detail-title"><span class="platform-badge"><i :class="selected.platform"></i>{{ platformName(selected.platform) }}</span><h2>{{ selected.title || '未命名对话' }}</h2><p>{{ selected.messages.length }} 条消息 · {{ formatDate(selected.updated_at) }}</p></div>
-              <div class="detail-actions">
-                <button class="icon-button" title="更多操作" aria-haspopup="menu" :aria-expanded="showDetailMenu" @click="showDetailMenu=!showDetailMenu"><MoreHorizontal :size="19" /></button>
+              <div class="detail-actions" @click.stop>
+                <button class="icon-button" title="更多操作" aria-haspopup="menu" :aria-expanded="showDetailMenu" @click="toggleDetailMenu"><MoreHorizontal :size="19" /></button>
                 <div v-if="showDetailMenu" class="detail-menu" role="menu">
                   <button role="menuitem" @click="showSessionInfo=true; showDetailMenu=false">对话详细信息</button>
                   <button class="danger" role="menuitem" @click="showDeletePrompt=true; showDetailMenu=false"><Trash2 :size="14" />删除对话</button>
@@ -770,7 +805,7 @@ function handleSystemThemeChange() {
     <Transition name="settings-modal">
       <div v-if="showSettings" class="dialog-backdrop" @click.self="closeSettings()">
         <section class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-        <header><div><h2 id="settings-title">应用设置</h2><p>配置界面、桌面行为和本地同步服务</p></div><button class="icon-button" title="关闭" @click="closeSettings()"><X :size="18" /></button></header>
+        <header><div><h2 id="settings-title">应用设置</h2><p>配置界面、桌面行为和本地同步服务</p></div></header>
         <div class="settings-content">
           <section class="setting-group theme-setting">
             <div><h3>外观</h3><p>选择应用配色，跟随系统会随 Windows 主题自动切换。</p></div>
@@ -810,7 +845,6 @@ function handleSystemThemeChange() {
         <section class="info-dialog" role="dialog" aria-modal="true" aria-labelledby="info-title">
           <header><h2 id="info-title">对话详细信息</h2><button class="icon-button" title="关闭" @click="showSessionInfo=false"><X :size="18" /></button></header>
           <dl><dt>标题</dt><dd>{{ selected.title || '未命名对话' }}</dd><dt>来源</dt><dd>{{ platformName(selected.platform) }}</dd><dt>来源会话 ID</dt><dd class="identifier">{{ selected.platform_session_id }}</dd><dt>创建时间</dt><dd>{{ formatDate(selected.created_at) }}</dd><dt>更新时间</dt><dd>{{ formatDate(selected.updated_at) }}</dd><dt>消息数量</dt><dd>{{ selected.messages.length }}</dd></dl>
-          <footer><button class="primary-button" @click="showSessionInfo=false">关闭</button></footer>
         </section>
       </div>
     </Transition>
