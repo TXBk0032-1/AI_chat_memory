@@ -24,6 +24,9 @@ import {
   Server,
   Settings,
   ShieldCheck,
+  Monitor,
+  Moon,
+  Sun,
   Trash2,
   X,
 } from 'lucide-vue-next'
@@ -60,6 +63,7 @@ type SettingsModel = {
   data_directory?: string
   close_behavior: 'ask' | 'hide_to_tray' | 'exit'
   tray_click_behavior: 'show_menu' | 'open_window' | 'no_action'
+  theme: 'system' | 'light' | 'dark'
 }
 type ApiStatus = { service: { state: string; message?: string }; userscript_connected: boolean; last_userscript_request_at?: number }
 
@@ -79,7 +83,7 @@ let mermaidInstance: typeof import('mermaid')['default'] | null = null
 async function loadMermaid() {
   if (!mermaidInstance) {
     mermaidInstance = (await import('mermaid')).default
-    mermaidInstance.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'neutral', fontFamily: 'Inter, Segoe UI, Microsoft YaHei, sans-serif' })
+    mermaidInstance.initialize({ startOnLoad: false, securityLevel: 'strict', theme: effectiveTheme() === 'dark' ? 'dark' : 'neutral', fontFamily: 'Inter, Segoe UI, Microsoft YaHei, sans-serif' })
   }
   return mermaidInstance
 }
@@ -105,7 +109,7 @@ const showSessionInfo = ref(false)
 const pendingCloseBehavior = ref<'hide_to_tray' | 'exit' | null>(null)
 const detailMode = ref<'conversation' | 'branches'>('conversation')
 const expandedThinking = ref(new Set<string>())
-const settings = ref<SettingsModel>({ setup_complete: false, secret_enabled: false, allowed_origins: [], migrated_legacy_database: false, close_behavior: 'ask', tray_click_behavior: 'show_menu' })
+const settings = ref<SettingsModel>({ setup_complete: false, secret_enabled: false, allowed_origins: [], migrated_legacy_database: false, close_behavior: 'ask', tray_click_behavior: 'show_menu', theme: 'system' })
 const originText = ref('')
 const total = ref(0)
 const page = ref(0)
@@ -126,6 +130,48 @@ let resizeStartX = 0
 let resizeStartWidth = 0
 let toastTimer: number | undefined
 let mermaidRenderVersion = 0
+let systemThemeQuery: MediaQueryList | undefined
+let savedThemeBeforeSettings: SettingsModel['theme'] = 'system'
+
+function effectiveTheme(preference = settings.value.theme) {
+  return preference === 'system' ? (systemThemeQuery?.matches ? 'dark' : 'light') : preference
+}
+
+function commitTheme(preference: SettingsModel['theme'], animate = true) {
+  const apply = () => {
+    const theme = effectiveTheme(preference)
+    document.documentElement.dataset.theme = theme
+    document.documentElement.style.colorScheme = theme
+    mermaidInstance = null
+  }
+  const documentWithTransitions = document as Document & { startViewTransition?: (callback: () => void) => void }
+  if (animate && documentWithTransitions.startViewTransition) documentWithTransitions.startViewTransition(apply)
+  else if (animate) {
+    document.documentElement.classList.add('theme-transition')
+    void document.documentElement.offsetWidth
+    apply()
+    window.setTimeout(() => document.documentElement.classList.remove('theme-transition'), 360)
+  } else apply()
+  window.setTimeout(() => {
+    document.querySelectorAll<HTMLElement>('.mermaid-diagram').forEach((element) => {
+      element.removeAttribute('data-rendered')
+    })
+    void renderMermaidDiagrams()
+  }, animate ? 180 : 0)
+}
+
+function previewTheme(theme: SettingsModel['theme']) {
+  settings.value.theme = theme
+  commitTheme(theme)
+}
+
+function closeSettings(save = false) {
+  if (!save) {
+    settings.value.theme = savedThemeBeforeSettings
+    commitTheme(savedThemeBeforeSettings)
+  }
+  showSettings.value = false
+}
 
 const filtered = computed(() => Boolean(query.value || platform.value || dateFrom.value || dateTo.value))
 const hasBranches = computed(() => selected.value?.messages.some((message) => metadata(message, 'source') === 'deepseek_export') ?? false)
@@ -305,6 +351,7 @@ async function importZip() {
 
 async function openSettings() {
   settings.value = await invoke('get_settings')
+  savedThemeBeforeSettings = settings.value.theme
   originText.value = settings.value.allowed_origins.join('\n')
   secretCopied.value = false
   showSettings.value = true
@@ -315,7 +362,8 @@ async function saveSettings() {
   settings.value.setup_complete = true
   try {
     settings.value = await invoke('save_settings', { settings: settings.value })
-    showSettings.value = false
+    savedThemeBeforeSettings = settings.value.theme
+    closeSettings(true)
   } catch (reason) {
     error.value = String(reason)
   }
@@ -546,6 +594,9 @@ function branchDepth(message: Message) {
 }
 
 onMounted(async () => {
+  systemThemeQuery = window.matchMedia('(prefers-color-scheme: dark)')
+  systemThemeQuery.addEventListener('change', handleSystemThemeChange)
+  commitTheme('system', false)
   window.addEventListener('keydown', handleContextMenuKey)
   document.addEventListener('scroll', hideContextMenu, true)
   unlistenCloseRequest = await listen('close-behavior-requested', () => {
@@ -553,18 +604,24 @@ onMounted(async () => {
     showClosePrompt.value = true
   })
   settings.value = await invoke('get_settings')
+  commitTheme(settings.value.theme, false)
   await refreshApiStatus()
   statusTimer = window.setInterval(refreshApiStatus, 3000)
   await loadSessions()
 })
 watch([selected, expandedThinking, detailMode], () => { void renderMermaidDiagrams() }, { flush: 'post' })
 onBeforeUnmount(() => {
+  systemThemeQuery?.removeEventListener('change', handleSystemThemeChange)
   window.removeEventListener('keydown', handleContextMenuKey)
   document.removeEventListener('scroll', hideContextMenu, true)
   window.clearInterval(statusTimer)
   window.clearTimeout(toastTimer)
   unlistenCloseRequest?.()
 })
+
+function handleSystemThemeChange() {
+  if (settings.value.theme === 'system') commitTheme('system')
+}
 </script>
 
 <template>
@@ -711,10 +768,18 @@ onBeforeUnmount(() => {
     </main>
 
     <Transition name="settings-modal">
-      <div v-if="showSettings" class="dialog-backdrop" @click.self="showSettings=false">
+      <div v-if="showSettings" class="dialog-backdrop" @click.self="closeSettings()">
         <section class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-        <header><div><h2 id="settings-title">应用设置</h2><p>配置本地同步服务和数据迁移</p></div><button class="icon-button" title="关闭" @click="showSettings=false"><X :size="18" /></button></header>
+        <header><div><h2 id="settings-title">应用设置</h2><p>配置界面、桌面行为和本地同步服务</p></div><button class="icon-button" title="关闭" @click="closeSettings()"><X :size="18" /></button></header>
         <div class="settings-content">
+          <section class="setting-group theme-setting">
+            <div><h3>外观</h3><p>选择应用配色，跟随系统会随 Windows 主题自动切换。</p></div>
+            <div class="theme-options" role="radiogroup" aria-label="应用主题">
+              <button :class="{ active: settings.theme === 'system' }" role="radio" :aria-checked="settings.theme === 'system'" @click="previewTheme('system')"><Monitor :size="16" /><span>跟随系统</span></button>
+              <button :class="{ active: settings.theme === 'light' }" role="radio" :aria-checked="settings.theme === 'light'" @click="previewTheme('light')"><Sun :size="16" /><span>亮色</span></button>
+              <button :class="{ active: settings.theme === 'dark' }" role="radio" :aria-checked="settings.theme === 'dark'" @click="previewTheme('dark')"><Moon :size="16" /><span>深色</span></button>
+            </div>
+          </section>
           <section class="setting-group">
             <div class="setting-row"><div><h3>数据保存位置</h3><p class="path-value">{{ settings.data_directory || '系统默认应用数据目录' }}</p></div><button class="secondary-button" @click="changeDataDirectory">更改位置</button></div>
           </section>
@@ -735,7 +800,7 @@ onBeforeUnmount(() => {
             <button v-if="!settings.migrated_legacy_database" class="secondary-button" @click="migrateLegacy">选择数据库</button>
           </section>
         </div>
-        <footer><button class="secondary-button" @click="showSettings=false">取消</button><button class="primary-button" @click="saveSettings">保存设置</button></footer>
+        <footer><button class="secondary-button" @click="closeSettings()">取消</button><button class="primary-button" @click="saveSettings">保存设置</button></footer>
         </section>
       </div>
     </Transition>

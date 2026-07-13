@@ -108,6 +108,8 @@ pub struct AppSettings {
     pub close_behavior: CloseBehavior,
     #[serde(default)]
     pub tray_click_behavior: TrayClickBehavior,
+    #[serde(default)]
+    pub theme: ThemePreference,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +130,15 @@ pub enum TrayClickBehavior {
     NoAction,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemePreference {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
@@ -144,6 +155,7 @@ impl Default for AppSettings {
             data_directory: None,
             close_behavior: CloseBehavior::Ask,
             tray_click_behavior: TrayClickBehavior::ShowMenu,
+            theme: ThemePreference::System,
         }
     }
 }

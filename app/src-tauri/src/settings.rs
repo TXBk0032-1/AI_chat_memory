@@ -125,6 +125,7 @@ mod tests {
             crate::models::TrayClickBehavior::ShowMenu
         );
         assert!(settings.data_directory.is_none());
+        assert_eq!(settings.theme, crate::models::ThemePreference::System);
     }
 
     #[test]
@@ -132,5 +133,6 @@ mod tests {
         let settings = AppSettings::default();
         assert!(!settings.secret_enabled);
         assert!(settings.secret.is_none());
+        assert_eq!(settings.theme, crate::models::ThemePreference::System);
     }
 }
