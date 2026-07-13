@@ -777,7 +777,10 @@ function handleSystemThemeChange() {
       </div>
 
       <nav aria-label="主要导航">
-        <button class="nav-item active" title="全部对话" aria-label="全部对话"><Inbox :size="17" /><span>全部对话</span><em>{{ total }}</em></button>
+        <button class="nav-item active" title="全部对话" aria-label="全部对话">
+          <span class="nav-item-expanded"><Inbox :size="17" /><span>全部对话</span><em>{{ total }}</em></span>
+          <em class="nav-item-collapsed" aria-hidden="true">{{ total }}</em>
+        </button>
       </nav>
 
       <div class="sidebar-section">
