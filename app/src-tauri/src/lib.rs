@@ -1,3 +1,4 @@
+mod branch;
 mod commands;
 mod database;
 mod error;

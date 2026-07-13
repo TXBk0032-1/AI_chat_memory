@@ -86,7 +86,7 @@ impl AppService {
     ) -> Result<Vec<SessionSearchHit>> {
         database::search_session_hits(&self.pool, id, query).await
     }
-    pub async fn session_branches(&self, id: &str) -> Result<Vec<BranchNode>> {
+    pub async fn session_branches(&self, id: &str) -> Result<BranchOverview> {
         database::get_session_branches(&self.pool, id).await
     }
     pub async fn delete(&self, id: &str) -> Result<()> {

@@ -68,6 +68,12 @@ pub struct BranchNode {
     pub preview: String,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct BranchOverview {
+    pub nodes: Vec<BranchNode>,
+    pub default_leaf_node_id: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct NormalizedSession {
     pub id: String,

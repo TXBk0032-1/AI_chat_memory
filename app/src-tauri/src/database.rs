@@ -7,8 +7,8 @@ use std::path::Path;
 use crate::{
     error::{AppError, Result},
     models::{
-        BranchNode, Message, NormalizedSession, Reference, SearchHitField, SearchQuery,
-        SessionOpen, SessionSearchHit, SessionSummary,
+        BranchNode, BranchOverview, Message, NormalizedSession, Reference, SearchHitField,
+        SearchQuery, SessionOpen, SessionSearchHit, SessionSummary,
     },
 };
 
@@ -246,12 +246,22 @@ pub async fn search_session_hits(
     Ok(hits)
 }
 
-pub async fn get_session_branches(pool: &SqlitePool, id: &str) -> Result<Vec<BranchNode>> {
+pub async fn get_session_branches(pool: &SqlitePool, id: &str) -> Result<BranchOverview> {
+    let raw_data: Option<String> = sqlx::query_scalar("SELECT raw_data FROM sessions WHERE id = ?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound("session".into()))?;
+    let raw_data = raw_data
+        .map(|raw| serde_json::from_str(&raw))
+        .transpose()?
+        .unwrap_or(serde_json::Value::Null);
     let rows = sqlx::query("SELECT id, role, content, metadata, seq FROM messages WHERE session_id = ? AND json_extract(metadata, '$.source') = 'deepseek_export' ORDER BY seq")
         .bind(id)
         .fetch_all(pool)
         .await?;
-    rows.into_iter()
+    let nodes = rows
+        .into_iter()
         .map(|row| -> Result<BranchNode> {
             let metadata: serde_json::Value =
                 serde_json::from_str(&row.try_get::<String, _>("metadata")?)?;
@@ -281,7 +291,8 @@ pub async fn get_session_branches(pool: &SqlitePool, id: &str) -> Result<Vec<Bra
                 }),
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()?;
+    Ok(crate::branch::build_overview(nodes, &raw_data))
 }
 
 fn initial_start_seq(anchor_seq: Option<i64>, message_count: i64, batch_size: i64) -> i64 {
@@ -499,11 +510,12 @@ mod tests {
         assert_eq!(hits[1].count, 2);
 
         let branches = get_session_branches(&pool, "branch").await.unwrap();
-        assert_eq!(branches.len(), 1);
-        assert_eq!(branches[0].node_id, "node-1");
-        assert_eq!(branches[0].children_node_ids, ["node-2"]);
-        assert_eq!(branches[0].preview.chars().count(), 161);
-        assert!(branches[0].preview.ends_with('…'));
+        assert_eq!(branches.nodes.len(), 1);
+        assert_eq!(branches.nodes[0].node_id, "node-1");
+        assert!(branches.nodes[0].children_node_ids.is_empty());
+        assert_eq!(branches.nodes[0].preview.chars().count(), 161);
+        assert!(branches.nodes[0].preview.ends_with('…'));
+        assert_eq!(branches.default_leaf_node_id, "node-1");
     }
 
     #[tokio::test]

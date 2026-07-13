@@ -1,6 +1,6 @@
 use crate::{
     models::{
-        AppSettings, BranchNode, DesktopApiStatus, ImportResponse, Message, SearchQuery,
+        AppSettings, BranchOverview, DesktopApiStatus, ImportResponse, Message, SearchQuery,
         SessionList, SessionOpen, SessionSearchHit,
     },
     service::AppService,
@@ -53,7 +53,7 @@ pub async fn search_session_hits(
 pub async fn get_session_branches(
     service: State<'_, AppService>,
     id: String,
-) -> Result<Vec<BranchNode>, String> {
+) -> Result<BranchOverview, String> {
     service.session_branches(&id).await.map_err(message)
 }
 #[tauri::command]
