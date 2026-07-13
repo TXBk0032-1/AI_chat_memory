@@ -35,12 +35,14 @@ import {
 import { useVirtualizer } from '@tanstack/vue-virtual'
 import 'katex/dist/katex.min.css'
 import MessageBlock from './MessageBlock.vue'
+import BranchOverviewView from './BranchOverview.vue'
 import {
   expandSearchHits,
   loadReadingPosition,
   mergeMessageBatch,
   saveReadingPosition,
   type BranchNode,
+  type BranchOverview,
   type Message,
   type SearchHit,
   type SearchMatch,
@@ -79,7 +81,9 @@ const sessions = ref<SessionSummary[]>([])
 const selected = ref<SessionOpen | null>(null)
 const messageSlots = ref<Array<Message | undefined>>([])
 const sessionSearchHits = ref<SearchHit[]>([])
-const branchNodes = ref<BranchNode[]>([])
+const branchOverview = ref<BranchOverview | null>(null)
+const branchesLoading = ref(false)
+const branchesError = ref('')
 const backgroundLoadFailed = ref(false)
 const messageListRef = ref<HTMLElement | null>(null)
 const loading = ref(false)
@@ -155,7 +159,9 @@ function clearSelectedSession() {
   selected.value = null
   messageSlots.value = []
   sessionSearchHits.value = []
-  branchNodes.value = []
+  branchOverview.value = null
+  branchesLoading.value = false
+  branchesError.value = ''
   expandedThinking.value = new Set()
 }
 
@@ -216,17 +222,6 @@ const sourceAccent = computed(() => ({ deepseek: '#4d8fe8', doubao: '#e05c62', k
 const selectedMatches = computed<SearchMatch[]>(() => expandSearchHits(sessionSearchHits.value))
 const loadedMessageCount = computed(() => messageSlots.value.reduce((count, message) => count + (message ? 1 : 0), 0))
 const compactReferences = computed(() => new Map((selected.value?.references ?? []).map((reference) => [reference.cite_index, reference])))
-const branchPath = computed(() => {
-  const path = new Set<string>()
-  const byNode = new Map(branchNodes.value.map((node) => [node.node_id, node]))
-  let node = activeBranchNode.value || branchNodes.value[branchNodes.value.length - 1]?.node_id || ''
-  while (node && !path.has(node)) {
-    path.add(node)
-    node = byNode.get(node)?.parent_node_id || ''
-  }
-  return path
-})
-
 function epoch(value: string, end = false) {
   if (!value) return null
   return String(new Date(`${value}T${end ? '23:59:59' : '00:00:00'}`).getTime() / 1000)
@@ -275,7 +270,8 @@ async function selectSession(id: string) {
   detailLoading.value = true
   error.value = ''
   sessionSearchHits.value = []
-  branchNodes.value = []
+  branchOverview.value = null
+  branchesError.value = ''
   try {
     const readingPosition = loadReadingPosition(id)
     const opened = await invoke<SessionOpen>('open_session', { id, anchorSeq: readingPosition?.seq ?? null })
@@ -414,15 +410,19 @@ async function loadSearchHits(generation = sessionLoadGeneration) {
 }
 
 async function loadBranches() {
-  if (!selected.value || branchNodes.value.length) return
+  if (!selected.value || branchOverview.value || branchesLoading.value) return
   const generation = ++branchLoadGeneration
+  branchesLoading.value = true
+  branchesError.value = ''
   try {
-    const branches = await invoke<BranchNode[]>('get_session_branches', { id: selected.value.id })
+    const overview = await invoke<BranchOverview>('get_session_branches', { id: selected.value.id })
     if (generation !== branchLoadGeneration) return
-    branchNodes.value = branches
-    activeBranchNode.value ||= branches[branches.length - 1]?.node_id || ''
+    branchOverview.value = overview
+    activeBranchNode.value ||= overview.default_leaf_node_id
   } catch (reason) {
-    error.value = String(reason)
+    if (generation === branchLoadGeneration) branchesError.value = String(reason)
+  } finally {
+    if (generation === branchLoadGeneration) branchesLoading.value = false
   }
 }
 
@@ -677,17 +677,6 @@ function roleName(value: string) {
   return value === 'user' ? '你' : value === 'assistant' ? 'AI' : value
 }
 
-function branchDepth(message: BranchNode) {
-  let depth = 0
-  let parent = message.parent_node_id
-  const map = new Map(branchNodes.value.map((item) => [item.node_id, item]))
-  while (parent && map.has(parent) && depth < 12) {
-    depth += 1
-    parent = map.get(parent)?.parent_node_id || ''
-  }
-  return depth
-}
-
 function persistReadingPosition() {
   if (!selected.value || !messageListRef.value) return
   const scrollTop = messageListRef.value.scrollTop
@@ -856,7 +845,7 @@ function handleSystemThemeChange() {
             </div>
             <div v-if="hasBranches" class="segmented-control">
               <button :class="{ active: detailMode === 'conversation' }" @click="detailMode='conversation'"><MessageSquareText :size="15" />对话</button>
-              <button :class="{ active: detailMode === 'branches' }" @click="showBranches"><GitBranch :size="15" />分支</button>
+              <button :class="{ active: detailMode === 'branches' }" @click="showBranches"><GitBranch :size="15" />分支预览</button>
             </div>
             <div v-if="committedQuery && detailMode === 'conversation'" class="search-navigation">
               <span>{{ selectedMatches.length ? `${Math.max(searchHitIndex + 1, 0)} / ${selectedMatches.length}` : '当前对话无正文命中' }}</span>
@@ -864,7 +853,7 @@ function handleSystemThemeChange() {
               <button class="icon-button" title="下一个命中" :disabled="!selectedMatches.length" @click="navigateSearch(1)"><ArrowDown :size="15" /></button>
               <label><input v-model="loopSearch" type="checkbox" />循环</label>
             </div>
-            <div ref="messageListRef" class="message-list" @scroll.passive="handleMessageScroll" @click="openMarkdownLink">
+            <div ref="messageListRef" :class="['message-list', { 'branch-mode': detailMode === 'branches' }]" @scroll.passive="handleMessageScroll" @click="openMarkdownLink">
               <div v-if="selectedMatches.length" class="search-scroll-markers" aria-hidden="true">
                 <i v-for="(match, index) in selectedMatches" :key="`${match.message_id}-${match.field}-${index}`" :style="{ top: `${(match.seq + 0.5) / Math.max(selected.message_count, 1) * 100}%` }"></i>
               </div>
@@ -892,13 +881,11 @@ function handleSystemThemeChange() {
                     <div v-else class="message-placeholder" @vue:mounted="ensureMessageLoaded(virtualMessage.index)"><LoaderCircle class="spinning" :size="16" /><span>加载消息</span></div>
                   </div>
                 </div>
-                <div v-else key="branches" class="branch-list">
-                  <header><div><strong>对话分支</strong><span>{{ branchNodes.length }} 个节点</span></div><small>选择节点可返回对应消息</small></header>
-                  <div class="branch-tree">
-                    <button v-for="message in branchNodes" :key="message.message_id" :class="['branch-row', { current: activeBranchNode === message.node_id, path: branchPath.has(message.node_id) }]" :style="{ '--branch-depth': branchDepth(message) }" @click="selectBranch(message)">
-                      <i class="branch-rail"></i><span class="branch-node"></span><div><strong>{{ roleName(message.role) }}</strong><p>{{ message.preview || '空消息' }}</p><small>{{ message.children_node_ids.length }} 个后续节点</small></div>
-                    </button>
-                  </div>
+                <div v-else key="branches" class="branch-view">
+                  <div v-if="branchesLoading" class="branch-state"><LoaderCircle class="spinning" :size="22" /><span>正在构建分支预览</span></div>
+                  <div v-else-if="branchesError" class="branch-state error"><GitBranch :size="25" /><strong>分支预览加载失败</strong><span>{{ branchesError }}</span><button class="secondary-button compact" @click="loadBranches">重试</button></div>
+                  <div v-else-if="branchOverview && !branchOverview.nodes.length" class="branch-state"><GitBranch :size="28" /><strong>没有可预览的分支节点</strong></div>
+                  <BranchOverviewView v-else-if="branchOverview" :overview="branchOverview" :active-node-id="activeBranchNode" @select="selectBranch" />
                 </div>
               </Transition>
             </div>

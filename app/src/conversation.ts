@@ -51,6 +51,11 @@ export type BranchNode = {
   preview: string
 }
 
+export type BranchOverview = {
+  nodes: BranchNode[]
+  default_leaf_node_id: string
+}
+
 export type ReadingPosition = { seq: number; offset: number; updatedAt: number }
 
 const readingPositionKey = 'ai-chat-memory-reading-positions-v1'

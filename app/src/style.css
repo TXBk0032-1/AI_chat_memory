@@ -176,7 +176,7 @@ i.deepseek { background: #5273e6; } i.doubao { background: #e36f53; } i.kimi { b
 .inline-retry { margin-left: 7px; padding: 0; border: 0; color: #28745f; background: transparent; cursor: pointer; font: inherit; font-weight: 700; text-decoration: underline; }
 .search-scroll-markers { position: sticky; z-index: 8; top: 0; float: right; width: 5px; height: 100%; margin-right: -21px; pointer-events: none; }
 .search-scroll-markers i { position: absolute; right: 0; width: 5px; height: 3px; border-radius: 2px 0 0 2px; background: #e6b800; box-shadow: 0 0 0 1px #fff; }
-.conversation-view, .branch-list { transform-origin: 50% 20%; }
+.conversation-view, .branch-view { transform-origin: 50% 20%; }
 .detail-camera-enter-active, .detail-camera-leave-active { transition: opacity .2s ease, transform .24s cubic-bezier(.2, .8, .2, 1), filter .22s ease; }
 .detail-camera-enter-from { opacity: 0; transform: translateX(16px) scale(.985); filter: blur(2px); }
 .detail-camera-leave-to { opacity: 0; transform: translateX(-12px) scale(1.01); filter: blur(1px); }
@@ -218,24 +218,34 @@ i.deepseek { background: #5273e6; } i.doubao { background: #e36f53; } i.kimi { b
 .thinking-reveal > div { min-height: 0; overflow: hidden; }
 .thinking.open .thinking-reveal { grid-template-rows: 1fr; opacity: 1; transform: translateY(0); }
 .thinking .markdown { margin-top: 10px; color: #66706d; font-size: 12px; }
-.branch-list { padding-top: 10px; }
-.branch-list > header { padding: 8px 10px 16px; display: flex; align-items: flex-end; justify-content: space-between; gap: 14px; }
-.branch-list > header strong, .branch-list > header span { display: block; }
-.branch-list > header strong { color: #30383c; font-size: 13px; }
-.branch-list > header span, .branch-list > header small { margin-top: 3px; color: #899195; font-size: 10px; }
-.branch-tree { padding: 4px 8px 16px; }
-.branch-row { --indent: calc(min(var(--branch-depth), 8) * 22px); position: relative; width: calc(100% - var(--indent)); min-height: 62px; margin-left: var(--indent); display: grid; grid-template-columns: 12px minmax(0, 1fr); gap: 10px; padding: 10px 12px 10px 8px; border: 1px solid transparent; border-radius: 6px; color: #414a4e; background: transparent; text-align: left; transition: background-color .2s ease, border-color .2s ease, transform .22s ease, box-shadow .22s ease; }
-.branch-row:hover { background: #f5f7f6; }
-.branch-row.current { border-color: #9bc4b8; background: #eaf5f1; box-shadow: 0 5px 16px #183d3212; transform: translateX(2px); }
-.branch-rail { position: absolute; left: -12px; top: -12px; bottom: 50%; width: 12px; border-left: 1px solid #cbd4d1; border-bottom: 1px solid #cbd4d1; border-radius: 0 0 0 6px; }
-.branch-row.path .branch-rail { border-color: #4a9d85; }
-.branch-node { width: 9px; height: 9px; margin-top: 5px; border: 2px solid #aeb9b5; border-radius: 50%; background: #fff; }
-.branch-row.path .branch-node { border-color: #338a72; background: #dcefe9; }
-.branch-row.current .branch-node { border-color: #167961; background: #167961; box-shadow: 0 0 0 3px #1679611f; }
-.branch-row > div { min-width: 0; }
-.branch-row strong { color: #27705e; font-size: 10px; }
-.branch-row p { margin: 4px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; }
-.branch-row small { display: block; margin-top: 5px; color: #939b9f; font-size: 9px; }
+.message-list.branch-mode { padding: 0; overflow: hidden; background: #f7f9f9; }
+.branch-view, .branch-overview { width: 100%; height: 100%; min-height: 0; }
+.branch-view { position: relative; }
+.branch-state { height: 100%; min-height: 260px; padding: 24px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: #899397; font-size: 11px; text-align: center; }
+.branch-state strong { color: #4c565a; font-size: 12px; }
+.branch-state.error span { max-width: 420px; overflow-wrap: anywhere; color: #a04e48; }
+.branch-overview { position: relative; background-image: radial-gradient(circle, #aeb8b955 1px, transparent 1px); background-size: 18px 18px; }
+.branch-overview .vue-flow__pane { cursor: grab; }
+.branch-overview .vue-flow__pane:active { cursor: grabbing; }
+.branch-overview .vue-flow__node { border: 0; border-radius: 6px; background: transparent; box-shadow: none; transition: filter .22s ease, transform .22s cubic-bezier(.2, .85, .25, 1); }
+.branch-overview .vue-flow__node:hover { filter: brightness(.985); transform: translateY(-2px); }
+.branch-overview .vue-flow__handle { width: 7px; height: 7px; border: 2px solid #fff; background: #9aa6a3; opacity: 0; pointer-events: none; }
+.branch-card { position: relative; width: 210px; height: 76px; padding: 10px 12px; overflow: hidden; border: 1px solid #cfd7d9; border-radius: 6px; color: #364044; background: #fff; box-shadow: 0 4px 13px #1a292f12; transition: border-color .24s ease, background-color .24s ease, box-shadow .24s ease, transform .24s cubic-bezier(.2, .85, .25, 1); }
+.branch-card.user { border-left: 3px solid #438c79; }
+.branch-card.assistant { border-left: 3px solid #7184a7; }
+.branch-card.path { border-color: #78aa9c; background: #f4faf8; }
+.branch-card.current { color: #fff; border-color: #167961; background: #167961; box-shadow: 0 7px 20px #16796142; transform: scale(1.035); }
+.branch-card header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.branch-card strong { color: #29715f; font-size: 10px; font-weight: 700; }
+.branch-card header span { color: #9aa2a6; font-size: 9px; }
+.branch-card p { height: 32px; margin: 6px 0 0; overflow: hidden; display: -webkit-box; color: inherit; font-size: 10px; line-height: 16px; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.branch-card small { position: absolute; right: 11px; bottom: 6px; color: #7e8a87; font-size: 8px; }
+.branch-card.current strong, .branch-card.current header span, .branch-card.current small { color: #dff7ef; }
+.branch-overview .vue-flow__edge-path { stroke: #b8c2bf; stroke-width: 1.4; transition: stroke .26s ease, stroke-width .26s ease; }
+.branch-overview .branch-edge-path .vue-flow__edge-path { stroke: #2d9679; stroke-width: 2.1; }
+.branch-controls { position: absolute; z-index: 8; right: 14px; bottom: 14px; display: grid; grid-template-columns: repeat(3, 32px); padding: 3px; border: 1px solid #cfd6d8; border-radius: 6px; background: #ffffffeb; box-shadow: 0 6px 18px #17272d24; backdrop-filter: blur(8px); }
+.branch-controls button { width: 32px; height: 32px; padding: 0; border: 0; border-radius: 4px; display: grid; place-items: center; color: #5f6a6e; background: transparent; }
+.branch-controls button:hover { color: #166e58; background: #edf5f2; }
 .detail-footer { min-height: 54px; display: flex; align-items: center; justify-content: flex-end; padding: 0 24px; border-top: 1px solid #e2e5e6; }
 .danger-button { height: 32px; border: 1px solid #ddb6b3; color: #a33c36; background: #fff; }
 .danger-button:hover { background: #fff5f4; }
@@ -398,13 +408,20 @@ html[data-theme="dark"] .thinking .markdown { color: #bfc7c4; }
 html[data-theme="dark"] .message-placeholder { color: #7f8a8f; }
 html[data-theme="dark"] .load-progress { color: #66b99d; }
 html[data-theme="dark"] .inline-retry { color: #72c3a8; }
-html[data-theme="dark"] .branch-list > header strong,
-html[data-theme="dark"] .branch-row { color: #d8dfe1; }
-html[data-theme="dark"] .branch-row:hover { background: #292f32; }
-html[data-theme="dark"] .branch-row.current { border-color: #477d6f; background: #213a34; }
-html[data-theme="dark"] .branch-node { border-color: #71807a; background: #202528; }
-html[data-theme="dark"] .branch-row.path .branch-node { background: #284b40; }
-html[data-theme="dark"] .branch-row strong { color: #75cbb2; }
+html[data-theme="dark"] .message-list.branch-mode { background: #1b2023; }
+html[data-theme="dark"] .branch-overview { background-image: radial-gradient(circle, #66717652 1px, transparent 1px); }
+html[data-theme="dark"] .branch-state strong { color: #d9e0e2; }
+html[data-theme="dark"] .branch-card { color: #d9dfe1; border-color: #465055; background: #252b2e; box-shadow: 0 5px 16px #07090a38; }
+html[data-theme="dark"] .branch-card strong { color: #7bcbb4; }
+html[data-theme="dark"] .branch-card header span,
+html[data-theme="dark"] .branch-card small { color: #919da1; }
+html[data-theme="dark"] .branch-card.path { border-color: #477d6f; background: #24352f; }
+html[data-theme="dark"] .branch-card.current { color: #fff; border-color: #3aaa8b; background: #197a62; box-shadow: 0 8px 24px #0b4e3d70; }
+html[data-theme="dark"] .branch-overview .vue-flow__edge-path { stroke: #56635f; }
+html[data-theme="dark"] .branch-overview .branch-edge-path .vue-flow__edge-path { stroke: #4ab594; }
+html[data-theme="dark"] .branch-controls { border-color: #485256; background: #282f32eb; box-shadow: 0 7px 22px #07090a66; }
+html[data-theme="dark"] .branch-controls button { color: #adb7ba; }
+html[data-theme="dark"] .branch-controls button:hover { color: #8bd7c0; background: #34403c; }
 html[data-theme="dark"] .dialog-backdrop { background: #080b0dcc; }
 html[data-theme="dark"] .settings-dialog,
 html[data-theme="dark"] .info-dialog,
@@ -455,6 +472,8 @@ html[data-theme="dark"] .danger-button:hover { background: #3a2929; }
 @media (prefers-reduced-motion: reduce) {
   .app-frame, .sidebar, .identity-content, .sidebar-toggle, .nav-item svg, .nav-item span, .nav-item em, .service-state, .settings-modal-enter-active, .settings-modal-leave-active, .settings-modal-enter-active .settings-dialog, .settings-modal-leave-active .settings-dialog, .source-highlight, .source-item, .source-item i, .filter-chevron, .filter-panel-enter-active, .filter-panel-leave-active, .detail-camera-enter-active, .detail-camera-leave-active, .thinking, .thinking-reveal, .thinking-toggle::before { transition-duration: .01ms; }
   .sidebar-collapsed .settings-button.connected { animation: none; }
+  .branch-overview .vue-flow__edge.animated path { animation: none; }
+  .branch-overview .vue-flow__node, .branch-card, .branch-overview .vue-flow__edge-path { transition-duration: .01ms; }
   ::view-transition-old(root), ::view-transition-new(root) { animation-duration: .01ms; }
   .theme-transition, .theme-transition * { transition-duration: .01ms !important; }
 }
