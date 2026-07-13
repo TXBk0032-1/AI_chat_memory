@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Handle, Position, VueFlow, useVueFlow, type NodeMouseEvent } from '@vue-flow/core'
-import { Focus, Minus, Plus } from 'lucide-vue-next'
+import { Focus, GitFork, Minus, Plus } from 'lucide-vue-next'
 import { branchLeaf, layoutBranchOverview, type BranchNodeData } from './branch-overview'
 import type { BranchNode, BranchOverview } from './conversation'
 import '@vue-flow/core/dist/style.css'
@@ -67,6 +67,10 @@ onBeforeUnmount(() => {
           <p>{{ nodeData(data).preview || '空消息' }}</p>
           <small v-if="nodeData(data).childCount">{{ nodeData(data).childCount }} 个分支</small>
         </article>
+        <Handle type="source" :position="Position.Bottom" />
+      </template>
+      <template #node-root>
+        <div class="branch-root" aria-hidden="true"><GitFork :size="15" /></div>
         <Handle type="source" :position="Position.Bottom" />
       </template>
     </VueFlow>

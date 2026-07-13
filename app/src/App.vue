@@ -50,6 +50,7 @@ import {
   type SessionSummary,
 } from './conversation'
 import { escapeTitle } from './markdown'
+import { branchConversation } from './branch-overview'
 import { loadSidebarCollapsed, saveSidebarCollapsed } from './sidebar'
 import './style.css'
 
@@ -136,12 +137,22 @@ let searchLoadGeneration = 0
 const lastControlClicks = new WeakMap<Element, number>()
 const pendingMessageBatches = new Map<string, Promise<boolean>>()
 
+const displayedMessageSeqs = computed(() => {
+  if (branchOverview.value && activeBranchNode.value) {
+    return branchConversation(branchOverview.value.nodes, activeBranchNode.value).map((node) => node.seq)
+  }
+  return Array.from({ length: selected.value?.message_count ?? 0 }, (_, seq) => seq)
+})
+const displayedSeqIndexes = computed(() => new Map(displayedMessageSeqs.value.map((seq, index) => [seq, index])))
 const virtualizerOptions = computed(() => ({
-  count: selected.value?.message_count ?? 0,
+  count: displayedMessageSeqs.value.length,
   getScrollElement: () => messageListRef.value,
   estimateSize: () => 190,
   overscan: 5,
-  getItemKey: (index: number) => messageSlots.value[index]?.id ?? `${selected.value?.id ?? 'message'}-${index}`,
+  getItemKey: (index: number) => {
+    const seq = displayedMessageSeqs.value[index]
+    return messageSlots.value[seq]?.id ?? `${selected.value?.id ?? 'message'}-${seq}`
+  },
 }))
 const messageVirtualizer = useVirtualizer(virtualizerOptions)
 const virtualMessages = computed(() => messageVirtualizer.value.getVirtualItems())
@@ -219,7 +230,8 @@ const hasBranches = computed(() => selected.value?.has_branches ?? false)
 const statusLabel = computed(() => apiStatus.value.service.state === 'running' ? '同步服务运行中' : apiStatus.value.service.state === 'failed' ? '同步服务异常' : '同步服务启动中')
 const sourceIndex = computed(() => ['', 'deepseek', 'doubao', 'kimi'].indexOf(platform.value))
 const sourceAccent = computed(() => ({ deepseek: '#4d8fe8', doubao: '#e05c62', kimi: '#39a878' } as Record<string, string>)[platform.value] ?? '#f5f7f7')
-const selectedMatches = computed<SearchMatch[]>(() => expandSearchHits(sessionSearchHits.value))
+const selectedMatches = computed<SearchMatch[]>(() => expandSearchHits(sessionSearchHits.value)
+  .filter((match) => displayedSeqIndexes.value.has(match.seq)))
 const loadedMessageCount = computed(() => messageSlots.value.reduce((count, message) => count + (message ? 1 : 0), 0))
 const compactReferences = computed(() => new Map((selected.value?.references ?? []).map((reference) => [reference.cite_index, reference])))
 function epoch(value: string, end = false) {
@@ -276,16 +288,28 @@ async function selectSession(id: string) {
     const readingPosition = loadReadingPosition(id)
     const opened = await invoke<SessionOpen>('open_session', { id, anchorSeq: readingPosition?.seq ?? null })
     if (generation !== sessionLoadGeneration) return
+    let overview: BranchOverview | null = null
+    if (opened.has_branches) {
+      try {
+        overview = await invoke<BranchOverview>('get_session_branches', { id })
+      } catch (reason) {
+        branchesError.value = String(reason)
+      }
+    }
+    if (generation !== sessionLoadGeneration) return
     selected.value = opened
+    branchOverview.value = overview
     backgroundLoadFailed.value = false
     messageSlots.value = mergeMessageBatch(Array.from({ length: opened.message_count }), opened.messages)
     detailMode.value = 'conversation'
     expandedThinking.value = new Set()
     searchHitIndex.value = -1
-    activeBranchNode.value = ''
+    activeBranchNode.value = overview?.default_leaf_node_id ?? ''
     await nextTick()
-    const targetSeq = readingPosition?.seq ?? opened.start_seq
-    messageVirtualizer.value.scrollToIndex(targetSeq, { align: 'start' })
+    const targetSeq = readingPosition && displayedSeqIndexes.value.has(readingPosition.seq)
+      ? readingPosition.seq
+      : displayedMessageSeqs.value[0] ?? opened.start_seq
+    messageVirtualizer.value.scrollToIndex(displayedSeqIndexes.value.get(targetSeq) ?? 0, { align: 'start' })
     await nextTick()
     if (readingPosition?.offset) messageListRef.value?.scrollBy({ top: readingPosition.offset })
     void loadSearchHits(generation)
@@ -351,10 +375,12 @@ async function ensureMessageLoaded(seq: number) {
 
 async function selectBranch(branch: BranchNode) {
   activeBranchNode.value = branch.node_id
+  searchHitIndex.value = -1
   detailMode.value = 'conversation'
   await ensureMessageLoaded(branch.seq)
   await nextTick()
-  messageVirtualizer.value.scrollToIndex(branch.seq, { align: 'center', behavior: 'smooth' })
+  messageVirtualizer.value.measure()
+  messageVirtualizer.value.scrollToIndex(displayedSeqIndexes.value.get(branch.seq) ?? 0, { align: 'center', behavior: 'smooth' })
 }
 
 function escapeRegExp(value: string) {
@@ -390,7 +416,9 @@ async function navigateSearch(direction: number) {
     expanded.add(match.message_id)
     expandedThinking.value = expanded
   }
-  messageVirtualizer.value.scrollToIndex(match.seq, { align: 'center' })
+  const displayIndex = displayedSeqIndexes.value.get(match.seq)
+  if (displayIndex === undefined) return
+  messageVirtualizer.value.scrollToIndex(displayIndex, { align: 'center' })
   await nextTick()
   await nextTick()
   const block = document.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(match.message_id)}"]`)
@@ -683,7 +711,7 @@ function persistReadingPosition() {
   const first = virtualMessages.value.find((item) => item.end >= scrollTop)
   if (!first) return
   saveReadingPosition(selected.value.id, {
-    seq: first.index,
+    seq: displayedMessageSeqs.value[first.index] ?? first.index,
     offset: Math.max(0, scrollTop - first.start),
     updatedAt: Date.now(),
   })
@@ -834,7 +862,7 @@ function handleSystemThemeChange() {
           <div v-if="detailLoading" class="loading-state"><LoaderCircle class="spinning" :size="22" /><span>正在打开对话</span></div>
           <template v-else-if="selected">
             <div class="detail-header">
-              <div class="detail-title"><span class="platform-badge"><i :class="selected.platform"></i>{{ platformName(selected.platform) }}</span><h2>{{ selected.title || '未命名对话' }}</h2><p>{{ selected.message_count }} 条消息 · {{ formatDate(selected.updated_at) }}<span v-if="loadedMessageCount < selected.message_count" class="load-progress"> · 已加载 {{ loadedMessageCount }}/{{ selected.message_count }}</span><button v-if="backgroundLoadFailed" class="inline-retry" @click="retryBackgroundLoad">重试</button></p></div>
+              <div class="detail-title"><span class="platform-badge"><i :class="selected.platform"></i>{{ platformName(selected.platform) }}</span><h2>{{ selected.title || '未命名对话' }}</h2><p>{{ displayedMessageSeqs.length }} 条消息<span v-if="branchOverview && displayedMessageSeqs.length < selected.message_count"> · 共 {{ selected.message_count }} 个版本节点</span> · {{ formatDate(selected.updated_at) }}<span v-if="loadedMessageCount < selected.message_count" class="load-progress"> · 已加载 {{ loadedMessageCount }}/{{ selected.message_count }}</span><button v-if="backgroundLoadFailed" class="inline-retry" @click="retryBackgroundLoad">重试</button></p></div>
               <div class="detail-actions" @click.stop>
                 <button class="icon-button" title="更多操作" aria-haspopup="menu" :aria-expanded="showDetailMenu" @click="toggleDetailMenu"><MoreHorizontal :size="19" /></button>
                 <div v-if="showDetailMenu" class="detail-menu" role="menu">
@@ -855,7 +883,7 @@ function handleSystemThemeChange() {
             </div>
             <div ref="messageListRef" :class="['message-list', { 'branch-mode': detailMode === 'branches' }]" @scroll.passive="handleMessageScroll" @click="openMarkdownLink">
               <div v-if="selectedMatches.length" class="search-scroll-markers" aria-hidden="true">
-                <i v-for="(match, index) in selectedMatches" :key="`${match.message_id}-${match.field}-${index}`" :style="{ top: `${(match.seq + 0.5) / Math.max(selected.message_count, 1) * 100}%` }"></i>
+                <i v-for="(match, index) in selectedMatches" :key="`${match.message_id}-${match.field}-${index}`" :style="{ top: `${((displayedSeqIndexes.get(match.seq) ?? 0) + 0.5) / Math.max(displayedMessageSeqs.length, 1) * 100}%` }"></i>
               </div>
               <Transition name="detail-camera" mode="out-in">
                 <div v-if="detailMode === 'conversation'" key="conversation" class="conversation-view virtual-conversation" :style="{ height: `${virtualTotalSize}px` }">
@@ -868,17 +896,17 @@ function handleSystemThemeChange() {
                     :style="{ transform: `translateY(${virtualMessage.start}px)` }"
                   >
                     <MessageBlock
-                      v-if="messageSlots[virtualMessage.index]"
-                      :message="messageSlots[virtualMessage.index]!"
+                      v-if="messageSlots[displayedMessageSeqs[virtualMessage.index]]"
+                      :message="messageSlots[displayedMessageSeqs[virtualMessage.index]]!"
                       :references="compactReferences"
                       :query="committedQuery"
-                      :expanded="expandedThinking.has(messageSlots[virtualMessage.index]!.id)"
-                      :formatted-date="formatDate(messageSlots[virtualMessage.index]!.created_at, true)"
-                      :role-label="roleName(messageSlots[virtualMessage.index]!.role)"
+                      :expanded="expandedThinking.has(messageSlots[displayedMessageSeqs[virtualMessage.index]]!.id)"
+                      :formatted-date="formatDate(messageSlots[displayedMessageSeqs[virtualMessage.index]]!.created_at, true)"
+                      :role-label="roleName(messageSlots[displayedMessageSeqs[virtualMessage.index]]!.role)"
                       @toggle-thinking="toggleThinking"
                       @content-rendered="renderMermaidDiagrams"
                     />
-                    <div v-else class="message-placeholder" @vue:mounted="ensureMessageLoaded(virtualMessage.index)"><LoaderCircle class="spinning" :size="16" /><span>加载消息</span></div>
+                    <div v-else class="message-placeholder" @vue:mounted="ensureMessageLoaded(displayedMessageSeqs[virtualMessage.index])"><LoaderCircle class="spinning" :size="16" /><span>加载消息</span></div>
                   </div>
                 </div>
                 <div v-else key="branches" class="branch-view">

@@ -230,6 +230,7 @@ i.deepseek { background: #5273e6; } i.doubao { background: #e36f53; } i.kimi { b
 .branch-overview .vue-flow__node { border: 0; border-radius: 6px; background: transparent; box-shadow: none; transition: filter .22s ease, transform .22s cubic-bezier(.2, .85, .25, 1); }
 .branch-overview .vue-flow__node:hover { filter: brightness(.985); transform: translateY(-2px); }
 .branch-overview .vue-flow__handle { width: 7px; height: 7px; border: 2px solid #fff; background: #9aa6a3; opacity: 0; pointer-events: none; }
+.branch-root { width: 28px; height: 28px; border: 1px solid #74aa9b; border-radius: 50%; display: grid; place-items: center; color: #267660; background: #eef8f5; box-shadow: 0 4px 12px #183d3224; }
 .branch-card { position: relative; width: 210px; height: 76px; padding: 10px 12px; overflow: hidden; border: 1px solid #cfd7d9; border-radius: 6px; color: #364044; background: #fff; box-shadow: 0 4px 13px #1a292f12; transition: border-color .24s ease, background-color .24s ease, box-shadow .24s ease, transform .24s cubic-bezier(.2, .85, .25, 1); }
 .branch-card.user { border-left: 3px solid #438c79; }
 .branch-card.assistant { border-left: 3px solid #7184a7; }
@@ -412,6 +413,7 @@ html[data-theme="dark"] .message-list.branch-mode { background: #1b2023; }
 html[data-theme="dark"] .branch-overview { background-image: radial-gradient(circle, #66717652 1px, transparent 1px); }
 html[data-theme="dark"] .branch-state strong { color: #d9e0e2; }
 html[data-theme="dark"] .branch-card { color: #d9dfe1; border-color: #465055; background: #252b2e; box-shadow: 0 5px 16px #07090a38; }
+html[data-theme="dark"] .branch-root { color: #83d4bc; border-color: #477d6f; background: #243a34; box-shadow: 0 5px 16px #07090a52; }
 html[data-theme="dark"] .branch-card strong { color: #7bcbb4; }
 html[data-theme="dark"] .branch-card header span,
 html[data-theme="dark"] .branch-card small { color: #919da1; }

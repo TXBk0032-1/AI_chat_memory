@@ -4,6 +4,7 @@ import type { BranchNode, BranchOverview } from './conversation'
 
 export const branchNodeWidth = 210
 export const branchNodeHeight = 76
+export const virtualBranchRootId = '__branch_overview_root__'
 
 export type BranchNodeData = BranchNode & {
   roleLabel: string
@@ -11,6 +12,8 @@ export type BranchNodeData = BranchNode & {
   current: boolean
   path: boolean
 }
+
+export type BranchRootData = { root: true }
 
 export function branchPath(nodes: BranchNode[], leafId: string): Set<string> {
   const byId = new Map(nodes.map((node) => [node.node_id, node]))
@@ -21,6 +24,18 @@ export function branchPath(nodes: BranchNode[], leafId: string): Set<string> {
     current = byId.get(current)?.parent_node_id ?? ''
   }
   return path
+}
+
+export function branchConversation(nodes: BranchNode[], leafId: string): BranchNode[] {
+  const byId = new Map(nodes.map((node) => [node.node_id, node]))
+  const conversation: BranchNode[] = []
+  const visited = new Set<string>()
+  let current = byId.get(leafId)
+  while (current && visited.add(current.node_id)) {
+    conversation.push(current)
+    current = byId.get(current.parent_node_id)
+  }
+  return conversation.reverse()
 }
 
 export function branchLeaf(nodes: BranchNode[], startId: string): BranchNode | null {
@@ -39,14 +54,18 @@ export function layoutBranchOverview(overview: BranchOverview, activeLeafId: str
   const graph = new dagre.graphlib.Graph()
   graph.setDefaultEdgeLabel(() => ({}))
   graph.setGraph({ rankdir: 'TB', nodesep: 34, ranksep: 62, marginx: 28, marginy: 28 })
+  const roots = overview.nodes.filter((node) => !node.parent_node_id)
+  const hasVirtualRoot = roots.length > 1
+  if (hasVirtualRoot) graph.setNode(virtualBranchRootId, { width: 28, height: 28 })
   for (const node of overview.nodes) graph.setNode(node.node_id, { width: branchNodeWidth, height: branchNodeHeight })
   for (const node of overview.nodes) {
     if (node.parent_node_id) graph.setEdge(node.parent_node_id, node.node_id)
+    else if (hasVirtualRoot) graph.setEdge(virtualBranchRootId, node.node_id)
   }
   dagre.layout(graph)
 
   const path = branchPath(overview.nodes, activeLeafId)
-  const nodes: Array<Node<BranchNodeData>> = overview.nodes.map((node) => {
+  const nodes: Array<Node<BranchNodeData | BranchRootData>> = overview.nodes.map((node) => {
     const point = graph.node(node.node_id)
     return {
       id: node.node_id,
@@ -70,6 +89,22 @@ export function layoutBranchOverview(overview: BranchOverview, activeLeafId: str
       },
     }
   })
+  if (hasVirtualRoot) {
+    const point = graph.node(virtualBranchRootId)
+    nodes.unshift({
+      id: virtualBranchRootId,
+      type: 'root',
+      position: { x: point.x - 14, y: point.y - 14 },
+      sourcePosition: Position.Bottom,
+      draggable: false,
+      selectable: false,
+      connectable: false,
+      focusable: false,
+      width: 28,
+      height: 28,
+      data: { root: true },
+    })
+  }
   const edges: Edge[] = overview.nodes.flatMap((node) => node.parent_node_id ? [{
     id: `${node.parent_node_id}-${node.node_id}`,
     source: node.parent_node_id,
@@ -79,6 +114,15 @@ export function layoutBranchOverview(overview: BranchOverview, activeLeafId: str
     focusable: false,
     animated: path.has(node.parent_node_id) && path.has(node.node_id),
     class: path.has(node.parent_node_id) && path.has(node.node_id) ? 'branch-edge-path' : 'branch-edge-muted',
+  }] : hasVirtualRoot ? [{
+    id: `${virtualBranchRootId}-${node.node_id}`,
+    source: virtualBranchRootId,
+    target: node.node_id,
+    type: 'smoothstep',
+    selectable: false,
+    focusable: false,
+    animated: path.has(node.node_id),
+    class: path.has(node.node_id) ? 'branch-edge-path' : 'branch-edge-muted',
   }] : [])
   return { nodes, edges }
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { branchLeaf, branchNodeHeight, branchPath, layoutBranchOverview } from './branch-overview'
+import { branchConversation, branchLeaf, branchNodeHeight, branchPath, layoutBranchOverview, virtualBranchRootId } from './branch-overview'
 import type { BranchNode, BranchOverview } from './conversation'
 
 function node(id: string, parent: string, children: string[], seq: number): BranchNode {
@@ -22,6 +22,17 @@ describe('branch overview helpers', () => {
 
   it('returns the complete current path', () => {
     expect([...branchPath(overview.nodes, 'leaf')]).toEqual(['leaf', 'right', 'root'])
+    expect(branchConversation(overview.nodes, 'leaf').map((item) => item.node_id)).toEqual(['root', 'right', 'leaf'])
+  })
+
+  it('connects multiple initial versions through a virtual root', () => {
+    const multipleRoots: BranchOverview = {
+      nodes: [node('one', '', [], 0), node('two', '', [], 1), node('three', '', [], 2)],
+      default_leaf_node_id: 'three',
+    }
+    const layout = layoutBranchOverview(multipleRoots, 'three')
+    expect(layout.nodes.some((item) => item.id === virtualBranchRootId)).toBe(true)
+    expect(layout.edges.filter((edge) => edge.source === virtualBranchRootId)).toHaveLength(3)
   })
 
   it('navigates from a middle node to its last descendant', () => {
