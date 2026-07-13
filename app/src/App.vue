@@ -873,7 +873,8 @@ function handleSystemThemeChange() {
                 </div>
               </div>
             </div>
-            <div v-if="hasBranches" class="segmented-control">
+            <div v-if="hasBranches" :class="['segmented-control', { branches: detailMode === 'branches' }]">
+              <span class="segmented-highlight" aria-hidden="true"></span>
               <button :class="{ active: detailMode === 'conversation' }" @click="detailMode='conversation'"><MessageSquareText :size="15" />对话</button>
               <button :class="{ active: detailMode === 'branches' }" @click="showBranches"><GitBranch :size="15" />分支预览</button>
             </div>

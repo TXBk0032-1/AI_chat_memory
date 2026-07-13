@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { Handle, Position, VueFlow, useVueFlow, type NodeMouseEvent } from '@vue-flow/core'
-import { Focus, GitFork, Minus, Plus } from 'lucide-vue-next'
+import { Bot, Focus, GitFork, Minus, Plus, UserRound } from 'lucide-vue-next'
 import { branchLeaf, layoutBranchOverview, type BranchNodeData } from './branch-overview'
 import type { BranchNode, BranchOverview } from './conversation'
 import '@vue-flow/core/dist/style.css'
@@ -63,7 +63,10 @@ onBeforeUnmount(() => {
       <template #node-branch="{ data }">
         <Handle type="target" :position="Position.Top" />
         <article :class="['branch-card', nodeData(data).role, { current: nodeData(data).current, path: nodeData(data).path }]">
-          <header><strong>{{ nodeData(data).roleLabel }}</strong><span>#{{ nodeData(data).seq + 1 }}</span></header>
+          <header>
+            <strong><UserRound v-if="nodeData(data).role === 'user'" :size="12" /><Bot v-else :size="12" />{{ nodeData(data).roleLabel }}</strong>
+            <span>#{{ nodeData(data).seq + 1 }}</span>
+          </header>
           <p>{{ nodeData(data).preview || '空消息' }}</p>
           <small v-if="nodeData(data).childCount">{{ nodeData(data).childCount }} 个分支</small>
         </article>
