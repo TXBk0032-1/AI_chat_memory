@@ -1,4 +1,6 @@
-# CLAUDE.md
+# Archived Python Agent Notes
+
+> 本文件仅记录已停用的 Python/FastAPI 实现，不适用于当前 Tauri 应用。
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 

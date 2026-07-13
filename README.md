@@ -37,9 +37,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 ## 数据与迁移
 
-桌面端数据库位于 `%APPDATA%\dev.aichatmemory.desktop\chat_memory.db`。开发版本首次启动时会检测旧 Python 数据库并复制到应用目录，旧文件保持不动。
-
-Python 参考实现暂存在 `legacy/python/`，用于 Rust API 兼容验证。用户数据库目录不会提交到 Git。
+桌面端数据库位于 `%APPDATA%\dev.aichatmemory.desktop\chat_memory.db`。开发版本首次启动时会检测旧 Python 数据库并复制到应用目录，旧文件保持不动。用户数据库目录不会提交到 Git。
 
 ## 本地 API 安全
 
@@ -51,9 +49,9 @@ userscript 请求必须满足：
 
 桌面端设置页可编辑 Origin 白名单并启用、关闭或轮换随机密钥。userscript 菜单可配置后端地址和对应密钥。
 
-## 旧服务
+## 归档
 
-旧 FastAPI 服务位于 `legacy/python/`。它仅作为迁移对照，不是桌面应用运行依赖。
+已停用的 Python 参考实现和旧项目说明存放在 `archive/`，不属于当前应用架构，也不参与构建、测试或发布。
 
 ## 本地 CI/CD
 

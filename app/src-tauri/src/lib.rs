@@ -207,16 +207,18 @@ async fn prepare_database_directory(
 fn find_legacy_database() -> std::path::PathBuf {
     let start = std::env::current_dir().unwrap_or_default();
     for directory in start.ancestors() {
-        let candidate = directory.join("legacy/python/server/data/chat_memory.db");
-        if candidate.exists() {
-            return candidate;
-        }
-        let original = directory.join("server/data/chat_memory.db");
-        if original.exists() {
-            return original;
+        for relative in [
+            "archive/python-reference/server/data/chat_memory.db",
+            "legacy/python/server/data/chat_memory.db",
+            "server/data/chat_memory.db",
+        ] {
+            let candidate = directory.join(relative);
+            if candidate.exists() {
+                return candidate;
+            }
         }
     }
-    start.join("legacy/python/server/data/chat_memory.db")
+    start.join("archive/python-reference/server/data/chat_memory.db")
 }
 
 #[cfg(test)]
