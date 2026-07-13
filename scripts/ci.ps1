@@ -24,6 +24,19 @@ function Invoke-Step {
     Write-Host ("OK  {0} ({1:n1}s)" -f $Name, $watch.Elapsed.TotalSeconds) -ForegroundColor Green
 }
 
+function Get-Sha256 {
+    param([Parameter(Mandatory)][string]$LiteralPath)
+
+    $stream = [System.IO.File]::OpenRead($LiteralPath)
+    $hasher = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        return ([System.BitConverter]::ToString($hasher.ComputeHash($stream)) -replace "-", "").ToLowerInvariant()
+    } finally {
+        $hasher.Dispose()
+        $stream.Dispose()
+    }
+}
+
 foreach ($command in "git", "node", "npm", "rustc", "cargo") {
     if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
         throw "Required command not found: $command"
@@ -109,7 +122,7 @@ if ($Stage -eq "release") {
         built_at_utc = [DateTime]::UtcNow.ToString("o")
         rust = $rustVersion
         artifacts = @($artifactMsi, $artifactExe | ForEach-Object {
-            [ordered]@{ name = $_.Name; bytes = $_.Length; sha256 = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
+            [ordered]@{ name = $_.Name; bytes = $_.Length; sha256 = Get-Sha256 -LiteralPath $_.FullName }
         })
     }
     $manifestJson = $manifest | ConvertTo-Json -Depth 5
