@@ -138,7 +138,6 @@ pub struct AppSettings {
     pub secret_enabled: bool,
     pub secret: Option<String>,
     pub allowed_origins: Vec<String>,
-    pub migrated_legacy_database: bool,
     #[serde(default)]
     pub data_directory: Option<String>,
     #[serde(default)]
@@ -188,7 +187,6 @@ impl Default for AppSettings {
                 "https://kimi.com".into(),
                 "https://www.kimi.com".into(),
             ],
-            migrated_legacy_database: false,
             data_directory: None,
             close_behavior: CloseBehavior::Ask,
             tray_click_behavior: TrayClickBehavior::ShowMenu,

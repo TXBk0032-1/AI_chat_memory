@@ -35,9 +35,9 @@ cargo test
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-## 数据与迁移
+## 数据存储
 
-桌面端数据库位于 `%APPDATA%\dev.aichatmemory.desktop\chat_memory.db`。开发版本首次启动时会检测旧 Python 数据库并复制到应用目录，旧文件保持不动。用户数据库目录不会提交到 Git。
+桌面端数据库默认位于 `%APPDATA%\dev.aichatmemory.desktop\chat_memory.db`，也可在设置中更改数据保存位置。用户数据库目录不会提交到 Git。
 
 ## 本地 API 安全
 

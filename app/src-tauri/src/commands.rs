@@ -105,17 +105,6 @@ pub async fn get_api_status(service: State<'_, AppService>) -> Result<DesktopApi
 }
 
 #[tauri::command]
-pub async fn migrate_legacy_database(
-    service: State<'_, AppService>,
-    path: String,
-) -> Result<(), String> {
-    service
-        .migrate_legacy(std::path::Path::new(&path))
-        .await
-        .map_err(message)
-}
-
-#[tauri::command]
 pub async fn move_data_directory(
     app: AppHandle,
     service: State<'_, AppService>,

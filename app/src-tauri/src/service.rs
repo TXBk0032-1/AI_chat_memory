@@ -2,7 +2,6 @@ use serde_json::Value;
 use sqlx::SqlitePool;
 use std::{
     io::Read,
-    path::Path,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -95,13 +94,6 @@ impl AppService {
     }
     pub async fn sync_status(&self, platform: &str) -> Result<Option<String>> {
         database::sync_status(&self.pool, platform).await
-    }
-    pub async fn migrate_legacy(&self, path: &Path) -> Result<()> {
-        database::migrate_from_legacy(&self.pool, path).await?;
-        let mut settings = self.settings.get().await;
-        settings.migrated_legacy_database = true;
-        self.settings.update(settings).await?;
-        Ok(())
     }
     pub async fn api_status(&self) -> ApiStatus {
         self.api_status.read().await.clone()

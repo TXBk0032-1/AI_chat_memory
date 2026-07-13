@@ -1,5 +1,5 @@
 use sqlx::{
-    Acquire, Row, SqlitePool,
+    Row, SqlitePool,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
 };
 use std::path::Path;
@@ -147,29 +147,6 @@ pub async fn count(pool: &SqlitePool, query: &SearchQuery) -> Result<i64> {
         .bind(&query.q)
         .fetch_one(pool)
         .await?)
-}
-
-pub async fn migrate_from_legacy(pool: &SqlitePool, source: &Path) -> Result<()> {
-    if !source.exists() {
-        return Err(AppError::NotFound("legacy database".into()));
-    }
-    let canonical = source.canonicalize()?;
-    let mut connection = pool.acquire().await?;
-    sqlx::query("ATTACH DATABASE ? AS legacy")
-        .bind(canonical.to_string_lossy().as_ref())
-        .execute(&mut *connection)
-        .await?;
-    let result = async {
-        let mut tx = connection.begin().await?;
-        sqlx::query("INSERT INTO sessions (id, platform, platform_session_id, title, created_at, updated_at, imported_at, raw_data) SELECT id, platform, platform_session_id, title, created_at, updated_at, imported_at, raw_data FROM legacy.sessions WHERE true ON CONFLICT(platform, platform_session_id) DO NOTHING").execute(&mut *tx).await?;
-        sqlx::query("INSERT INTO messages (id, session_id, role, content, metadata, created_at, seq) SELECT s.id || '_' || m.seq, s.id, m.role, m.content, m.metadata, m.created_at, m.seq FROM legacy.messages m JOIN legacy.sessions ls ON ls.id=m.session_id JOIN sessions s ON s.platform=ls.platform AND s.platform_session_id=ls.platform_session_id WHERE true ON CONFLICT(id) DO NOTHING").execute(&mut *tx).await?;
-        tx.commit().await
-    }.await;
-    let _ = sqlx::query("DETACH DATABASE legacy")
-        .execute(&mut *connection)
-        .await;
-    result?;
-    Ok(())
 }
 
 const SESSION_BATCH_SIZE: i64 = 50;

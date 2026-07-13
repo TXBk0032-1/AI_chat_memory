@@ -53,7 +53,6 @@ type SettingsModel = {
   secret_enabled: boolean
   secret?: string
   allowed_origins: string[]
-  migrated_legacy_database: boolean
   data_directory?: string
   close_behavior: 'ask' | 'hide_to_tray' | 'exit'
   tray_click_behavior: 'show_menu' | 'open_window' | 'no_action'
@@ -97,7 +96,7 @@ const showSessionInfo = ref(false)
 const pendingCloseBehavior = ref<'hide_to_tray' | 'exit' | null>(null)
 const detailMode = ref<'conversation' | 'branches'>('conversation')
 const expandedThinking = ref(new Set<string>())
-const settings = ref<SettingsModel>({ setup_complete: false, secret_enabled: false, allowed_origins: [], migrated_legacy_database: false, close_behavior: 'ask', tray_click_behavior: 'show_menu', theme: 'system' })
+const settings = ref<SettingsModel>({ setup_complete: false, secret_enabled: false, allowed_origins: [], close_behavior: 'ask', tray_click_behavior: 'show_menu', theme: 'system' })
 const originText = ref('')
 const total = ref(0)
 const page = ref(0)
@@ -512,18 +511,6 @@ async function copySecret() {
   secretCopied.value = true
 }
 
-async function migrateLegacy() {
-  const path = await open({ multiple: false, filters: [{ name: 'SQLite 数据库', extensions: ['db', 'sqlite', 'sqlite3'] }] })
-  if (typeof path !== 'string') return
-  try {
-    await invoke('migrate_legacy_database', { path })
-    settings.value = await invoke('get_settings')
-    await loadSessions()
-  } catch (reason) {
-    error.value = String(reason)
-  }
-}
-
 async function changeDataDirectory() {
   const path = await open({ directory: true, multiple: false, title: '选择数据保存目录' })
   if (typeof path !== 'string') return
@@ -935,10 +922,6 @@ function handleSystemThemeChange() {
           <section class="setting-group">
             <div class="setting-row"><div><h3>同步密钥</h3><p>要求 userscript 携带额外密钥访问本地服务。</p></div><label class="switch"><input v-model="settings.secret_enabled" type="checkbox" /><span></span></label></div>
             <div v-if="settings.secret_enabled" class="secret-field"><code>{{ settings.secret || '保存设置后自动生成' }}</code><button class="icon-button" :title="secretCopied ? '已复制' : '复制密钥'" :disabled="!settings.secret" @click="copySecret"><Check v-if="secretCopied" :size="17" /><Clipboard v-else :size="17" /></button><button class="secondary-button compact" @click="rotateSecret">重新生成</button></div>
-          </section>
-          <section class="setting-group migration-group">
-            <div><h3>旧版数据</h3><p>{{ settings.migrated_legacy_database ? '旧版数据库已经迁移。' : '从旧版 Python 服务的 SQLite 数据库导入会话。' }}</p></div>
-            <button v-if="!settings.migrated_legacy_database" class="secondary-button" @click="migrateLegacy">选择数据库</button>
           </section>
         </div>
         <footer><button class="secondary-button" @click="closeSettings()">取消</button><button class="primary-button" @click="saveSettings">保存设置</button></footer>

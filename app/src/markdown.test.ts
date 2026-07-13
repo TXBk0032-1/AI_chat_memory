@@ -11,7 +11,7 @@ const message: Message = {
 }
 
 describe('markdown rendering', () => {
-  it('renders compact legacy references as interactive previews', () => {
+  it('renders compact session references as interactive previews', () => {
     const reference: Reference = {
       cite_index: 35,
       url: 'https://example.com/page',

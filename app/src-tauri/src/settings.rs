@@ -116,7 +116,7 @@ mod tests {
     #[test]
     fn loads_settings_created_before_desktop_preferences() {
         let settings: AppSettings = serde_json::from_str(
-            r#"{"setup_complete":true,"secret_enabled":false,"secret":null,"allowed_origins":[],"migrated_legacy_database":false}"#,
+            r#"{"setup_complete":true,"secret_enabled":false,"secret":null,"allowed_origins":[]}"#,
         )
         .unwrap();
         assert_eq!(settings.close_behavior, crate::models::CloseBehavior::Ask);

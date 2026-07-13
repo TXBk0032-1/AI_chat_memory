@@ -38,7 +38,6 @@ pub fn run() {
                 .and_then(|path| path.parent().map(std::path::Path::to_path_buf));
             let working_dir = std::env::current_dir().ok();
             let settings_path = data_dir.join("settings.json");
-            let legacy = find_legacy_database();
             let service = tauri::async_runtime::block_on(async {
                 let settings = Arc::new(SettingsStore::load(settings_path).await?);
                 let settings_value = settings.get().await;
@@ -64,12 +63,6 @@ pub fn run() {
                     last_userscript_request_at: Arc::new(RwLock::new(None)),
                 })
             })?;
-            if legacy.exists()
-                && !tauri::async_runtime::block_on(service.settings.get()).migrated_legacy_database
-                && let Err(error) = tauri::async_runtime::block_on(service.migrate_legacy(&legacy))
-            {
-                tracing::error!(%error, "automatic legacy migration failed");
-            }
             app.manage(service.clone());
             let http_service = service.clone();
             tauri::async_runtime::spawn(async move {
@@ -153,7 +146,6 @@ pub fn run() {
             commands::save_settings,
             commands::rotate_secret,
             commands::get_api_status,
-            commands::migrate_legacy_database,
             commands::move_data_directory,
             commands::confirm_close_behavior
         ])
@@ -205,23 +197,6 @@ async fn prepare_database_directory(
     }
 
     app_data_dir.to_path_buf()
-}
-
-fn find_legacy_database() -> std::path::PathBuf {
-    let start = std::env::current_dir().unwrap_or_default();
-    for directory in start.ancestors() {
-        for relative in [
-            "archive/python-reference/server/data/chat_memory.db",
-            "legacy/python/server/data/chat_memory.db",
-            "server/data/chat_memory.db",
-        ] {
-            let candidate = directory.join(relative);
-            if candidate.exists() {
-                return candidate;
-            }
-        }
-    }
-    start.join("archive/python-reference/server/data/chat_memory.db")
 }
 
 #[cfg(test)]
