@@ -26,6 +26,8 @@ import {
   ShieldCheck,
   Monitor,
   Moon,
+  PanelLeftClose,
+  PanelLeftOpen,
   Sun,
   Trash2,
   X,
@@ -46,6 +48,7 @@ import {
   type SessionSummary,
 } from './conversation'
 import { escapeTitle } from './markdown'
+import { loadSidebarCollapsed, saveSidebarCollapsed } from './sidebar'
 import './style.css'
 
 type SettingsModel = {
@@ -110,6 +113,7 @@ const loopSearch = ref(false)
 const toast = ref('')
 const activeBranchNode = ref('')
 const contextMenu = ref({ visible: false, x: 0, y: 0, selectedText: '' })
+const sidebarCollapsed = ref(loadSidebarCollapsed())
 const pageSize = 100
 const clickDebounceMs = 250
 let statusTimer: number | undefined
@@ -197,6 +201,11 @@ function closeSettings(save = false) {
     commitTheme(savedThemeBeforeSettings)
   }
   showSettings.value = false
+}
+
+function setSidebarCollapsed(collapsed: boolean) {
+  sidebarCollapsed.value = collapsed
+  saveSidebarCollapsed(collapsed)
 }
 
 const filtered = computed(() => Boolean(query.value || platform.value || dateFrom.value || dateTo.value))
@@ -740,25 +749,29 @@ function handleSystemThemeChange() {
 </script>
 
 <template>
-  <div class="app-frame" @click="hidePopupMenus" @contextmenu="handleContextMenu">
-    <aside class="sidebar">
+  <div :class="['app-frame', { 'sidebar-collapsed': sidebarCollapsed }]" @click="hidePopupMenus" @contextmenu="handleContextMenu">
+    <aside class="sidebar" :aria-label="sidebarCollapsed ? '已折叠的来源导航' : '来源导航'">
       <div class="identity">
-        <div class="identity-mark"><MessageSquareText :size="20" /></div>
-        <div><strong>对话归档</strong><span>AI Chat Memory</span></div>
+        <div class="identity-content">
+          <div class="identity-mark"><MessageSquareText :size="20" /></div>
+          <div class="identity-name"><strong>对话归档</strong><span>AI Chat Memory</span></div>
+          <button class="sidebar-toggle sidebar-toggle-collapse" title="折叠侧边栏" aria-label="折叠侧边栏" @click="setSidebarCollapsed(true)"><PanelLeftClose :size="17" /></button>
+        </div>
+        <button class="sidebar-toggle sidebar-toggle-expand" title="展开侧边栏" aria-label="展开侧边栏" @click="setSidebarCollapsed(false)"><PanelLeftOpen :size="19" /></button>
       </div>
 
       <nav aria-label="主要导航">
-        <button class="nav-item active"><Inbox :size="17" /><span>全部对话</span><em>{{ total }}</em></button>
+        <button class="nav-item active" title="全部对话" aria-label="全部对话"><Inbox :size="17" /><span>全部对话</span><em>{{ total }}</em></button>
       </nav>
 
       <div class="sidebar-section">
         <p>来源</p>
         <div class="source-picker">
           <span class="source-highlight" :style="{ transform: `translateY(${sourceIndex * 34}px)`, '--source-accent': sourceAccent }"></span>
-          <button :class="['source-item', { active: platform === '' }]" @click="selectPlatform('')"><i class="all"></i><span>全部来源</span></button>
-          <button :class="['source-item', { active: platform === 'deepseek' }]" @click="selectPlatform('deepseek')"><i class="deepseek"></i><span>DeepSeek</span></button>
-          <button :class="['source-item', { active: platform === 'doubao' }]" @click="selectPlatform('doubao')"><i class="doubao"></i><span>豆包</span></button>
-          <button :class="['source-item', { active: platform === 'kimi' }]" @click="selectPlatform('kimi')"><i class="kimi"></i><span>Kimi</span></button>
+          <button :class="['source-item', { active: platform === '' }]" title="全部来源" aria-label="全部来源" @click="selectPlatform('')"><i class="source-glyph all">全</i><span>全部来源</span></button>
+          <button :class="['source-item', { active: platform === 'deepseek' }]" title="DeepSeek" aria-label="DeepSeek" @click="selectPlatform('deepseek')"><i class="source-glyph deepseek">D</i><span>DeepSeek</span></button>
+          <button :class="['source-item', { active: platform === 'doubao' }]" title="豆包" aria-label="豆包" @click="selectPlatform('doubao')"><i class="source-glyph doubao">豆</i><span>豆包</span></button>
+          <button :class="['source-item', { active: platform === 'kimi' }]" title="Kimi" aria-label="Kimi" @click="selectPlatform('kimi')"><i class="source-glyph kimi">K</i><span>Kimi</span></button>
         </div>
       </div>
 
@@ -767,7 +780,7 @@ function handleSystemThemeChange() {
           <span class="status-dot"></span>
           <div><strong>{{ statusLabel }}</strong><small :class="['connection-label', { connected: apiStatus.userscript_connected }]">{{ apiStatus.userscript_connected ? '网页脚本已连接' : '等待网页脚本连接' }}</small></div>
         </div>
-        <button class="icon-button" title="设置" @click="openSettings"><Settings :size="18" /></button>
+        <button :class="['icon-button', 'settings-button', { connected: apiStatus.userscript_connected }]" title="设置" aria-label="设置" @click="openSettings"><Settings :size="18" /></button>
       </div>
     </aside>
 
