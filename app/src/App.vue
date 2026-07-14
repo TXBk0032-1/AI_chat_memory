@@ -51,6 +51,7 @@ import { useSessionCatalog } from './composables/useSessionCatalog'
 import { usePaneResize } from './composables/usePaneResize'
 import { useTheme } from './composables/useTheme'
 import { useSettings } from './composables/useSettings'
+import { useBranchNavigation } from './composables/useBranchNavigation'
 import './style.css'
 
 let mermaidInstance: typeof import('mermaid')['default'] | null = null
@@ -68,9 +69,6 @@ function normalizeMermaidSource(source: string) {
 const selected = ref<SessionOpen | null>(null)
 const messageSlots = ref<Array<Message | undefined>>([])
 const sessionSearchHits = ref<SearchHit[]>([])
-const branchOverview = ref<BranchOverview | null>(null)
-const branchesLoading = ref(false)
-const branchesError = ref('')
 const backgroundLoadFailed = ref(false)
 const messageListRef = ref<HTMLElement | null>(null)
 const detailLoading = ref(false)
@@ -79,14 +77,12 @@ const showDeletePrompt = ref(false)
 const showDetailMenu = ref(false)
 const showSessionInfo = ref(false)
 const pendingCloseBehavior = ref<'hide_to_tray' | 'exit' | null>(null)
-const detailMode = ref<'conversation' | 'branches'>('conversation')
 const expandedThinking = ref(new Set<string>())
 const settings = ref<SettingsModel>({ setup_complete: false, secret_enabled: false, allowed_origins: [], close_behavior: 'ask', tray_click_behavior: 'show_menu', theme: 'system' })
 const apiStatus = ref<ApiStatus>({ service: { state: 'starting' }, userscript_connected: false })
 const searchHitIndex = ref(-1)
 const loopSearch = ref(false)
 const toast = ref('')
-const activeBranchNode = ref('')
 const contextMenu = ref({ visible: false, x: 0, y: 0, selectedText: '' })
 const sidebarCollapsed = ref(loadSidebarCollapsed())
 const clickDebounceMs = 250
@@ -97,7 +93,6 @@ let mermaidRenderVersion = 0
 let sessionLoadGeneration = 0
 let backgroundLoadTimer: number | undefined
 let readingPositionTimer: number | undefined
-let branchLoadGeneration = 0
 let searchLoadGeneration = 0
 const lastControlClicks = new WeakMap<Element, number>()
 const pendingMessageBatches = new Map<string, Promise<boolean>>()
@@ -129,6 +124,14 @@ const virtualizerOptions = computed(() => ({
 const messageVirtualizer = useVirtualizer(virtualizerOptions)
 const virtualMessages = computed(() => messageVirtualizer.value.getVirtualItems())
 const virtualTotalSize = computed(() => messageVirtualizer.value.getTotalSize())
+const branches = useBranchNavigation(selected, desktopApi)
+const {
+  overview: branchOverview,
+  loading: branchesLoading,
+  error: branchesError,
+  activeNode: activeBranchNode,
+  mode: detailMode,
+} = branches
 
 function measureVirtualElement(element: unknown) {
   if (element instanceof Element) messageVirtualizer.value.measureElement(element)
@@ -136,15 +139,12 @@ function measureVirtualElement(element: unknown) {
 
 function clearSelectedSession() {
   sessionLoadGeneration += 1
-  branchLoadGeneration += 1
   searchLoadGeneration += 1
   window.clearTimeout(backgroundLoadTimer)
   selected.value = null
   messageSlots.value = []
   sessionSearchHits.value = []
-  branchOverview.value = null
-  branchesLoading.value = false
-  branchesError.value = ''
+  branches.reset()
   expandedThinking.value = new Set()
 }
 
@@ -187,8 +187,7 @@ async function selectSession(id: string) {
   detailLoading.value = true
   error.value = ''
   sessionSearchHits.value = []
-  branchOverview.value = null
-  branchesError.value = ''
+  branches.reset()
   try {
     const readingPosition = loadReadingPosition(id)
     const opened = await desktopApi.openSession(id, readingPosition?.seq ?? null)
@@ -203,13 +202,11 @@ async function selectSession(id: string) {
     }
     if (generation !== sessionLoadGeneration) return
     selected.value = opened
-    branchOverview.value = overview
+    branches.setOverview(overview)
     backgroundLoadFailed.value = false
     messageSlots.value = mergeMessageBatch(Array.from({ length: opened.message_count }), opened.messages)
-    detailMode.value = 'conversation'
     expandedThinking.value = new Set()
     searchHitIndex.value = -1
-    activeBranchNode.value = overview?.default_leaf_node_id ?? ''
     await nextTick()
     const readingIndex = branchReadingIndex(displayedMessageSeqs.value, readingPosition?.seq ?? null, opened.start_seq)
     messageVirtualizer.value.scrollToIndex(readingIndex, { align: 'start' })
@@ -277,13 +274,12 @@ async function ensureMessageLoaded(seq: number) {
 }
 
 async function selectBranch(branch: BranchNode) {
-  activeBranchNode.value = branch.node_id
   searchHitIndex.value = -1
-  detailMode.value = 'conversation'
-  await ensureMessageLoaded(branch.seq)
-  await nextTick()
-  messageVirtualizer.value.measure()
-  messageVirtualizer.value.scrollToIndex(displayedSeqIndexes.value.get(branch.seq) ?? 0, { align: 'center', behavior: 'smooth' })
+  await branches.select(branch, ensureMessageLoaded, async (seq) => {
+    await nextTick()
+    messageVirtualizer.value.measure()
+    messageVirtualizer.value.scrollToIndex(displayedSeqIndexes.value.get(seq) ?? 0, { align: 'center', behavior: 'smooth' })
+  })
 }
 
 async function navigateSearch(direction: number) {
@@ -325,27 +321,8 @@ async function loadSearchHits(generation = sessionLoadGeneration) {
   if (generation === sessionLoadGeneration && searchGeneration === searchLoadGeneration) sessionSearchHits.value = hits
 }
 
-async function loadBranches() {
-  if (!selected.value || branchOverview.value || branchesLoading.value) return
-  const generation = ++branchLoadGeneration
-  branchesLoading.value = true
-  branchesError.value = ''
-  try {
-    const overview = await desktopApi.getSessionBranches(selected.value.id)
-    if (generation !== branchLoadGeneration) return
-    branchOverview.value = overview
-    activeBranchNode.value ||= overview.default_leaf_node_id
-  } catch (reason) {
-    if (generation === branchLoadGeneration) branchesError.value = String(reason)
-  } finally {
-    if (generation === branchLoadGeneration) branchesLoading.value = false
-  }
-}
-
-function showBranches() {
-  detailMode.value = 'branches'
-  void loadBranches()
-}
+const loadBranches = branches.load
+const showBranches = branches.show
 
 function toggleThinking(messageId: string) {
   const next = new Set(expandedThinking.value)
@@ -561,7 +538,7 @@ watch(committedQuery, () => {
 onBeforeUnmount(() => {
   persistReadingPosition()
   sessionLoadGeneration += 1
-  branchLoadGeneration += 1
+  branches.reset()
   theme.dispose()
   window.removeEventListener('keydown', handleContextMenuKey)
   document.removeEventListener('click', preventRapidControlClick, true)
