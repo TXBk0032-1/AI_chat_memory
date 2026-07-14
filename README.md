@@ -2,6 +2,30 @@
 
 本地优先的跨平台 AI 聊天记录管理器。Tampermonkey userscript 从 DeepSeek、豆包和 Kimi 获取会话，Tauri 桌面端通过本地 API 接收并保存到 SQLite。
 
+## 功能
+
+- 从 DeepSeek、豆包和 Kimi 网页同步聊天记录；
+- 按平台、日期、标题和消息正文查找历史对话；
+- 查看 DeepSeek 对话分支，并在不同分支间切换；
+- 按“一问一答”选择当前分支中的部分内容；
+- 导出 PNG、JPEG、Markdown 或 JSON，可选择是否包含思考过程；
+- 本地保存数据，支持更改数据目录、同步密钥、主题和托盘行为。
+
+## 安装与使用
+
+当前发布流程生成 Windows x64 安装包。安装前需要系统已具备 WebView2（现代 Windows 通常已预装）。
+
+1. 从 `artifacts/` 运行最新的 `AI Chat Memory_*.msi`。
+2. 启动 AI Chat Memory，确认左下角显示“同步服务运行中”。
+3. 在 Tampermonkey 中安装 [`userscript/dist/ai-chat-memory.user.js`](userscript/dist/ai-chat-memory.user.js)。
+4. 打开并登录 DeepSeek、豆包或 Kimi 网页。
+5. 在网页右上方的 AI Chat Memory 面板点击“开始同步”或“全量同步”。
+6. 回到桌面端刷新，即可搜索、查看和导出对话。
+
+“开始同步”只处理新增或发生变化的会话；“全量同步”会重新读取平台提供的全部会话。
+
+完整操作、导出格式、安全设置和故障排查请参阅 [用户手册](docs/USER_GUIDE.md)。
+
 ## 技术栈
 
 - 桌面端：Tauri 2 + Rust 1.97.0（Edition 2024）
@@ -38,6 +62,8 @@ cargo clippy --all-targets --all-features -- -D warnings
 ## 数据存储
 
 桌面端数据库默认位于 `%APPDATA%\dev.aichatmemory.desktop\chat_memory.db`，也可在设置中更改数据保存位置。用户数据库目录不会提交到 Git。
+
+更改数据保存位置会迁移当前数据库并重启应用。执行迁移前建议先备份 `chat_memory.db`。
 
 ## 本地 API 安全
 
