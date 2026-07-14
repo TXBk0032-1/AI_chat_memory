@@ -40,7 +40,6 @@ import {
   type BranchNode,
   type BranchOverview,
   type Message,
-  type SearchHit,
   type SearchMatch,
   type SessionOpen,
 } from './conversation'
@@ -52,6 +51,7 @@ import { usePaneResize } from './composables/usePaneResize'
 import { useTheme } from './composables/useTheme'
 import { useSettings } from './composables/useSettings'
 import { useBranchNavigation } from './composables/useBranchNavigation'
+import { useConversationSearch } from './composables/useConversationSearch'
 import './style.css'
 
 let mermaidInstance: typeof import('mermaid')['default'] | null = null
@@ -68,7 +68,6 @@ function normalizeMermaidSource(source: string) {
 }
 const selected = ref<SessionOpen | null>(null)
 const messageSlots = ref<Array<Message | undefined>>([])
-const sessionSearchHits = ref<SearchHit[]>([])
 const backgroundLoadFailed = ref(false)
 const messageListRef = ref<HTMLElement | null>(null)
 const detailLoading = ref(false)
@@ -80,8 +79,6 @@ const pendingCloseBehavior = ref<'hide_to_tray' | 'exit' | null>(null)
 const expandedThinking = ref(new Set<string>())
 const settings = ref<SettingsModel>({ setup_complete: false, secret_enabled: false, allowed_origins: [], close_behavior: 'ask', tray_click_behavior: 'show_menu', theme: 'system' })
 const apiStatus = ref<ApiStatus>({ service: { state: 'starting' }, userscript_connected: false })
-const searchHitIndex = ref(-1)
-const loopSearch = ref(false)
 const toast = ref('')
 const contextMenu = ref({ visible: false, x: 0, y: 0, selectedText: '' })
 const sidebarCollapsed = ref(loadSidebarCollapsed())
@@ -93,7 +90,6 @@ let mermaidRenderVersion = 0
 let sessionLoadGeneration = 0
 let backgroundLoadTimer: number | undefined
 let readingPositionTimer: number | undefined
-let searchLoadGeneration = 0
 const lastControlClicks = new WeakMap<Element, number>()
 const pendingMessageBatches = new Map<string, Promise<boolean>>()
 const { sessionPaneWidth, resizingPanes, startPaneResize, resizePanes, stopPaneResize } = usePaneResize()
@@ -139,11 +135,10 @@ function measureVirtualElement(element: unknown) {
 
 function clearSelectedSession() {
   sessionLoadGeneration += 1
-  searchLoadGeneration += 1
   window.clearTimeout(backgroundLoadTimer)
   selected.value = null
   messageSlots.value = []
-  sessionSearchHits.value = []
+  conversationSearch.reset()
   branches.reset()
   expandedThinking.value = new Set()
 }
@@ -158,6 +153,9 @@ const {
     clearSelectedSession()
   }
 })
+const conversationSearch = useConversationSearch(selected, committedQuery, desktopApi)
+const { hits: sessionSearchHits, index: searchHitIndex, loop: loopSearch } = conversationSearch
+const loadSearchHits = conversationSearch.load
 const {
   showSettings, originText, secretCopied, openSettings, closeSettings, saveSettings,
   rotateSecret, copySecret, changeDataDirectory,
@@ -186,7 +184,7 @@ async function selectSession(id: string) {
   persistReadingPosition()
   detailLoading.value = true
   error.value = ''
-  sessionSearchHits.value = []
+  conversationSearch.reset()
   branches.reset()
   try {
     const readingPosition = loadReadingPosition(id)
@@ -212,7 +210,7 @@ async function selectSession(id: string) {
     messageVirtualizer.value.scrollToIndex(readingIndex, { align: 'start' })
     await nextTick()
     if (readingPosition?.offset) messageListRef.value?.scrollBy({ top: readingPosition.offset })
-    void loadSearchHits(generation)
+    void loadSearchHits()
     scheduleBackgroundLoad(generation)
   } catch (reason) {
     if (generation !== sessionLoadGeneration) return
@@ -309,16 +307,6 @@ async function navigateSearch(direction: number) {
   const field = block?.querySelector<HTMLElement>(`[data-search-field="${match.field}"]`)
   const hits = field?.querySelectorAll<HTMLElement>('mark.search-hit')
   hits?.[match.occurrence]?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-}
-
-async function loadSearchHits(generation = sessionLoadGeneration) {
-  const searchGeneration = ++searchLoadGeneration
-  if (!selected.value || !committedQuery.value) {
-    sessionSearchHits.value = []
-    return
-  }
-  const hits = await desktopApi.searchSessionHits(selected.value.id, committedQuery.value)
-  if (generation === sessionLoadGeneration && searchGeneration === searchLoadGeneration) sessionSearchHits.value = hits
 }
 
 const loadBranches = branches.load
