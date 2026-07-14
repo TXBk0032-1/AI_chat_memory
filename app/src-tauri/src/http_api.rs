@@ -9,8 +9,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
-use std::net::SocketAddr;
-use tower_http::trace::TraceLayer;
+use std::{net::SocketAddr, time::Instant};
 
 use crate::{models::ImportRequest, service::AppService};
 
@@ -27,9 +26,10 @@ pub async fn serve(service: AppService) -> crate::error::Result<()> {
         .fallback(options)
         .layer(DefaultBodyLimit::max(128 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(service.clone(), authorize))
-        .layer(TraceLayer::new_for_http())
+        .layer(middleware::from_fn(log_request))
         .with_state(service.clone());
     let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 19820))).await?;
+    tracing::info!(address = "127.0.0.1:19820", "local API listening");
     service
         .set_api_status(crate::models::ApiStatus::Running)
         .await;
@@ -37,6 +37,17 @@ pub async fn serve(service: AppService) -> crate::error::Result<()> {
         .await
         .map_err(std::io::Error::other)?;
     Ok(())
+}
+
+async fn log_request(request: Request, next: Next) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_owned();
+    let started = Instant::now();
+    let response = next.run(request).await;
+    if method != Method::OPTIONS && path != "/api/v1/health" {
+        tracing::info!(%method, %path, status=%response.status(), latency_ms=started.elapsed().as_millis(), "local API request completed");
+    }
+    response
 }
 
 async fn authorize(
@@ -48,6 +59,7 @@ async fn authorize(
     let origin = headers.get("origin").and_then(|v| v.to_str().ok());
     let settings = service.settings.get().await;
     if let Err(reason) = authorization_error(request.method(), origin, &headers, &settings) {
+        tracing::warn!(method=%request.method(), path=request.uri().path(), origin=origin.unwrap_or("<missing>"), reason, "local API request rejected");
         return (StatusCode::FORBIDDEN, reason).into_response();
     }
     if request.method() != Method::OPTIONS {
@@ -156,6 +168,11 @@ fn error_response(error: crate::error::AppError) -> Response {
         | crate::error::AppError::Zip(_) => StatusCode::BAD_REQUEST,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     };
+    if status.is_server_error() {
+        tracing::error!(%error, %status, "local API request failed");
+    } else {
+        tracing::warn!(%error, %status, "local API request rejected");
+    }
     (status, Json(json!({"detail":error.to_string()}))).into_response()
 }
 

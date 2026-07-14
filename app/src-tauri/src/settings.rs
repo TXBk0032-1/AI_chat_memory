@@ -62,13 +62,16 @@ impl SettingsStore {
         }
         let _ = tokio::fs::remove_file(&backup).await;
         *self.value.write().await = value.clone();
+        tracing::info!(secret_enabled=value.secret_enabled, origin_count=value.allowed_origins.len(), theme=?value.theme, "application settings updated");
         Ok(value)
     }
     pub async fn rotate_secret(&self) -> Result<AppSettings> {
         let mut value = self.get().await;
         value.secret_enabled = true;
         value.secret = Some(generate_secret());
-        self.update(value).await
+        let settings = self.update(value).await?;
+        tracing::info!("userscript secret rotated");
+        Ok(settings)
     }
 }
 

@@ -8,6 +8,16 @@ use crate::{
 use tauri::{AppHandle, Manager, State};
 
 fn message(error: crate::error::AppError) -> String {
+    match &error {
+        crate::error::AppError::InvalidData(_)
+        | crate::error::AppError::NotFound(_)
+        | crate::error::AppError::Configuration(_) => {
+            tracing::warn!(%error, "desktop command rejected");
+        }
+        _ => {
+            tracing::error!(%error, "desktop command failed");
+        }
+    }
     error.to_string()
 }
 
@@ -69,6 +79,10 @@ pub async fn import_deepseek_zip(
         .await
         .map_err(|e| e.to_string())?;
     if metadata.len() > 128 * 1024 * 1024 {
+        tracing::warn!(
+            archive_bytes = metadata.len(),
+            "desktop ZIP import rejected because it exceeds the size limit"
+        );
         return Err("ZIP 文件超过 128 MB 限制".into());
     }
     let bytes = tokio::fs::read(path).await.map_err(|e| e.to_string())?;
@@ -126,6 +140,7 @@ pub async fn move_data_directory(
     let mut settings = service.settings.get().await;
     settings.data_directory = Some(directory.to_string_lossy().into_owned());
     service.settings.update(settings).await.map_err(message)?;
+    tracing::info!(destination=%directory.display(), "database copied to configured directory; restarting application");
     app.request_restart();
     Ok(())
 }

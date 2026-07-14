@@ -25,17 +25,22 @@ pub struct AppService {
 
 impl AppService {
     pub async fn import(&self, request: ImportRequest) -> Result<ImportResponse> {
+        let platform = request.platform.clone();
+        let received = request.sessions.len();
         let normalized = request
             .sessions
             .iter()
             .map(|raw| normalizer::normalize_session(&request.platform, raw))
             .collect::<Result<Vec<_>>>()?;
+        let imported = database::import_sessions(&self.pool, &normalized).await?;
+        tracing::info!(%platform, received, imported, "session import completed");
         Ok(ImportResponse {
-            imported: database::import_sessions(&self.pool, &normalized).await?,
+            imported,
             skipped: 0,
         })
     }
     pub async fn import_deepseek_zip(&self, bytes: Vec<u8>) -> Result<ImportResponse> {
+        let archive_bytes = bytes.len();
         if bytes.len() > 128 * 1024 * 1024 {
             return Err(AppError::InvalidData("ZIP 文件超过 128 MB 限制".into()));
         }
@@ -58,8 +63,15 @@ impl AppService {
             .iter()
             .map(normalizer::normalize_deepseek_export)
             .collect::<Result<Vec<_>>>()?;
+        let imported = database::import_sessions(&self.pool, &normalized).await?;
+        tracing::info!(
+            archive_bytes,
+            conversations = normalized.len(),
+            imported,
+            "DeepSeek archive import completed"
+        );
         Ok(ImportResponse {
-            imported: database::import_sessions(&self.pool, &normalized).await?,
+            imported,
             skipped: 0,
         })
     }
@@ -90,7 +102,9 @@ impl AppService {
         database::get_session_branches(&self.pool, id).await
     }
     pub async fn delete(&self, id: &str) -> Result<()> {
-        database::delete_session(&self.pool, id).await
+        database::delete_session(&self.pool, id).await?;
+        tracing::info!("session deleted");
+        Ok(())
     }
     pub async fn sync_status(&self, platform: &str) -> Result<Option<String>> {
         database::sync_status(&self.pool, platform).await

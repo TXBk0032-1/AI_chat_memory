@@ -3,6 +3,7 @@ mod commands;
 mod database;
 mod error;
 mod http_api;
+mod logging;
 mod models;
 mod normalizer;
 mod service;
@@ -20,11 +21,9 @@ use tokio::sync::RwLock;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            tracing::info!("second instance requested; focusing main window");
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();
                 let _ = window.set_focus();
@@ -34,6 +33,15 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
+            match logging::init(&data_dir) {
+                Ok(log_guard) => {
+                    app.manage(log_guard);
+                }
+                Err(error) => {
+                    eprintln!("failed to initialize file logging: {error}");
+                }
+            }
+            tracing::info!(app_data_dir=%data_dir.display(), "application starting");
             let executable_dir = std::env::current_exe()
                 .ok()
                 .and_then(|path| path.parent().map(std::path::Path::to_path_buf));
@@ -91,7 +99,10 @@ pub fn run() {
                             let _ = window.set_focus();
                         }
                     }
-                    "quit" => app.exit(0),
+                    "quit" => {
+                        tracing::info!("application exit requested from tray");
+                        app.exit(0)
+                    }
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
@@ -122,11 +133,15 @@ pub fn run() {
                 let service = app.state::<AppService>();
                 match tauri::async_runtime::block_on(service.settings.get()).close_behavior {
                     crate::models::CloseBehavior::HideToTray => {
+                        tracing::info!("main window close requested; hiding to tray");
                         api.prevent_close();
                         let _ = window.hide();
                     }
-                    crate::models::CloseBehavior::Exit => {}
+                    crate::models::CloseBehavior::Exit => {
+                        tracing::info!("main window close requested; exiting application");
+                    }
                     crate::models::CloseBehavior::Ask => {
+                        tracing::info!("main window close requested; awaiting user choice");
                         api.prevent_close();
                         let _ = window.emit("close-behavior-requested", ());
                         let _ = window.show();
