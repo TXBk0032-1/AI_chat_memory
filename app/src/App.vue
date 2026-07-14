@@ -50,6 +50,7 @@ import { desktopApi, type ApiStatus, type SettingsModel } from './desktop-api'
 import { useSessionCatalog } from './composables/useSessionCatalog'
 import { usePaneResize } from './composables/usePaneResize'
 import { useTheme } from './composables/useTheme'
+import { useSettings } from './composables/useSettings'
 import './style.css'
 
 let mermaidInstance: typeof import('mermaid')['default'] | null = null
@@ -73,7 +74,6 @@ const branchesError = ref('')
 const backgroundLoadFailed = ref(false)
 const messageListRef = ref<HTMLElement | null>(null)
 const detailLoading = ref(false)
-const showSettings = ref(false)
 const showClosePrompt = ref(false)
 const showDeletePrompt = ref(false)
 const showDetailMenu = ref(false)
@@ -82,9 +82,7 @@ const pendingCloseBehavior = ref<'hide_to_tray' | 'exit' | null>(null)
 const detailMode = ref<'conversation' | 'branches'>('conversation')
 const expandedThinking = ref(new Set<string>())
 const settings = ref<SettingsModel>({ setup_complete: false, secret_enabled: false, allowed_origins: [], close_behavior: 'ask', tray_click_behavior: 'show_menu', theme: 'system' })
-const originText = ref('')
 const apiStatus = ref<ApiStatus>({ service: { state: 'starting' }, userscript_connected: false })
-const secretCopied = ref(false)
 const searchHitIndex = ref(-1)
 const loopSearch = ref(false)
 const toast = ref('')
@@ -112,7 +110,6 @@ const theme = useTheme(settings, (animate) => {
   }, animate ? 180 : 0)
 })
 const { effectiveTheme, commitTheme, previewTheme } = theme
-
 const displayedMessageSeqs = computed(() => branchMessageSeqs(
   branchOverview.value,
   activeBranchNode.value,
@@ -161,11 +158,14 @@ const {
     clearSelectedSession()
   }
 })
-
-function closeSettings(save = false) {
-  if (!save) theme.cancelPreview()
-  showSettings.value = false
-}
+const {
+  showSettings, originText, secretCopied, openSettings, closeSettings, saveSettings,
+  rotateSecret, copySecret, changeDataDirectory,
+} = useSettings(settings, error, {
+  begin: theme.beginPreview,
+  accept: theme.acceptPreview,
+  cancel: theme.cancelPreview,
+})
 
 function setSidebarCollapsed(collapsed: boolean) {
   sidebarCollapsed.value = collapsed
@@ -402,48 +402,6 @@ async function importZip() {
     error.value = String(reason)
   } finally {
     loading.value = false
-  }
-}
-
-async function openSettings() {
-  settings.value = await desktopApi.getSettings()
-  theme.beginPreview()
-  originText.value = settings.value.allowed_origins.join('\n')
-  secretCopied.value = false
-  showSettings.value = true
-}
-
-async function saveSettings() {
-  settings.value.allowed_origins = originText.value.split('\n').map((value) => value.trim()).filter(Boolean)
-  settings.value.setup_complete = true
-  try {
-    settings.value = await desktopApi.saveSettings(settings.value)
-    theme.acceptPreview()
-    closeSettings(true)
-  } catch (reason) {
-    error.value = String(reason)
-  }
-}
-
-async function rotateSecret() {
-  settings.value = await desktopApi.rotateSecret()
-  secretCopied.value = false
-}
-
-async function copySecret() {
-  if (!settings.value.secret) return
-  await navigator.clipboard.writeText(settings.value.secret)
-  secretCopied.value = true
-}
-
-async function changeDataDirectory() {
-  const path = await open({ directory: true, multiple: false, title: '选择数据保存目录' })
-  if (typeof path !== 'string') return
-  if (!confirm('应用将把当前数据库复制到新目录并立即重启。是否继续？')) return
-  try {
-    await desktopApi.moveDataDirectory(path)
-  } catch (reason) {
-    error.value = String(reason)
   }
 }
 
