@@ -1,7 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { setTheme as setNativeTheme } from '@tauri-apps/api/app'
-import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { open } from '@tauri-apps/plugin-dialog'
 import { openUrl } from '@tauri-apps/plugin-opener'
@@ -53,19 +52,8 @@ import {
 import { escapeTitle } from './markdown'
 import { branchMessageSeqs, branchReadingIndex, filterBranchMatches } from './branch-overview'
 import { loadSidebarCollapsed, saveSidebarCollapsed } from './sidebar'
+import { desktopApi, type ApiStatus, type SettingsModel } from './desktop-api'
 import './style.css'
-
-type SettingsModel = {
-  setup_complete: boolean
-  secret_enabled: boolean
-  secret?: string
-  allowed_origins: string[]
-  data_directory?: string
-  close_behavior: 'ask' | 'hide_to_tray' | 'exit'
-  tray_click_behavior: 'show_menu' | 'open_window' | 'no_action'
-  theme: 'system' | 'light' | 'dark'
-}
-type ApiStatus = { service: { state: string; message?: string }; userscript_connected: boolean; last_userscript_request_at?: number }
 
 let mermaidInstance: typeof import('mermaid')['default'] | null = null
 async function loadMermaid() {
@@ -255,15 +243,13 @@ async function loadSessions(reset = true) {
   if (reset) page.value = 0
   if (reset) committedQuery.value = query.value.trim()
   try {
-    const result = await invoke<{ sessions: SessionSummary[]; total: number }>('search_sessions', {
-      query: {
+    const result = await desktopApi.searchSessions({
         q: committedQuery.value || null,
         platform: platform.value || null,
         date_from: epoch(dateFrom.value),
         date_to: epoch(dateTo.value, true),
         limit: pageSize,
         offset: page.value * pageSize,
-      },
     })
     sessions.value = reset ? result.sessions : [...sessions.value, ...result.sessions]
     total.value = result.total
@@ -295,12 +281,12 @@ async function selectSession(id: string) {
   branchesError.value = ''
   try {
     const readingPosition = loadReadingPosition(id)
-    const opened = await invoke<SessionOpen>('open_session', { id, anchorSeq: readingPosition?.seq ?? null })
+    const opened = await desktopApi.openSession(id, readingPosition?.seq ?? null)
     if (generation !== sessionLoadGeneration) return
     let overview: BranchOverview | null = null
     if (opened.has_branches) {
       try {
-        overview = await invoke<BranchOverview>('get_session_branches', { id })
+        overview = await desktopApi.getSessionBranches(id)
       } catch (reason) {
         branchesError.value = String(reason)
       }
@@ -337,7 +323,7 @@ async function fetchMessageBatch(startSeq: number, generation = sessionLoadGener
   const pending = pendingMessageBatches.get(batchKey)
   if (pending) return pending
   const request = (async () => {
-    const messages = await invoke<Message[]>('get_session_messages', { id: sessionId, startSeq: normalizedStart, limit: 50 })
+    const messages = await desktopApi.getSessionMessages(sessionId, normalizedStart, 50)
     if (generation !== sessionLoadGeneration || selected.value?.id !== sessionId) return false
     messageSlots.value = mergeMessageBatch(messageSlots.value, messages)
     return messages.length > 0
@@ -440,7 +426,7 @@ async function loadSearchHits(generation = sessionLoadGeneration) {
     sessionSearchHits.value = []
     return
   }
-  const hits = await invoke<SearchHit[]>('search_session_hits', { id: selected.value.id, query: committedQuery.value })
+  const hits = await desktopApi.searchSessionHits(selected.value.id, committedQuery.value)
   if (generation === sessionLoadGeneration && searchGeneration === searchLoadGeneration) sessionSearchHits.value = hits
 }
 
@@ -450,7 +436,7 @@ async function loadBranches() {
   branchesLoading.value = true
   branchesError.value = ''
   try {
-    const overview = await invoke<BranchOverview>('get_session_branches', { id: selected.value.id })
+    const overview = await desktopApi.getSessionBranches(selected.value.id)
     if (generation !== branchLoadGeneration) return
     branchOverview.value = overview
     activeBranchNode.value ||= overview.default_leaf_node_id
@@ -499,7 +485,7 @@ async function renderMermaidDiagrams() {
 async function removeSession() {
   if (!selected.value) return
   try {
-    await invoke('delete_session', { id: selected.value.id })
+    await desktopApi.deleteSession(selected.value.id)
     clearSelectedSession()
     showDeletePrompt.value = false
     showDetailMenu.value = false
@@ -515,7 +501,7 @@ async function importZip() {
   loading.value = true
   error.value = ''
   try {
-    await invoke('import_deepseek_zip', { path })
+    await desktopApi.importDeepseekZip(path)
     await loadSessions()
   } catch (reason) {
     error.value = String(reason)
@@ -525,7 +511,7 @@ async function importZip() {
 }
 
 async function openSettings() {
-  settings.value = await invoke('get_settings')
+  settings.value = await desktopApi.getSettings()
   savedThemeBeforeSettings = settings.value.theme
   originText.value = settings.value.allowed_origins.join('\n')
   secretCopied.value = false
@@ -536,7 +522,7 @@ async function saveSettings() {
   settings.value.allowed_origins = originText.value.split('\n').map((value) => value.trim()).filter(Boolean)
   settings.value.setup_complete = true
   try {
-    settings.value = await invoke('save_settings', { settings: settings.value })
+    settings.value = await desktopApi.saveSettings(settings.value)
     savedThemeBeforeSettings = settings.value.theme
     closeSettings(true)
   } catch (reason) {
@@ -545,7 +531,7 @@ async function saveSettings() {
 }
 
 async function rotateSecret() {
-  settings.value = await invoke('rotate_secret')
+  settings.value = await desktopApi.rotateSecret()
   secretCopied.value = false
 }
 
@@ -560,7 +546,7 @@ async function changeDataDirectory() {
   if (typeof path !== 'string') return
   if (!confirm('应用将把当前数据库复制到新目录并立即重启。是否继续？')) return
   try {
-    await invoke('move_data_directory', { path })
+    await desktopApi.moveDataDirectory(path)
   } catch (reason) {
     error.value = String(reason)
   }
@@ -569,7 +555,7 @@ async function changeDataDirectory() {
 async function confirmClose() {
   if (!pendingCloseBehavior.value) return
   try {
-    await invoke('confirm_close_behavior', { behavior: pendingCloseBehavior.value })
+    await desktopApi.confirmCloseBehavior(pendingCloseBehavior.value)
     showClosePrompt.value = false
   } catch (reason) {
     error.value = String(reason)
@@ -691,7 +677,7 @@ async function openMarkdownLink(event: MouseEvent) {
 }
 
 async function refreshApiStatus() {
-  apiStatus.value = await invoke('get_api_status')
+  apiStatus.value = await desktopApi.getApiStatus()
 }
 
 function formatDate(value?: string, compact = false) {
@@ -741,7 +727,7 @@ onMounted(async () => {
     pendingCloseBehavior.value = null
     showClosePrompt.value = true
   })
-  settings.value = await invoke('get_settings')
+  settings.value = await desktopApi.getSettings()
   commitTheme(settings.value.theme, false)
   await refreshApiStatus()
   statusTimer = window.setInterval(refreshApiStatus, 3000)
