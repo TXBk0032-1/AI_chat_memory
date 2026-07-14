@@ -5,7 +5,6 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { open } from '@tauri-apps/plugin-dialog'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import {
-  Archive,
   ArrowDown,
   ArrowUp,
   CalendarDays,
@@ -15,19 +14,15 @@ import {
   Copy,
   FileArchive,
   GitBranch,
-  Inbox,
   LoaderCircle,
   MessageSquareText,
   MoreHorizontal,
   RefreshCw,
   Search,
   Server,
-  Settings,
   ShieldCheck,
   Monitor,
   Moon,
-  PanelLeftClose,
-  PanelLeftOpen,
   Sun,
   Trash2,
   X,
@@ -36,6 +31,8 @@ import { useVirtualizer } from '@tanstack/vue-virtual'
 import 'katex/dist/katex.min.css'
 import MessageBlock from './MessageBlock.vue'
 import BranchOverviewView from './BranchOverview.vue'
+import AppSidebar from './components/AppSidebar.vue'
+import SessionList from './components/SessionList.vue'
 import {
   expandSearchHits,
   loadReadingPosition,
@@ -48,7 +45,6 @@ import {
   type SearchMatch,
   type SessionOpen,
 } from './conversation'
-import { escapeTitle } from './markdown'
 import { branchMessageSeqs, branchReadingIndex, filterBranchMatches } from './branch-overview'
 import { loadSidebarCollapsed, saveSidebarCollapsed } from './sidebar'
 import { desktopApi, type ApiStatus, type SettingsModel } from './desktop-api'
@@ -219,9 +215,6 @@ function setSidebarCollapsed(collapsed: boolean) {
 }
 
 const hasBranches = computed(() => selected.value?.has_branches ?? false)
-const statusLabel = computed(() => apiStatus.value.service.state === 'running' ? '同步服务运行中' : apiStatus.value.service.state === 'failed' ? '同步服务异常' : '同步服务启动中')
-const sourceIndex = computed(() => ['', 'deepseek', 'doubao', 'kimi'].indexOf(platform.value))
-const sourceAccent = computed(() => ({ deepseek: '#4d8fe8', doubao: '#e05c62', kimi: '#39a878' } as Record<string, string>)[platform.value] ?? '#74858d')
 const selectedMatches = computed<SearchMatch[]>(() => filterBranchMatches(
   expandSearchHits(sessionSearchHits.value),
   displayedMessageSeqs.value,
@@ -333,21 +326,6 @@ async function selectBranch(branch: BranchNode) {
   await nextTick()
   messageVirtualizer.value.measure()
   messageVirtualizer.value.scrollToIndex(displayedSeqIndexes.value.get(branch.seq) ?? 0, { align: 'center', behavior: 'smooth' })
-}
-
-function escapeRegExp(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-}
-
-function highlightRenderedHtml(html: string) {
-  const needle = committedQuery.value
-  if (!needle) return html
-  const pattern = new RegExp(escapeRegExp(needle), 'gi')
-  return html.split(/(<[^>]+>)/g).map((part) => part.startsWith('<') ? part : part.replace(pattern, (match) => `<mark class="search-hit">${match}</mark>`)).join('')
-}
-
-function highlightTitle(value: string) {
-  return highlightRenderedHtml(escapeTitle(value))
 }
 
 async function navigateSearch(direction: number) {
@@ -706,42 +684,15 @@ function handleSystemThemeChange() {
 
 <template>
   <div :class="['app-frame', { 'sidebar-collapsed': sidebarCollapsed }]" @click="hidePopupMenus" @contextmenu="handleContextMenu">
-    <aside class="sidebar" :aria-label="sidebarCollapsed ? '已折叠的来源导航' : '来源导航'">
-      <div class="identity">
-        <div class="identity-content">
-          <div class="identity-mark"><MessageSquareText :size="20" /></div>
-          <div class="identity-name"><strong>对话归档</strong><span>AI Chat Memory</span></div>
-          <button class="sidebar-toggle sidebar-toggle-collapse" title="折叠侧边栏" aria-label="折叠侧边栏" @click="setSidebarCollapsed(true)"><PanelLeftClose :size="17" /></button>
-        </div>
-        <button class="sidebar-toggle sidebar-toggle-expand" title="展开侧边栏" aria-label="展开侧边栏" @click="setSidebarCollapsed(false)"><PanelLeftOpen :size="19" /></button>
-      </div>
-
-      <nav aria-label="主要导航">
-        <button class="nav-item active" title="全部对话" aria-label="全部对话">
-          <span class="nav-item-expanded"><Inbox :size="17" /><span>全部对话</span><em>{{ total }}</em></span>
-          <em class="nav-item-collapsed" aria-hidden="true">{{ total }}</em>
-        </button>
-      </nav>
-
-      <div class="sidebar-section">
-        <p>来源</p>
-        <div class="source-picker">
-          <span class="source-highlight" :style="{ transform: `translateY(${sourceIndex * 34}px)`, '--source-accent': sourceAccent }"></span>
-          <button :class="['source-item', { active: platform === '' }]" title="全部来源" aria-label="全部来源" @click="selectPlatform('')"><i class="source-glyph all">全</i><span>全部来源</span></button>
-          <button :class="['source-item', { active: platform === 'deepseek' }]" title="DeepSeek" aria-label="DeepSeek" @click="selectPlatform('deepseek')"><i class="source-glyph deepseek">D</i><span>DeepSeek</span></button>
-          <button :class="['source-item', { active: platform === 'doubao' }]" title="豆包" aria-label="豆包" @click="selectPlatform('doubao')"><i class="source-glyph doubao">豆</i><span>豆包</span></button>
-          <button :class="['source-item', { active: platform === 'kimi' }]" title="Kimi" aria-label="Kimi" @click="selectPlatform('kimi')"><i class="source-glyph kimi">K</i><span>Kimi</span></button>
-        </div>
-      </div>
-
-      <div class="sidebar-footer">
-        <div class="service-state" :class="apiStatus.service.state">
-          <span class="status-dot"></span>
-          <div><strong>{{ statusLabel }}</strong><small :class="['connection-label', { connected: apiStatus.userscript_connected }]">{{ apiStatus.userscript_connected ? '网页脚本已连接' : '等待网页脚本连接' }}</small></div>
-        </div>
-        <button :class="['icon-button', 'settings-button', { connected: apiStatus.userscript_connected }]" title="设置" aria-label="设置" @click="openSettings"><Settings :size="18" /></button>
-      </div>
-    </aside>
+    <AppSidebar
+      :collapsed="sidebarCollapsed"
+      :total="total"
+      :platform="platform"
+      :api-status="apiStatus"
+      @collapse="setSidebarCollapsed"
+      @select-platform="selectPlatform"
+      @open-settings="openSettings"
+    />
 
     <main class="workspace">
       <header class="workspace-header">
@@ -777,26 +728,16 @@ function handleSystemThemeChange() {
       </div>
 
       <section :class="['content-grid', { resizing: resizingPanes }]" :style="{ '--session-pane-width': `${sessionPaneWidth}px` }">
-        <div class="session-pane">
-          <div class="table-head"><span>对话</span><span>来源</span><span>更新时间</span></div>
-          <div v-if="loading && !sessions.length" class="loading-state"><LoaderCircle class="spinning" :size="22" /><span>正在读取对话</span></div>
-          <button
-            v-for="session in sessions"
-            :key="session.id"
-            :class="['session-row', { selected: selected?.id === session.id }]"
-            @click="selectSession(session.id)"
-          >
-            <span class="session-title"><strong v-html="highlightTitle(session.title)"></strong></span>
-            <span class="platform-cell"><i :class="session.platform"></i>{{ platformName(session.platform) }}</span>
-            <time>{{ formatDate(session.updated_at, true) }}</time>
-          </button>
-          <div v-if="!loading && !sessions.length" class="empty-state">
-            <Archive :size="30" />
-            <strong>{{ filtered ? '没有匹配的对话' : '还没有对话记录' }}</strong>
-            <span>{{ filtered ? '调整搜索或筛选条件后重试' : '同步 userscript 或导入 DeepSeek ZIP 后会显示在这里' }}</span>
-          </div>
-          <button v-if="sessions.length < total" class="load-more" :disabled="loading" @click="loadMore">{{ loading ? '加载中' : `加载更多（剩余 ${total-sessions.length} 条）` }}</button>
-        </div>
+        <SessionList
+          :sessions="sessions"
+          :total="total"
+          :loading="loading"
+          :selected-id="selected?.id"
+          :filtered="filtered"
+          :query="committedQuery"
+          @select="selectSession"
+          @load-more="loadMore"
+        />
 
         <div class="pane-resizer" role="separator" aria-label="调整对话列表和内容宽度" aria-orientation="vertical" tabindex="0" @pointerdown="startPaneResize" @pointermove="resizePanes" @pointerup="stopPaneResize" @pointercancel="stopPaneResize"></div>
 
