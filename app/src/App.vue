@@ -7,7 +7,6 @@ import {
   ArrowDown,
   ArrowUp,
   CalendarDays,
-  Check,
   ChevronDown,
   Clipboard,
   Copy,
@@ -19,10 +18,6 @@ import {
   RefreshCw,
   Search,
   Server,
-  ShieldCheck,
-  Monitor,
-  Moon,
-  Sun,
   Trash2,
   X,
 } from 'lucide-vue-next'
@@ -32,6 +27,7 @@ import MessageBlock from './MessageBlock.vue'
 import BranchOverviewView from './BranchOverview.vue'
 import AppSidebar from './components/AppSidebar.vue'
 import SessionList from './components/SessionList.vue'
+import SettingsDialog from './components/SettingsDialog.vue'
 import {
   expandSearchHits,
   saveReadingPosition,
@@ -610,39 +606,18 @@ onBeforeUnmount(() => {
       </section>
     </main>
 
-    <Transition name="settings-modal">
-      <div v-if="showSettings" class="dialog-backdrop" @click.self="closeSettings()">
-        <section class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-        <header><div><h2 id="settings-title">应用设置</h2><p>配置界面、桌面行为和本地同步服务</p></div></header>
-        <div class="settings-content">
-          <section class="setting-group theme-setting">
-            <div><h3>外观</h3><p>选择应用配色，跟随系统会随 Windows 主题自动切换。</p></div>
-            <div class="theme-options" role="radiogroup" aria-label="应用主题">
-              <button :class="{ active: settings.theme === 'system' }" role="radio" :aria-checked="settings.theme === 'system'" @click="previewTheme('system')"><Monitor :size="16" /><span>跟随系统</span></button>
-              <button :class="{ active: settings.theme === 'light' }" role="radio" :aria-checked="settings.theme === 'light'" @click="previewTheme('light')"><Sun :size="16" /><span>亮色</span></button>
-              <button :class="{ active: settings.theme === 'dark' }" role="radio" :aria-checked="settings.theme === 'dark'" @click="previewTheme('dark')"><Moon :size="16" /><span>深色</span></button>
-            </div>
-          </section>
-          <section class="setting-group">
-            <div class="setting-row"><div><h3>数据保存位置</h3><p class="path-value">{{ settings.data_directory || '系统默认应用数据目录' }}</p></div><button class="secondary-button" @click="changeDataDirectory">更改位置</button></div>
-          </section>
-          <section class="setting-group behavior-settings">
-            <label><span>关闭窗口后</span><select v-model="settings.close_behavior"><option value="ask">下次关闭时询问</option><option value="hide_to_tray">隐藏到系统托盘</option><option value="exit">退出应用</option></select></label>
-            <label><span>点击托盘图标</span><select v-model="settings.tray_click_behavior"><option value="show_menu">弹出托盘菜单</option><option value="open_window">打开主界面</option><option value="no_action">不执行操作</option></select></label>
-          </section>
-          <section class="setting-group">
-            <div class="setting-heading"><ShieldCheck :size="18" /><div><h3>允许的网页来源</h3><p>每行填写一个完整的 HTTP 或 HTTPS Origin，不支持通配符。</p></div></div>
-            <textarea v-model="originText" spellcheck="false" aria-label="Origin 白名单"></textarea>
-          </section>
-          <section class="setting-group">
-            <div class="setting-row"><div><h3>同步密钥</h3><p>要求 userscript 携带额外密钥访问本地服务。</p></div><label class="switch"><input v-model="settings.secret_enabled" type="checkbox" /><span></span></label></div>
-            <div v-if="settings.secret_enabled" class="secret-field"><code>{{ settings.secret || '保存设置后自动生成' }}</code><button class="icon-button" :title="secretCopied ? '已复制' : '复制密钥'" :disabled="!settings.secret" @click="copySecret"><Check v-if="secretCopied" :size="17" /><Clipboard v-else :size="17" /></button><button class="secondary-button compact" @click="rotateSecret">重新生成</button></div>
-          </section>
-        </div>
-        <footer><button class="secondary-button" @click="closeSettings()">取消</button><button class="primary-button" @click="saveSettings">保存设置</button></footer>
-        </section>
-      </div>
-    </Transition>
+    <SettingsDialog
+      v-model:settings="settings"
+      v-model:origin-text="originText"
+      :visible="showSettings"
+      :secret-copied="secretCopied"
+      @close="closeSettings"
+      @save="saveSettings"
+      @preview-theme="previewTheme"
+      @change-data-directory="changeDataDirectory"
+      @copy-secret="copySecret"
+      @rotate-secret="rotateSecret"
+    />
 
     <Transition name="settings-modal">
       <div v-if="showSessionInfo && selected" class="dialog-backdrop" @click.self="showSessionInfo=false">
