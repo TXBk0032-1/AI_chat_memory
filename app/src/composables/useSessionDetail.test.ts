@@ -53,4 +53,16 @@ describe('useSessionDetail', () => {
     expect(detail.messageSlots.value[51]?.id).toBe('message-51')
     expect(detail.loadedMessageCount.value).toBe(3)
   })
+
+  it('loads every batch required by an export selection', async () => {
+    const api = {
+      openSession: vi.fn().mockResolvedValue(opened('session')),
+      getSessionMessages: vi.fn((_id: string, start: number) => Promise.resolve([message(start)])),
+    } as unknown as DesktopApi
+    const detail = useSessionDetail(api)
+    await detail.open('session')
+    await detail.ensureMessagesLoaded([0, 50])
+    expect(api.getSessionMessages).toHaveBeenCalledTimes(2)
+    expect(detail.messageSlots.value[50]?.id).toBe('message-50')
+  })
 })

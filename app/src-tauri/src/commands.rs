@@ -5,7 +5,22 @@ use crate::{
     },
     service::AppService,
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use serde::Deserialize;
 use tauri::{AppHandle, Manager, State};
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportEncoding {
+    Utf8,
+    Base64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExportFilePayload {
+    encoding: ExportEncoding,
+    data: String,
+}
 
 fn message(error: crate::error::AppError) -> String {
     match &error {
@@ -156,4 +171,56 @@ pub async fn confirm_close_behavior(
         crate::models::CloseBehavior::Ask => unreachable!(),
     }
     Ok(())
+}
+
+#[tauri::command]
+pub async fn write_export_file(path: String, payload: ExportFilePayload) -> Result<(), String> {
+    if path.trim().is_empty() {
+        return Err("导出路径不能为空".into());
+    }
+    let bytes = match payload.encoding {
+        ExportEncoding::Utf8 => payload.data.into_bytes(),
+        ExportEncoding::Base64 => STANDARD
+            .decode(payload.data)
+            .map_err(|error| format!("图片数据无效：{error}"))?,
+    };
+    tokio::fs::write(path, bytes)
+        .await
+        .map_err(|error| format!("写入导出文件失败：{error}"))
+}
+
+#[cfg(test)]
+mod export_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn writes_utf8_and_base64_exports() {
+        let root =
+            std::env::temp_dir().join(format!("ai-chat-memory-export-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let text_path = root.join("chat.md");
+        write_export_file(
+            text_path.to_string_lossy().into_owned(),
+            ExportFilePayload {
+                encoding: ExportEncoding::Utf8,
+                data: "聊天".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(tokio::fs::read_to_string(&text_path).await.unwrap(), "聊天");
+
+        let image_path = root.join("chat.png");
+        write_export_file(
+            image_path.to_string_lossy().into_owned(),
+            ExportFilePayload {
+                encoding: ExportEncoding::Base64,
+                data: "AQID".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(tokio::fs::read(&image_path).await.unwrap(), [1, 2, 3]);
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
 }

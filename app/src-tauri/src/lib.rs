@@ -93,7 +93,8 @@ pub fn run() {
             commands::rotate_secret,
             commands::get_api_status,
             commands::move_data_directory,
-            commands::confirm_close_behavior
+            commands::confirm_close_behavior,
+            commands::write_export_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");

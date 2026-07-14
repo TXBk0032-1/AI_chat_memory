@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { open } from '@tauri-apps/plugin-dialog'
+import { open, save } from '@tauri-apps/plugin-dialog'
 import { openUrl } from '@tauri-apps/plugin-opener'
+import { toJpeg, toPng } from 'html-to-image'
 import {
   ArrowDown,
   ArrowUp,
@@ -10,6 +11,7 @@ import {
   ChevronDown,
   Clipboard,
   Copy,
+  Download,
   FileArchive,
   GitBranch,
   LoaderCircle,
@@ -29,13 +31,28 @@ import AppSidebar from './components/AppSidebar.vue'
 import SessionList from './components/SessionList.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import SessionDialogs from './components/SessionDialogs.vue'
+import ExportDialog from './components/ExportDialog.vue'
+import ExportDocument from './components/ExportDocument.vue'
 import {
   expandSearchHits,
   saveReadingPosition,
   type BranchNode,
   type BranchOverview,
   type SearchMatch,
+  type Message,
 } from './conversation'
+import {
+  exportDate,
+  groupConversationTurns,
+  sanitizeExportFilename,
+  selectedTurnSeqs,
+  serializeJson,
+  serializeMarkdown,
+  toExportMessages,
+  type ConversationExport,
+  type ConversationTurn,
+  type ExportFormat,
+} from './conversation-export'
 import { branchMessageSeqs, branchReadingIndex, filterBranchMatches } from './branch-overview'
 import { loadSidebarCollapsed, saveSidebarCollapsed } from './sidebar'
 import { desktopApi, type ApiStatus, type SettingsModel } from './desktop-api'
@@ -65,6 +82,19 @@ const showClosePrompt = ref(false)
 const showDeletePrompt = ref(false)
 const showDetailMenu = ref(false)
 const showSessionInfo = ref(false)
+const exportSelecting = ref(false)
+const exportSelectionLoading = ref(false)
+const showExportDialog = ref(false)
+const exportBusy = ref(false)
+const exportFormat = ref<ExportFormat>('png')
+const exportIncludeThinking = ref(false)
+const exportTurns = ref<ConversationTurn[]>([])
+const selectedExportTurnIds = ref(new Set<string>())
+const exportLockedSessionId = ref('')
+const exportLockedBranchId = ref('')
+const exportRenderMessages = ref<Message[]>([])
+const exportRenderModel = ref<ConversationExport | null>(null)
+const exportDocumentRef = ref<InstanceType<typeof ExportDocument> | null>(null)
 const pendingCloseBehavior = ref<'hide_to_tray' | 'exit' | null>(null)
 const expandedThinking = ref(new Set<string>())
 const settings = ref<SettingsModel>({ setup_complete: false, secret_enabled: false, allowed_origins: [], close_behavior: 'ask', tray_click_behavior: 'show_menu', theme: 'system' })
@@ -87,6 +117,7 @@ const {
   loading: detailLoading,
   loadedMessageCount,
   ensureMessageLoaded,
+  ensureMessagesLoaded,
 } = detail
 const { sessionPaneWidth, resizingPanes, startPaneResize, resizePanes, stopPaneResize } = usePaneResize()
 const theme = useTheme(settings, (animate) => {
@@ -111,6 +142,13 @@ const displayedMessageSeqs = computed(() => branchMessageSeqs(
   selected.value?.message_count ?? 0,
 ))
 const displayedSeqIndexes = computed(() => new Map(displayedMessageSeqs.value.map((seq, index) => [seq, index])))
+const exportTurnBySeq = computed(() => {
+  const result = new Map<number, ConversationTurn>()
+  for (const turn of exportTurns.value) for (const seq of turn.seqs) result.set(seq, turn)
+  return result
+})
+const selectedExportTurns = computed(() => exportTurns.value.filter((turn) => selectedExportTurnIds.value.has(turn.id)))
+const selectedExportSeqs = computed(() => selectedTurnSeqs(exportTurns.value, selectedExportTurnIds.value))
 const virtualizerOptions = computed(() => ({
   count: displayedMessageSeqs.value.length,
   getScrollElement: () => messageListRef.value,
@@ -129,7 +167,21 @@ function measureVirtualElement(element: unknown) {
   if (element instanceof Element) messageVirtualizer.value.measureElement(element)
 }
 
+function cancelExportSelection() {
+  exportSelecting.value = false
+  exportSelectionLoading.value = false
+  showExportDialog.value = false
+  exportBusy.value = false
+  exportTurns.value = []
+  selectedExportTurnIds.value = new Set()
+  exportLockedSessionId.value = ''
+  exportLockedBranchId.value = ''
+  exportRenderMessages.value = []
+  exportRenderModel.value = null
+}
+
 function clearSelectedSession() {
+  cancelExportSelection()
   detail.clear()
   conversationSearch.reset()
   branches.reset()
@@ -170,8 +222,178 @@ const selectedMatches = computed<SearchMatch[]>(() => filterBranchMatches(
 ))
 const compactReferences = computed(() => new Map((selected.value?.references ?? []).map((reference) => [reference.cite_index, reference])))
 
+function showToast(message: string) {
+  toast.value = message
+  window.clearTimeout(toastTimer)
+  toastTimer = window.setTimeout(() => { toast.value = '' }, 2200)
+}
+
+async function enterExportSelection() {
+  if (!selected.value || exportSelectionLoading.value) return
+  showDetailMenu.value = false
+  exportSelectionLoading.value = true
+  error.value = ''
+  try {
+    if (selected.value.has_branches && !branchOverview.value) {
+      await branches.load()
+      if (!branchOverview.value) throw new Error(branchesError.value || '当前分支加载失败，请重试')
+    }
+    const seqs = [...displayedMessageSeqs.value]
+    await ensureMessagesLoaded(seqs)
+    const items = seqs.map((seq) => messageSlots.value[seq]).filter((message): message is Message => Boolean(message))
+    if (items.length !== seqs.length) throw new Error('当前分支消息未完整加载')
+    exportTurns.value = groupConversationTurns(items)
+    selectedExportTurnIds.value = new Set(exportTurns.value.map((turn) => turn.id))
+    exportLockedSessionId.value = selected.value.id
+    exportLockedBranchId.value = activeBranchNode.value
+    exportSelecting.value = true
+    detailMode.value = 'conversation'
+    await nextTick()
+    messageVirtualizer.value.measure()
+  } catch (reason) {
+    error.value = `无法进入导出选择：${String(reason)}`
+  } finally {
+    exportSelectionLoading.value = false
+  }
+}
+
+function toggleExportTurn(turnId: string) {
+  const next = new Set(selectedExportTurnIds.value)
+  if (next.has(turnId)) next.delete(turnId)
+  else next.add(turnId)
+  selectedExportTurnIds.value = next
+}
+
+function selectAllExportTurns() {
+  selectedExportTurnIds.value = new Set(exportTurns.value.map((turn) => turn.id))
+}
+
+function clearExportTurns() {
+  selectedExportTurnIds.value = new Set()
+}
+
+function openExportConfirmation() {
+  if (!selectedExportTurns.value.length) return
+  exportFormat.value = 'png'
+  exportIncludeThinking.value = false
+  showExportDialog.value = true
+}
+
+function selectedMessages(): Message[] {
+  return selectedExportSeqs.value
+    .map((seq) => messageSlots.value[seq])
+    .filter((message): message is Message => Boolean(message))
+    .sort((a, b) => a.seq - b.seq)
+}
+
+function createExportModel(messages: Message[]): ConversationExport {
+  if (!selected.value) throw new Error('当前对话已关闭')
+  const time = exportDate(selected.value.created_at || selected.value.updated_at)
+  return {
+    version: 1,
+    title: selected.value.title || '未命名对话',
+    time,
+    platform: platformName(selected.value.platform),
+    branch_id: selected.value.has_branches ? exportLockedBranchId.value : null,
+    exported_at: new Date().toISOString(),
+    messages: toExportMessages(messages, exportIncludeThinking.value),
+  }
+}
+
+function blobDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result))
+    reader.onerror = () => reject(reader.error)
+    reader.readAsDataURL(blob)
+  })
+}
+
+async function localizeExportImages(root: HTMLElement) {
+  const images = [...root.querySelectorAll<HTMLImageElement>('img')]
+  await Promise.all(images.map(async (image) => {
+    if (!/^https?:\/\//i.test(image.src)) return
+    try {
+      const response = await fetch(image.src)
+      if (!response.ok) throw new Error(String(response.status))
+      image.src = await blobDataUrl(await response.blob())
+      await image.decode()
+    } catch {
+      const replacement = document.createElement('span')
+      replacement.className = 'export-image-fallback'
+      replacement.textContent = `[图片：${image.alt || image.src}]`
+      image.replaceWith(replacement)
+    }
+  }))
+}
+
+async function renderExportImage(format: 'png' | 'jpeg'): Promise<string> {
+  await nextTick()
+  const root = exportDocumentRef.value?.getElement()
+  if (!root) throw new Error('图片导出文档未就绪')
+  await renderExportMermaidDiagrams(root)
+  await nextTick()
+  await localizeExportImages(root)
+  await document.fonts?.ready
+  const pixelRatio = 2
+  const outputWidth = root.scrollWidth * pixelRatio
+  const outputHeight = root.scrollHeight * pixelRatio
+  if (outputWidth > 32767 || outputHeight > 32767 || outputWidth * outputHeight > 268_435_456) {
+    throw new Error('所选内容超过单张图片尺寸限制，请减少问答组或改用 Markdown/JSON')
+  }
+  const options = { backgroundColor: '#ffffff', cacheBust: true, pixelRatio }
+  return format === 'png'
+    ? toPng(root, options)
+    : toJpeg(root, { ...options, quality: 0.92 })
+}
+
+async function exportSelectedConversation() {
+  if (!selected.value || exportBusy.value || !selectedExportTurns.value.length) return
+  if (selected.value.id !== exportLockedSessionId.value || activeBranchNode.value !== exportLockedBranchId.value) {
+    error.value = '当前对话分支已变化，请重新选择导出内容'
+    cancelExportSelection()
+    return
+  }
+  const format = exportFormat.value
+  const date = exportDate(selected.value.created_at || selected.value.updated_at)
+  const filename = sanitizeExportFilename(selected.value.title, date, format)
+  const path = await save({
+    defaultPath: filename,
+    filters: [{ name: format === 'md' ? 'Markdown' : format.toUpperCase(), extensions: [format] }],
+  })
+  if (typeof path !== 'string') return
+  exportBusy.value = true
+  error.value = ''
+  let succeeded = false
+  try {
+    await ensureMessagesLoaded(selectedExportSeqs.value)
+    const messages = selectedMessages()
+    if (messages.length !== selectedExportSeqs.value.length) throw new Error('所选消息未完整加载')
+    const model = createExportModel(messages)
+    if (format === 'md' || format === 'json') {
+      const data = format === 'md' ? serializeMarkdown(model) : serializeJson(model)
+      await desktopApi.writeExportFile(path, { encoding: 'utf8', data })
+    } else {
+      exportRenderModel.value = model
+      exportRenderMessages.value = messages
+      const dataUrl = await renderExportImage(format)
+      await desktopApi.writeExportFile(path, { encoding: 'base64', data: dataUrl.slice(dataUrl.indexOf(',') + 1) })
+    }
+    succeeded = true
+    showToast(`已导出 ${selectedExportTurns.value.length} 组问答`)
+  } catch (reason) {
+    error.value = `导出失败：${String(reason)}`
+  } finally {
+    exportBusy.value = false
+    exportRenderMessages.value = []
+    exportRenderModel.value = null
+    if (succeeded) cancelExportSelection()
+  }
+}
+
 async function selectSession(id: string) {
   persistReadingPosition()
+  cancelExportSelection()
   error.value = ''
   conversationSearch.reset()
   branches.reset()
@@ -213,6 +435,7 @@ function retryBackgroundLoad() {
 }
 
 async function selectBranch(branch: BranchNode) {
+  if (exportSelecting.value) return
   searchHitIndex.value = -1
   await branches.select(branch, ensureMessageLoaded, async (seq) => {
     await nextTick()
@@ -281,6 +504,26 @@ async function renderMermaidDiagrams() {
       element.title = String(reason)
     }
   }
+}
+
+async function renderExportMermaidDiagrams(root: HTMLElement) {
+  const mermaid = (await import('mermaid')).default
+  mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'neutral', fontFamily: 'Inter, Segoe UI, Microsoft YaHei, sans-serif' })
+  const diagrams = [...root.querySelectorAll<HTMLElement>('.mermaid-diagram:not([data-rendered])')]
+  for (const [index, element] of diagrams.entries()) {
+    const source = normalizeMermaidSource(decodeURIComponent(element.dataset.mermaidSource || ''))
+    if (!source) continue
+    try {
+      const { svg } = await mermaid.render(`export-mermaid-${Date.now()}-${index}`, source)
+      element.innerHTML = svg
+      element.dataset.rendered = 'true'
+    } catch (reason) {
+      element.classList.add('mermaid-error')
+      element.dataset.rendered = 'error'
+      element.title = String(reason)
+    }
+  }
+  mermaidInstance = null
 }
 
 async function removeSession() {
@@ -549,6 +792,7 @@ onBeforeUnmount(() => {
               <div class="detail-actions" @click.stop>
                 <button class="icon-button" title="更多操作" aria-haspopup="menu" :aria-expanded="showDetailMenu" @click="toggleDetailMenu"><MoreHorizontal :size="19" /></button>
                 <div v-if="showDetailMenu" class="detail-menu" role="menu">
+                  <button role="menuitem" :disabled="exportSelectionLoading" @click="enterExportSelection"><Download :size="14" />{{ exportSelectionLoading ? '正在准备' : '导出聊天记录' }}</button>
                   <button role="menuitem" @click="showSessionInfo=true; showDetailMenu=false">对话详细信息</button>
                   <button class="danger" role="menuitem" @click="showDeletePrompt=true; showDetailMenu=false"><Trash2 :size="14" />删除对话</button>
                 </div>
@@ -556,8 +800,17 @@ onBeforeUnmount(() => {
             </div>
             <div v-if="hasBranches" :class="['segmented-control', { branches: detailMode === 'branches' }]">
               <span class="segmented-highlight" aria-hidden="true"></span>
-              <button :class="{ active: detailMode === 'conversation' }" @click="detailMode='conversation'"><MessageSquareText :size="15" />对话</button>
-              <button :class="{ active: detailMode === 'branches' }" @click="showBranches"><GitBranch :size="15" />分支预览</button>
+              <button :class="{ active: detailMode === 'conversation' }" :disabled="exportSelecting" @click="detailMode='conversation'"><MessageSquareText :size="15" />对话</button>
+              <button :class="{ active: detailMode === 'branches' }" :disabled="exportSelecting" @click="showBranches"><GitBranch :size="15" />分支预览</button>
+            </div>
+            <div v-if="exportSelecting" class="export-selection-toolbar">
+              <strong>已选择 {{ selectedExportTurns.length }} / {{ exportTurns.length }} 组问答</strong>
+              <div>
+                <button class="text-button" @click="selectAllExportTurns">全选</button>
+                <button class="text-button" @click="clearExportTurns">取消全选</button>
+                <button class="secondary-button compact" @click="cancelExportSelection">取消</button>
+                <button class="primary-button compact" :disabled="!selectedExportTurns.length" @click="openExportConfirmation"><Download :size="14" />导出所选</button>
+              </div>
             </div>
             <div v-if="committedQuery && detailMode === 'conversation'" class="search-navigation">
               <span>{{ selectedMatches.length ? `${Math.max(searchHitIndex + 1, 0)} / ${selectedMatches.length}` : '当前对话无正文命中' }}</span>
@@ -575,10 +828,13 @@ onBeforeUnmount(() => {
                     v-for="virtualMessage in virtualMessages"
                     :key="String(virtualMessage.key)"
                     :ref="measureVirtualElement"
-                    class="virtual-message"
+                    :class="['virtual-message', { 'export-selecting': exportSelecting, 'export-turn-selected': selectedExportTurnIds.has(exportTurnBySeq.get(displayedMessageSeqs[virtualMessage.index])?.id || '') }]"
                     :data-index="virtualMessage.index"
                     :style="{ transform: `translateY(${virtualMessage.start}px)` }"
                   >
+                    <label v-if="exportSelecting && exportTurnBySeq.get(displayedMessageSeqs[virtualMessage.index])?.seqs[0] === displayedMessageSeqs[virtualMessage.index]" class="export-turn-checkbox">
+                      <input type="checkbox" :checked="selectedExportTurnIds.has(exportTurnBySeq.get(displayedMessageSeqs[virtualMessage.index])!.id)" :aria-label="`选择第 ${(exportTurns.indexOf(exportTurnBySeq.get(displayedMessageSeqs[virtualMessage.index])!) + 1)} 组问答`" @change="toggleExportTurn(exportTurnBySeq.get(displayedMessageSeqs[virtualMessage.index])!.id)" />
+                    </label>
                     <MessageBlock
                       v-if="messageSlots[displayedMessageSeqs[virtualMessage.index]]"
                       :message="messageSlots[displayedMessageSeqs[virtualMessage.index]]!"
@@ -634,6 +890,26 @@ onBeforeUnmount(() => {
       @cancel-close="cancelClose"
       @confirm-close="confirmClose"
     />
+    <ExportDialog
+      v-model:format="exportFormat"
+      v-model:include-thinking="exportIncludeThinking"
+      :visible="showExportDialog"
+      :selected-count="selectedExportTurns.length"
+      :busy="exportBusy"
+      @close="showExportDialog=false"
+      @export="exportSelectedConversation"
+    />
+    <div v-if="exportRenderModel" class="export-document-host" aria-hidden="true">
+      <ExportDocument
+        ref="exportDocumentRef"
+        :title="exportRenderModel.title"
+        :time="exportRenderModel.time"
+        :platform="exportRenderModel.platform"
+        :messages="exportRenderMessages"
+        :references="compactReferences"
+        :include-thinking="exportIncludeThinking"
+      />
+    </div>
     <div v-if="contextMenu.visible" class="context-menu" role="menu" :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }" @click.stop>
       <button role="menuitem" :disabled="!contextMenu.selectedText" @click="copyContextSelection"><Copy :size="15" /><span>复制</span><kbd>Ctrl+C</kbd></button>
       <button role="menuitem" @click="selectConversationContent"><Clipboard :size="15" /><span>全选对话内容</span><kbd>Ctrl+A</kbd></button>

@@ -27,6 +27,7 @@ export type SessionSearchQuery = {
   limit: number
   offset: number
 }
+export type ExportFilePayload = { encoding: 'utf8' | 'base64'; data: string }
 
 export interface DesktopApi {
   searchSessions(query: SessionSearchQuery): Promise<{ sessions: SessionSummary[]; total: number }>
@@ -42,6 +43,7 @@ export interface DesktopApi {
   getApiStatus(): Promise<ApiStatus>
   moveDataDirectory(path: string): Promise<void>
   confirmCloseBehavior(behavior: Exclude<CloseBehavior, 'ask'>): Promise<void>
+  writeExportFile(path: string, payload: ExportFilePayload): Promise<void>
 }
 
 export const desktopApi: DesktopApi = {
@@ -58,4 +60,5 @@ export const desktopApi: DesktopApi = {
   getApiStatus: () => invoke('get_api_status'),
   moveDataDirectory: (path) => invoke('move_data_directory', { path }),
   confirmCloseBehavior: (behavior) => invoke('confirm_close_behavior', { behavior }),
+  writeExportFile: (path, payload) => invoke('write_export_file', { path, payload }),
 }

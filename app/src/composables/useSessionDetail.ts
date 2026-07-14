@@ -111,6 +111,15 @@ export function useSessionDetail(api: DesktopApi = desktopApi) {
     await fetchBatch(seq)
   }
 
+  async function ensureMessagesLoaded(seqs: number[]) {
+    const starts = [...new Set(seqs
+      .filter((seq) => !messageSlots.value[seq])
+      .map((seq) => Math.max(0, Math.floor(seq / messageBatchSize) * messageBatchSize)))]
+    for (const start of starts) await fetchBatch(start)
+    const missing = seqs.filter((seq) => !messageSlots.value[seq])
+    if (missing.length) throw new Error(`无法加载 ${missing.length} 条导出消息`)
+  }
+
   function isCurrent(requestGeneration: number) {
     return requestGeneration === generation
   }
@@ -127,6 +136,7 @@ export function useSessionDetail(api: DesktopApi = desktopApi) {
     scheduleBackgroundLoad,
     retryBackgroundLoad,
     ensureMessageLoaded,
+    ensureMessagesLoaded,
     isCurrent,
     dispose: cancelPendingWork,
   }
