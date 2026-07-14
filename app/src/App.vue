@@ -28,6 +28,7 @@ import BranchOverviewView from './BranchOverview.vue'
 import AppSidebar from './components/AppSidebar.vue'
 import SessionList from './components/SessionList.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
+import SessionDialogs from './components/SessionDialogs.vue'
 import {
   expandSearchHits,
   saveReadingPosition,
@@ -619,36 +620,20 @@ onBeforeUnmount(() => {
       @rotate-secret="rotateSecret"
     />
 
-    <Transition name="settings-modal">
-      <div v-if="showSessionInfo && selected" class="dialog-backdrop" @click.self="showSessionInfo=false">
-        <section class="info-dialog" role="dialog" aria-modal="true" aria-labelledby="info-title">
-          <header><h2 id="info-title">对话详细信息</h2><button class="icon-button" title="关闭" @click="showSessionInfo=false"><X :size="18" /></button></header>
-          <dl><dt>标题</dt><dd>{{ selected.title || '未命名对话' }}</dd><dt>来源</dt><dd>{{ platformName(selected.platform) }}</dd><dt>来源会话 ID</dt><dd class="identifier">{{ selected.platform_session_id }}</dd><dt>创建时间</dt><dd>{{ formatDate(selected.created_at) }}</dd><dt>更新时间</dt><dd>{{ formatDate(selected.updated_at) }}</dd><dt>消息数量</dt><dd>{{ selected.message_count }}</dd></dl>
-        </section>
-      </div>
-    </Transition>
-
-    <Transition name="settings-modal">
-      <div v-if="showDeletePrompt && selected" class="dialog-backdrop" @click.self="showDeletePrompt=false">
-        <section class="delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-title">
-          <header><div><h2 id="delete-title">删除对话</h2><p>“{{ selected.title || '未命名对话' }}”及其全部消息将被永久删除，此操作无法撤销。</p></div></header>
-          <footer><button class="secondary-button" @click="showDeletePrompt=false">取消</button><button class="danger-button" @click="removeSession"><Trash2 :size="15" />确认删除</button></footer>
-        </section>
-      </div>
-    </Transition>
-
-    <Transition name="settings-modal">
-      <div v-if="showClosePrompt" class="dialog-backdrop close-prompt-backdrop">
-        <section class="close-prompt" role="alertdialog" aria-modal="true" aria-labelledby="close-prompt-title">
-          <header><h2 id="close-prompt-title">关闭对话归档</h2><p>请选择关闭窗口后要执行的操作。你的选择会保存，也可以稍后在设置中修改。</p></header>
-          <div class="close-options">
-            <label :class="{ selected: pendingCloseBehavior === 'hide_to_tray' }"><input type="checkbox" :checked="pendingCloseBehavior === 'hide_to_tray'" @change="pendingCloseBehavior='hide_to_tray'" /><span><strong>退出到托盘</strong><small>隐藏主窗口，本地同步服务继续运行。</small></span></label>
-            <label :class="{ selected: pendingCloseBehavior === 'exit' }"><input type="checkbox" :checked="pendingCloseBehavior === 'exit'" @change="pendingCloseBehavior='exit'" /><span><strong>完全关闭</strong><small>退出应用并停止本地同步服务。</small></span></label>
-          </div>
-          <footer><button class="secondary-button" @click="cancelClose">取消</button><button class="primary-button" :disabled="!pendingCloseBehavior" @click="confirmClose">确认</button></footer>
-        </section>
-      </div>
-    </Transition>
+    <SessionDialogs
+      v-model:pending-close-behavior="pendingCloseBehavior"
+      :selected="selected"
+      :show-info="showSessionInfo"
+      :show-delete="showDeletePrompt"
+      :show-close="showClosePrompt"
+      :format-date="formatDate"
+      :platform-name="platformName"
+      @close-info="showSessionInfo=false"
+      @close-delete="showDeletePrompt=false"
+      @delete="removeSession"
+      @cancel-close="cancelClose"
+      @confirm-close="confirmClose"
+    />
     <div v-if="contextMenu.visible" class="context-menu" role="menu" :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }" @click.stop>
       <button role="menuitem" :disabled="!contextMenu.selectedText" @click="copyContextSelection"><Copy :size="15" /><span>复制</span><kbd>Ctrl+C</kbd></button>
       <button role="menuitem" @click="selectConversationContent"><Clipboard :size="15" /><span>全选对话内容</span><kbd>Ctrl+A</kbd></button>
