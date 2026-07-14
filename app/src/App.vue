@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { setTheme as setNativeTheme } from '@tauri-apps/api/app'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { open } from '@tauri-apps/plugin-dialog'
 import { openUrl } from '@tauri-apps/plugin-opener'
@@ -49,6 +48,8 @@ import { branchMessageSeqs, branchReadingIndex, filterBranchMatches } from './br
 import { loadSidebarCollapsed, saveSidebarCollapsed } from './sidebar'
 import { desktopApi, type ApiStatus, type SettingsModel } from './desktop-api'
 import { useSessionCatalog } from './composables/useSessionCatalog'
+import { usePaneResize } from './composables/usePaneResize'
+import { useTheme } from './composables/useTheme'
 import './style.css'
 
 let mermaidInstance: typeof import('mermaid')['default'] | null = null
@@ -84,8 +85,6 @@ const settings = ref<SettingsModel>({ setup_complete: false, secret_enabled: fal
 const originText = ref('')
 const apiStatus = ref<ApiStatus>({ service: { state: 'starting' }, userscript_connected: false })
 const secretCopied = ref(false)
-const sessionPaneWidth = ref(520)
-const resizingPanes = ref(false)
 const searchHitIndex = ref(-1)
 const loopSearch = ref(false)
 const toast = ref('')
@@ -95,12 +94,8 @@ const sidebarCollapsed = ref(loadSidebarCollapsed())
 const clickDebounceMs = 250
 let statusTimer: number | undefined
 let unlistenCloseRequest: UnlistenFn | undefined
-let resizeStartX = 0
-let resizeStartWidth = 0
 let toastTimer: number | undefined
 let mermaidRenderVersion = 0
-let systemThemeQuery: MediaQueryList | undefined
-let savedThemeBeforeSettings: SettingsModel['theme'] = 'system'
 let sessionLoadGeneration = 0
 let backgroundLoadTimer: number | undefined
 let readingPositionTimer: number | undefined
@@ -108,6 +103,15 @@ let branchLoadGeneration = 0
 let searchLoadGeneration = 0
 const lastControlClicks = new WeakMap<Element, number>()
 const pendingMessageBatches = new Map<string, Promise<boolean>>()
+const { sessionPaneWidth, resizingPanes, startPaneResize, resizePanes, stopPaneResize } = usePaneResize()
+const theme = useTheme(settings, (animate) => {
+  mermaidInstance = null
+  window.setTimeout(() => {
+    document.querySelectorAll<HTMLElement>('.mermaid-diagram').forEach((element) => element.removeAttribute('data-rendered'))
+    void renderMermaidDiagrams()
+  }, animate ? 180 : 0)
+})
+const { effectiveTheme, commitTheme, previewTheme } = theme
 
 const displayedMessageSeqs = computed(() => branchMessageSeqs(
   branchOverview.value,
@@ -158,54 +162,8 @@ const {
   }
 })
 
-function effectiveTheme(preference = settings.value.theme) {
-  return preference === 'system' ? (systemThemeQuery?.matches ? 'dark' : 'light') : preference
-}
-
-function syncNativeTheme(theme: 'light' | 'dark') {
-  void setNativeTheme(theme).catch((nativeThemeError) => {
-    console.error('Failed to update native window theme', nativeThemeError)
-  })
-}
-
-function commitTheme(preference: SettingsModel['theme'], animate = true) {
-  const theme = effectiveTheme(preference)
-  syncNativeTheme(theme)
-  if (document.documentElement.dataset.theme === theme) {
-    document.documentElement.style.colorScheme = theme
-    return
-  }
-  const apply = () => {
-    document.documentElement.dataset.theme = theme
-    document.documentElement.style.colorScheme = theme
-    mermaidInstance = null
-  }
-  const documentWithTransitions = document as Document & { startViewTransition?: (callback: () => void) => void }
-  if (animate && documentWithTransitions.startViewTransition) documentWithTransitions.startViewTransition(apply)
-  else if (animate) {
-    document.documentElement.classList.add('theme-transition')
-    void document.documentElement.offsetWidth
-    apply()
-    window.setTimeout(() => document.documentElement.classList.remove('theme-transition'), 360)
-  } else apply()
-  window.setTimeout(() => {
-    document.querySelectorAll<HTMLElement>('.mermaid-diagram').forEach((element) => {
-      element.removeAttribute('data-rendered')
-    })
-    void renderMermaidDiagrams()
-  }, animate ? 180 : 0)
-}
-
-function previewTheme(theme: SettingsModel['theme']) {
-  settings.value.theme = theme
-  commitTheme(theme)
-}
-
 function closeSettings(save = false) {
-  if (!save) {
-    settings.value.theme = savedThemeBeforeSettings
-    commitTheme(savedThemeBeforeSettings)
-  }
+  if (!save) theme.cancelPreview()
   showSettings.value = false
 }
 
@@ -449,7 +407,7 @@ async function importZip() {
 
 async function openSettings() {
   settings.value = await desktopApi.getSettings()
-  savedThemeBeforeSettings = settings.value.theme
+  theme.beginPreview()
   originText.value = settings.value.allowed_origins.join('\n')
   secretCopied.value = false
   showSettings.value = true
@@ -460,7 +418,7 @@ async function saveSettings() {
   settings.value.setup_complete = true
   try {
     settings.value = await desktopApi.saveSettings(settings.value)
-    savedThemeBeforeSettings = settings.value.theme
+    theme.acceptPreview()
     closeSettings(true)
   } catch (reason) {
     error.value = String(reason)
@@ -502,24 +460,6 @@ async function confirmClose() {
 function cancelClose() {
   showClosePrompt.value = false
   pendingCloseBehavior.value = null
-}
-
-function startPaneResize(event: PointerEvent) {
-  resizingPanes.value = true
-  resizeStartX = event.clientX
-  resizeStartWidth = sessionPaneWidth.value
-  const target = event.currentTarget as HTMLElement
-  target.setPointerCapture(event.pointerId)
-}
-
-function resizePanes(event: PointerEvent) {
-  if (!resizingPanes.value) return
-  const workspaceWidth = document.querySelector<HTMLElement>('.content-grid')?.clientWidth ?? 1000
-  sessionPaneWidth.value = Math.min(Math.max(resizeStartWidth + event.clientX - resizeStartX, 340), workspaceWidth - 380)
-}
-
-function stopPaneResize() {
-  resizingPanes.value = false
 }
 
 function hideContextMenu() {
@@ -641,9 +581,7 @@ function handleMessageScroll() {
 }
 
 onMounted(async () => {
-  systemThemeQuery = window.matchMedia('(prefers-color-scheme: dark)')
-  systemThemeQuery.addEventListener('change', handleSystemThemeChange)
-  commitTheme('system', false)
+  theme.initialize()
   window.addEventListener('keydown', handleContextMenuKey)
   document.addEventListener('click', preventRapidControlClick, true)
   document.addEventListener('scroll', hideContextMenu, true)
@@ -666,7 +604,7 @@ onBeforeUnmount(() => {
   persistReadingPosition()
   sessionLoadGeneration += 1
   branchLoadGeneration += 1
-  systemThemeQuery?.removeEventListener('change', handleSystemThemeChange)
+  theme.dispose()
   window.removeEventListener('keydown', handleContextMenuKey)
   document.removeEventListener('click', preventRapidControlClick, true)
   document.removeEventListener('scroll', hideContextMenu, true)
@@ -676,10 +614,6 @@ onBeforeUnmount(() => {
   window.clearTimeout(readingPositionTimer)
   unlistenCloseRequest?.()
 })
-
-function handleSystemThemeChange() {
-  if (settings.value.theme === 'system') commitTheme('system')
-}
 </script>
 
 <template>
