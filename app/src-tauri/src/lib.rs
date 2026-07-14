@@ -1,5 +1,6 @@
 mod branch;
 mod commands;
+mod data_directory;
 mod database;
 mod error;
 mod http_api;
@@ -8,15 +9,13 @@ mod models;
 mod normalizer;
 mod service;
 mod settings;
+mod tray;
+mod window_lifecycle;
 
 use service::AppService;
 use settings::SettingsStore;
 use std::sync::Arc;
-use tauri::{
-    Emitter, Manager, WindowEvent,
-    menu::{Menu, MenuItem},
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-};
+use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -53,7 +52,7 @@ pub fn run() {
                     .data_directory
                     .as_ref()
                     .map(std::path::PathBuf::from);
-                let database_dir = prepare_database_directory(
+                let database_dir = data_directory::prepare_database_directory(
                     configured_dir.as_deref(),
                     executable_dir.as_deref(),
                     working_dir.as_deref(),
@@ -77,73 +76,10 @@ pub fn run() {
                 }
             });
 
-            let show = MenuItem::with_id(app, "show", "打开对话归档", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &quit])?;
-            TrayIconBuilder::with_id("main-tray")
-                .menu(&menu)
-                .show_menu_on_left_click(matches!(
-                    tauri::async_runtime::block_on(service.settings()).tray_click_behavior,
-                    crate::models::TrayClickBehavior::ShowMenu
-                ))
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "show" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
-                    }
-                    "quit" => {
-                        tracing::info!("application exit requested from tray");
-                        app.exit(0)
-                    }
-                    _ => {}
-                })
-                .on_tray_icon_event(|tray, event| {
-                    if let TrayIconEvent::Click {
-                        button: MouseButton::Left,
-                        button_state: MouseButtonState::Up,
-                        ..
-                    } = event
-                    {
-                        let app = tray.app_handle();
-                        let service = app.state::<AppService>();
-                        let behavior =
-                            tauri::async_runtime::block_on(service.settings()).tray_click_behavior;
-                        if matches!(behavior, crate::models::TrayClickBehavior::OpenWindow)
-                            && let Some(window) = app.get_webview_window("main")
-                        {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
-                    }
-                })
-                .build(app)?;
+            tray::build(app, &service)?;
             Ok(())
         })
-        .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
-                let app = window.app_handle().clone();
-                let service = app.state::<AppService>();
-                match tauri::async_runtime::block_on(service.settings()).close_behavior {
-                    crate::models::CloseBehavior::HideToTray => {
-                        tracing::info!("main window close requested; hiding to tray");
-                        api.prevent_close();
-                        let _ = window.hide();
-                    }
-                    crate::models::CloseBehavior::Exit => {
-                        tracing::info!("main window close requested; exiting application");
-                    }
-                    crate::models::CloseBehavior::Ask => {
-                        tracing::info!("main window close requested; awaiting user choice");
-                        api.prevent_close();
-                        let _ = window.emit("close-behavior-requested", ());
-                        let _ = window.show();
-                        let _ = window.set_focus();
-                    }
-                }
-            }
-        })
+        .on_window_event(window_lifecycle::handle)
         .invoke_handler(tauri::generate_handler![
             commands::search_sessions,
             commands::open_session,
@@ -161,102 +97,4 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");
-}
-
-async fn prepare_database_directory(
-    configured: Option<&std::path::Path>,
-    executable_dir: Option<&std::path::Path>,
-    working_dir: Option<&std::path::Path>,
-    app_data_dir: &std::path::Path,
-) -> std::path::PathBuf {
-    if let Some(path) = configured
-        && path.is_dir()
-    {
-        return path.to_path_buf();
-    }
-
-    let runtime_database = [executable_dir, working_dir]
-        .into_iter()
-        .flatten()
-        .map(|path| path.join("chat_memory.db"))
-        .find(|path| path.is_file());
-
-    if let (Some(target_dir), Some(source)) = (configured, runtime_database.as_deref()) {
-        let destination = target_dir.join("chat_memory.db");
-        match database::copy_database(source, &destination).await {
-            Ok(()) => {
-                tracing::info!(source=%source.display(), destination=%destination.display(), "migrated fallback database to configured directory");
-                return target_dir.to_path_buf();
-            }
-            Err(error) => {
-                tracing::error!(%error, source=%source.display(), configured=%target_dir.display(), "failed to migrate fallback database to configured directory; using source temporarily");
-                return source.parent().unwrap_or(app_data_dir).to_path_buf();
-            }
-        }
-    }
-
-    if let Some(path) = configured {
-        match tokio::fs::create_dir_all(path).await {
-            Ok(()) => return path.to_path_buf(),
-            Err(error) => {
-                tracing::error!(%error, configured=%path.display(), "configured data directory is unavailable; using application data directory temporarily");
-            }
-        }
-    } else if let Some(source) = runtime_database {
-        return source.parent().unwrap_or(app_data_dir).to_path_buf();
-    }
-
-    app_data_dir.to_path_buf()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::prepare_database_directory;
-
-    #[tokio::test]
-    async fn migrates_runtime_database_to_missing_configured_directory() {
-        let root = std::env::temp_dir().join(format!("acm-path-test-{}", std::process::id()));
-        let runtime = root.join("runtime");
-        let configured = root.join("configured");
-        let app_data = root.join("app-data");
-        std::fs::create_dir_all(&runtime).unwrap();
-        let source_pool = crate::database::connect(&runtime.join("chat_memory.db"))
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO sessions (id, platform, platform_session_id, title) VALUES ('1', 'deepseek', 'source', 'migrated')")
-            .execute(&source_pool)
-            .await
-            .unwrap();
-        source_pool.close().await;
-        let resolved =
-            prepare_database_directory(Some(&configured), Some(&runtime), None, &app_data).await;
-        assert_eq!(resolved, configured);
-        let migrated_pool = crate::database::connect(&resolved.join("chat_memory.db"))
-            .await
-            .unwrap();
-        let title: String = sqlx::query_scalar("SELECT title FROM sessions WHERE id = '1'")
-            .fetch_one(&migrated_pool)
-            .await
-            .unwrap();
-        assert_eq!(title, "migrated");
-        migrated_pool.close().await;
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[tokio::test]
-    async fn uses_app_data_when_no_existing_runtime_database_is_found() {
-        let root = std::env::temp_dir().join(format!("acm-path-empty-{}", std::process::id()));
-        let runtime = root.join("runtime");
-        let app_data = root.join("app-data");
-        std::fs::create_dir_all(&runtime).unwrap();
-        let resolved = prepare_database_directory(
-            Some(&root.join("missing")),
-            Some(&runtime),
-            None,
-            &app_data,
-        )
-        .await;
-        assert_eq!(resolved, root.join("missing"));
-        let _ = std::fs::remove_dir_all(root);
-    }
 }
