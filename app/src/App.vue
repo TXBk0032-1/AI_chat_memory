@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { setTheme as setNativeTheme } from '@tauri-apps/api/app'
 import { invoke } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { open } from '@tauri-apps/plugin-dialog'
@@ -179,8 +180,15 @@ function effectiveTheme(preference = settings.value.theme) {
   return preference === 'system' ? (systemThemeQuery?.matches ? 'dark' : 'light') : preference
 }
 
+function syncNativeTheme(theme: 'light' | 'dark') {
+  void setNativeTheme(theme).catch((nativeThemeError) => {
+    console.error('Failed to update native window theme', nativeThemeError)
+  })
+}
+
 function commitTheme(preference: SettingsModel['theme'], animate = true) {
   const theme = effectiveTheme(preference)
+  syncNativeTheme(theme)
   if (document.documentElement.dataset.theme === theme) {
     document.documentElement.style.colorScheme = theme
     return
