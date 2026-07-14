@@ -228,7 +228,7 @@ const filtered = computed(() => Boolean(query.value || platform.value || dateFro
 const hasBranches = computed(() => selected.value?.has_branches ?? false)
 const statusLabel = computed(() => apiStatus.value.service.state === 'running' ? '同步服务运行中' : apiStatus.value.service.state === 'failed' ? '同步服务异常' : '同步服务启动中')
 const sourceIndex = computed(() => ['', 'deepseek', 'doubao', 'kimi'].indexOf(platform.value))
-const sourceAccent = computed(() => ({ deepseek: '#4d8fe8', doubao: '#e05c62', kimi: '#39a878' } as Record<string, string>)[platform.value] ?? '#f5f7f7')
+const sourceAccent = computed(() => ({ deepseek: '#4d8fe8', doubao: '#e05c62', kimi: '#39a878' } as Record<string, string>)[platform.value] ?? '#74858d')
 const selectedMatches = computed<SearchMatch[]>(() => filterBranchMatches(
   expandSearchHits(sessionSearchHits.value),
   displayedMessageSeqs.value,
