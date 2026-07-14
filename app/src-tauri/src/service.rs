@@ -2,6 +2,7 @@ use serde_json::Value;
 use sqlx::SqlitePool;
 use std::{
     io::Read,
+    path::Path,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -17,13 +18,59 @@ use crate::{
 
 #[derive(Clone)]
 pub struct AppService {
-    pub pool: SqlitePool,
-    pub settings: Arc<SettingsStore>,
-    pub api_status: Arc<RwLock<ApiStatus>>,
-    pub last_userscript_request_at: Arc<RwLock<Option<u64>>>,
+    pool: SqlitePool,
+    settings: Arc<SettingsStore>,
+    api_status: Arc<RwLock<ApiStatus>>,
+    last_userscript_request_at: Arc<RwLock<Option<u64>>>,
 }
 
 impl AppService {
+    pub fn new(pool: SqlitePool, settings: Arc<SettingsStore>) -> Self {
+        Self {
+            pool,
+            settings,
+            api_status: Arc::new(RwLock::new(ApiStatus::Starting)),
+            last_userscript_request_at: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    pub async fn settings(&self) -> AppSettings {
+        self.settings.get().await
+    }
+
+    pub async fn update_settings(&self, settings: AppSettings) -> Result<AppSettings> {
+        self.settings.update(settings).await
+    }
+
+    pub async fn rotate_secret(&self) -> Result<AppSettings> {
+        self.settings.rotate_secret().await
+    }
+
+    pub async fn move_data_directory(&self, directory: &Path) -> Result<()> {
+        tokio::fs::create_dir_all(directory).await?;
+        let destination = directory.join("chat_memory.db");
+        if destination.exists() {
+            return Err(AppError::Configuration(
+                "目标目录中已存在 chat_memory.db，请选择其他目录".into(),
+            ));
+        }
+        sqlx::query("VACUUM INTO ?")
+            .bind(destination.to_string_lossy().as_ref())
+            .execute(&self.pool)
+            .await?;
+        let mut settings = self.settings().await;
+        settings.data_directory = Some(directory.to_string_lossy().into_owned());
+        self.update_settings(settings).await?;
+        tracing::info!(destination=%directory.display(), "database copied to configured directory; restarting application");
+        Ok(())
+    }
+
+    pub async fn set_close_behavior(&self, behavior: CloseBehavior) -> Result<()> {
+        let mut settings = self.settings().await;
+        settings.close_behavior = behavior;
+        self.update_settings(settings).await?;
+        Ok(())
+    }
     pub async fn import(&self, request: ImportRequest) -> Result<ImportResponse> {
         let platform = request.platform.clone();
         let received = request.sessions.len();

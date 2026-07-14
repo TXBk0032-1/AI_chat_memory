@@ -17,7 +17,6 @@ use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
-use tokio::sync::RwLock;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -65,12 +64,7 @@ pub fn run() {
                 let database_path = database_dir.join("chat_memory.db");
                 let pool = database::connect(&database_path).await?;
                 tracing::info!(path=%database_path.display(), "application database ready");
-                Ok::<_, crate::error::AppError>(AppService {
-                    pool,
-                    settings,
-                    api_status: Arc::new(RwLock::new(crate::models::ApiStatus::Starting)),
-                    last_userscript_request_at: Arc::new(RwLock::new(None)),
-                })
+                Ok::<_, crate::error::AppError>(AppService::new(pool, settings))
             })?;
             app.manage(service.clone());
             let http_service = service.clone();
@@ -89,7 +83,7 @@ pub fn run() {
             TrayIconBuilder::with_id("main-tray")
                 .menu(&menu)
                 .show_menu_on_left_click(matches!(
-                    tauri::async_runtime::block_on(service.settings.get()).tray_click_behavior,
+                    tauri::async_runtime::block_on(service.settings()).tray_click_behavior,
                     crate::models::TrayClickBehavior::ShowMenu
                 ))
                 .on_menu_event(|app, event| match event.id.as_ref() {
@@ -114,8 +108,8 @@ pub fn run() {
                     {
                         let app = tray.app_handle();
                         let service = app.state::<AppService>();
-                        let behavior = tauri::async_runtime::block_on(service.settings.get())
-                            .tray_click_behavior;
+                        let behavior =
+                            tauri::async_runtime::block_on(service.settings()).tray_click_behavior;
                         if matches!(behavior, crate::models::TrayClickBehavior::OpenWindow)
                             && let Some(window) = app.get_webview_window("main")
                         {
@@ -131,7 +125,7 @@ pub fn run() {
             if let WindowEvent::CloseRequested { api, .. } = event {
                 let app = window.app_handle().clone();
                 let service = app.state::<AppService>();
-                match tauri::async_runtime::block_on(service.settings.get()).close_behavior {
+                match tauri::async_runtime::block_on(service.settings()).close_behavior {
                     crate::models::CloseBehavior::HideToTray => {
                         tracing::info!("main window close requested; hiding to tray");
                         api.prevent_close();

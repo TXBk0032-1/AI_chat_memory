@@ -57,7 +57,7 @@ async fn authorize(
     next: Next,
 ) -> Response {
     let origin = headers.get("origin").and_then(|v| v.to_str().ok());
-    let settings = service.settings.get().await;
+    let settings = service.settings().await;
     if let Err(reason) = authorization_error(request.method(), origin, &headers, &settings) {
         tracing::warn!(method=%request.method(), path=request.uri().path(), origin=origin.unwrap_or("<missing>"), reason, "local API request rejected");
         return (StatusCode::FORBIDDEN, reason).into_response();
