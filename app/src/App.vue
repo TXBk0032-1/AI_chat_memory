@@ -34,14 +34,10 @@ import AppSidebar from './components/AppSidebar.vue'
 import SessionList from './components/SessionList.vue'
 import {
   expandSearchHits,
-  loadReadingPosition,
-  mergeMessageBatch,
   saveReadingPosition,
   type BranchNode,
   type BranchOverview,
-  type Message,
   type SearchMatch,
-  type SessionOpen,
 } from './conversation'
 import { branchMessageSeqs, branchReadingIndex, filterBranchMatches } from './branch-overview'
 import { loadSidebarCollapsed, saveSidebarCollapsed } from './sidebar'
@@ -52,6 +48,7 @@ import { useTheme } from './composables/useTheme'
 import { useSettings } from './composables/useSettings'
 import { useBranchNavigation } from './composables/useBranchNavigation'
 import { useConversationSearch } from './composables/useConversationSearch'
+import { useSessionDetail } from './composables/useSessionDetail'
 import './style.css'
 
 let mermaidInstance: typeof import('mermaid')['default'] | null = null
@@ -66,11 +63,7 @@ async function loadMermaid() {
 function normalizeMermaidSource(source: string) {
   return source.replace(/[“”]/g, '"')
 }
-const selected = ref<SessionOpen | null>(null)
-const messageSlots = ref<Array<Message | undefined>>([])
-const backgroundLoadFailed = ref(false)
 const messageListRef = ref<HTMLElement | null>(null)
-const detailLoading = ref(false)
 const showClosePrompt = ref(false)
 const showDeletePrompt = ref(false)
 const showDetailMenu = ref(false)
@@ -87,11 +80,17 @@ let statusTimer: number | undefined
 let unlistenCloseRequest: UnlistenFn | undefined
 let toastTimer: number | undefined
 let mermaidRenderVersion = 0
-let sessionLoadGeneration = 0
-let backgroundLoadTimer: number | undefined
 let readingPositionTimer: number | undefined
 const lastControlClicks = new WeakMap<Element, number>()
-const pendingMessageBatches = new Map<string, Promise<boolean>>()
+const detail = useSessionDetail(desktopApi)
+const {
+  selected,
+  messageSlots,
+  backgroundLoadFailed,
+  loading: detailLoading,
+  loadedMessageCount,
+  ensureMessageLoaded,
+} = detail
 const { sessionPaneWidth, resizingPanes, startPaneResize, resizePanes, stopPaneResize } = usePaneResize()
 const theme = useTheme(settings, (animate) => {
   mermaidInstance = null
@@ -134,10 +133,7 @@ function measureVirtualElement(element: unknown) {
 }
 
 function clearSelectedSession() {
-  sessionLoadGeneration += 1
-  window.clearTimeout(backgroundLoadTimer)
-  selected.value = null
-  messageSlots.value = []
+  detail.clear()
   conversationSearch.reset()
   branches.reset()
   expandedThinking.value = new Set()
@@ -175,21 +171,21 @@ const selectedMatches = computed<SearchMatch[]>(() => filterBranchMatches(
   expandSearchHits(sessionSearchHits.value),
   displayedMessageSeqs.value,
 ))
-const loadedMessageCount = computed(() => messageSlots.value.reduce((count, message) => count + (message ? 1 : 0), 0))
 const compactReferences = computed(() => new Map((selected.value?.references ?? []).map((reference) => [reference.cite_index, reference])))
 
 async function selectSession(id: string) {
-  const generation = ++sessionLoadGeneration
-  window.clearTimeout(backgroundLoadTimer)
   persistReadingPosition()
-  detailLoading.value = true
   error.value = ''
   conversationSearch.reset()
   branches.reset()
+  const result = await detail.open(id)
+  if (!result || !selected.value) {
+    if (detail.error.value) error.value = detail.error.value
+    return
+  }
+  const { readingPosition, generation } = result
+  const opened = selected.value
   try {
-    const readingPosition = loadReadingPosition(id)
-    const opened = await desktopApi.openSession(id, readingPosition?.seq ?? null)
-    if (generation !== sessionLoadGeneration) return
     let overview: BranchOverview | null = null
     if (opened.has_branches) {
       try {
@@ -198,11 +194,8 @@ async function selectSession(id: string) {
         branchesError.value = String(reason)
       }
     }
-    if (generation !== sessionLoadGeneration) return
-    selected.value = opened
+    if (!detail.isCurrent(generation)) return
     branches.setOverview(overview)
-    backgroundLoadFailed.value = false
-    messageSlots.value = mergeMessageBatch(Array.from({ length: opened.message_count }), opened.messages)
     expandedThinking.value = new Set()
     searchHitIndex.value = -1
     await nextTick()
@@ -211,64 +204,15 @@ async function selectSession(id: string) {
     await nextTick()
     if (readingPosition?.offset) messageListRef.value?.scrollBy({ top: readingPosition.offset })
     void loadSearchHits()
-    scheduleBackgroundLoad(generation)
+    detail.scheduleBackgroundLoad(generation)
   } catch (reason) {
-    if (generation !== sessionLoadGeneration) return
     error.value = String(reason)
-  } finally {
-    if (generation === sessionLoadGeneration) detailLoading.value = false
   }
 }
 
-async function fetchMessageBatch(startSeq: number, generation = sessionLoadGeneration) {
-  if (!selected.value || generation !== sessionLoadGeneration) return false
-  const normalizedStart = Math.max(0, Math.floor(startSeq / 50) * 50)
-  const sessionId = selected.value.id
-  const batchKey = `${sessionId}:${normalizedStart}`
-  const pending = pendingMessageBatches.get(batchKey)
-  if (pending) return pending
-  const request = (async () => {
-    const messages = await desktopApi.getSessionMessages(sessionId, normalizedStart, 50)
-    if (generation !== sessionLoadGeneration || selected.value?.id !== sessionId) return false
-    messageSlots.value = mergeMessageBatch(messageSlots.value, messages)
-    return messages.length > 0
-  })().finally(() => pendingMessageBatches.delete(batchKey))
-  pendingMessageBatches.set(batchKey, request)
-  return request
-}
-
-function nextMissingBatch() {
-  const index = messageSlots.value.findIndex((message) => !message)
-  return index < 0 ? null : Math.floor(index / 50) * 50
-}
-
-function scheduleBackgroundLoad(generation: number) {
-  window.clearTimeout(backgroundLoadTimer)
-  backgroundLoadTimer = window.setTimeout(async () => {
-    if (generation !== sessionLoadGeneration) return
-    const startSeq = nextMissingBatch()
-    if (startSeq === null) return
-    try {
-      await fetchMessageBatch(startSeq, generation)
-      scheduleBackgroundLoad(generation)
-    } catch (reason) {
-      if (generation === sessionLoadGeneration) {
-        backgroundLoadFailed.value = true
-        error.value = `后台加载对话失败：${String(reason)}`
-      }
-    }
-  }, 16)
-}
-
 function retryBackgroundLoad() {
-  backgroundLoadFailed.value = false
   error.value = ''
-  scheduleBackgroundLoad(sessionLoadGeneration)
-}
-
-async function ensureMessageLoaded(seq: number) {
-  if (messageSlots.value[seq]) return
-  await fetchMessageBatch(Math.floor(seq / 50) * 50)
+  detail.retryBackgroundLoad()
 }
 
 async function selectBranch(branch: BranchNode) {
@@ -523,9 +467,12 @@ watch(committedQuery, () => {
   searchHitIndex.value = -1
   void loadSearchHits()
 })
+watch(detail.error, (value) => {
+  if (value) error.value = value
+})
 onBeforeUnmount(() => {
   persistReadingPosition()
-  sessionLoadGeneration += 1
+  detail.dispose()
   branches.reset()
   theme.dispose()
   window.removeEventListener('keydown', handleContextMenuKey)
@@ -533,7 +480,6 @@ onBeforeUnmount(() => {
   document.removeEventListener('scroll', hideContextMenu, true)
   window.clearInterval(statusTimer)
   window.clearTimeout(toastTimer)
-  window.clearTimeout(backgroundLoadTimer)
   window.clearTimeout(readingPositionTimer)
   unlistenCloseRequest?.()
 })
