@@ -1,8 +1,14 @@
-use sqlx::{
-    Row, SqlitePool,
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
-};
-use std::path::Path;
+mod connection;
+mod timestamp;
+
+pub use connection::{connect, copy_database};
+
+#[cfg(test)]
+use connection::normalize_stored_timestamps;
+#[cfg(test)]
+use sqlx::sqlite::SqlitePoolOptions;
+
+use sqlx::{Row, SqlitePool};
 
 use crate::{
     error::{AppError, Result},
@@ -12,72 +18,8 @@ use crate::{
     },
 };
 
-pub async fn connect(path: &Path) -> Result<SqlitePool> {
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    let options = SqliteConnectOptions::new()
-        .filename(path)
-        .create_if_missing(true)
-        .foreign_keys(true);
-    let pool = SqlitePoolOptions::new()
-        .max_connections(5)
-        .connect_with(options)
-        .await?;
-    sqlx::query("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, platform TEXT NOT NULL, platform_session_id TEXT NOT NULL, title TEXT, created_at TEXT, updated_at TEXT, imported_at TEXT DEFAULT CURRENT_TIMESTAMP, raw_data TEXT, UNIQUE(platform, platform_session_id));").execute(&pool).await?;
-    sqlx::query("CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, role TEXT NOT NULL, content TEXT, metadata TEXT, created_at TEXT, seq INTEGER);").execute(&pool).await?;
-    sqlx::query("CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);")
-        .execute(&pool)
-        .await?;
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS idx_messages_session_seq ON messages(session_id, seq);",
-    )
-    .execute(&pool)
-    .await?;
-    normalize_stored_timestamps(&pool).await?;
-    Ok(pool)
-}
-
-const TIMESTAMP_SQL: &str = "CASE WHEN trim({column}) <> '' AND trim({column}) NOT GLOB '*[^0-9.]*' THEN ROUND(CASE WHEN CAST({column} AS REAL) > 100000000000 THEN CAST({column} AS REAL) / 1000.0 ELSE CAST({column} AS REAL) END, 3) ELSE ROUND((julianday({column}) - 2440587.5) * 86400.0, 3) END";
-
 fn timestamp_expression(column: &str) -> String {
-    TIMESTAMP_SQL.replace("{column}", column)
-}
-
-async fn normalize_stored_timestamps(pool: &SqlitePool) -> Result<()> {
-    for (table, column) in [
-        ("sessions", "created_at"),
-        ("sessions", "updated_at"),
-        ("messages", "created_at"),
-    ] {
-        let expression = timestamp_expression(column);
-        let sql = format!(
-            "UPDATE {table} SET {column} = CAST(({expression}) AS TEXT) WHERE {column} IS NOT NULL AND ({expression}) IS NOT NULL"
-        );
-        sqlx::query(&sql).execute(pool).await?;
-    }
-    Ok(())
-}
-
-pub async fn copy_database(source: &Path, destination: &Path) -> Result<()> {
-    if let Some(parent) = destination.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    let options = SqliteConnectOptions::new()
-        .filename(source)
-        .read_only(true)
-        .foreign_keys(true);
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(options)
-        .await?;
-    let result = sqlx::query("VACUUM INTO ?")
-        .bind(destination.to_string_lossy().as_ref())
-        .execute(&pool)
-        .await;
-    pool.close().await;
-    result?;
-    Ok(())
+    timestamp::expression(column)
 }
 
 pub async fn import_sessions(pool: &SqlitePool, sessions: &[NormalizedSession]) -> Result<usize> {
