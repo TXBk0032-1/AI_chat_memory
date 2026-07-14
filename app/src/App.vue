@@ -47,12 +47,12 @@ import {
   type SearchHit,
   type SearchMatch,
   type SessionOpen,
-  type SessionSummary,
 } from './conversation'
 import { escapeTitle } from './markdown'
 import { branchMessageSeqs, branchReadingIndex, filterBranchMatches } from './branch-overview'
 import { loadSidebarCollapsed, saveSidebarCollapsed } from './sidebar'
 import { desktopApi, type ApiStatus, type SettingsModel } from './desktop-api'
+import { useSessionCatalog } from './composables/useSessionCatalog'
 import './style.css'
 
 let mermaidInstance: typeof import('mermaid')['default'] | null = null
@@ -67,7 +67,6 @@ async function loadMermaid() {
 function normalizeMermaidSource(source: string) {
   return source.replace(/[“”]/g, '"')
 }
-const sessions = ref<SessionSummary[]>([])
 const selected = ref<SessionOpen | null>(null)
 const messageSlots = ref<Array<Message | undefined>>([])
 const sessionSearchHits = ref<SearchHit[]>([])
@@ -76,15 +75,7 @@ const branchesLoading = ref(false)
 const branchesError = ref('')
 const backgroundLoadFailed = ref(false)
 const messageListRef = ref<HTMLElement | null>(null)
-const loading = ref(false)
 const detailLoading = ref(false)
-const error = ref('')
-const query = ref('')
-const committedQuery = ref('')
-const platform = ref('')
-const dateFrom = ref('')
-const dateTo = ref('')
-const showFilters = ref(false)
 const showSettings = ref(false)
 const showClosePrompt = ref(false)
 const showDeletePrompt = ref(false)
@@ -95,20 +86,16 @@ const detailMode = ref<'conversation' | 'branches'>('conversation')
 const expandedThinking = ref(new Set<string>())
 const settings = ref<SettingsModel>({ setup_complete: false, secret_enabled: false, allowed_origins: [], close_behavior: 'ask', tray_click_behavior: 'show_menu', theme: 'system' })
 const originText = ref('')
-const total = ref(0)
-const page = ref(0)
 const apiStatus = ref<ApiStatus>({ service: { state: 'starting' }, userscript_connected: false })
 const secretCopied = ref(false)
 const sessionPaneWidth = ref(520)
 const resizingPanes = ref(false)
-const searchElapsed = ref<number | null>(null)
 const searchHitIndex = ref(-1)
 const loopSearch = ref(false)
 const toast = ref('')
 const activeBranchNode = ref('')
 const contextMenu = ref({ visible: false, x: 0, y: 0, selectedText: '' })
 const sidebarCollapsed = ref(loadSidebarCollapsed())
-const pageSize = 100
 const clickDebounceMs = 250
 let statusTimer: number | undefined
 let unlistenCloseRequest: UnlistenFn | undefined
@@ -163,6 +150,17 @@ function clearSelectedSession() {
   branchesError.value = ''
   expandedThinking.value = new Set()
 }
+
+const {
+  sessions, loading, error, query, committedQuery, platform, dateFrom, dateTo,
+  showFilters, total, searchElapsed, filtered, loadSessions, loadMore, resetFilters,
+  selectPlatform,
+} = useSessionCatalog(desktopApi, (visibleIds) => {
+  if (selected.value && !visibleIds.has(selected.value.id)) {
+    persistReadingPosition()
+    clearSelectedSession()
+  }
+})
 
 function effectiveTheme(preference = settings.value.theme) {
   return preference === 'system' ? (systemThemeQuery?.matches ? 'dark' : 'light') : preference
@@ -220,7 +218,6 @@ function setSidebarCollapsed(collapsed: boolean) {
   saveSidebarCollapsed(collapsed)
 }
 
-const filtered = computed(() => Boolean(query.value || platform.value || dateFrom.value || dateTo.value))
 const hasBranches = computed(() => selected.value?.has_branches ?? false)
 const statusLabel = computed(() => apiStatus.value.service.state === 'running' ? '同步服务运行中' : apiStatus.value.service.state === 'failed' ? '同步服务异常' : '同步服务启动中')
 const sourceIndex = computed(() => ['', 'deepseek', 'doubao', 'kimi'].indexOf(platform.value))
@@ -231,44 +228,6 @@ const selectedMatches = computed<SearchMatch[]>(() => filterBranchMatches(
 ))
 const loadedMessageCount = computed(() => messageSlots.value.reduce((count, message) => count + (message ? 1 : 0), 0))
 const compactReferences = computed(() => new Map((selected.value?.references ?? []).map((reference) => [reference.cite_index, reference])))
-function epoch(value: string, end = false) {
-  if (!value) return null
-  return String(new Date(`${value}T${end ? '23:59:59' : '00:00:00'}`).getTime() / 1000)
-}
-
-async function loadSessions(reset = true) {
-  const started = performance.now()
-  loading.value = true
-  error.value = ''
-  if (reset) page.value = 0
-  if (reset) committedQuery.value = query.value.trim()
-  try {
-    const result = await desktopApi.searchSessions({
-        q: committedQuery.value || null,
-        platform: platform.value || null,
-        date_from: epoch(dateFrom.value),
-        date_to: epoch(dateTo.value, true),
-        limit: pageSize,
-        offset: page.value * pageSize,
-    })
-    sessions.value = reset ? result.sessions : [...sessions.value, ...result.sessions]
-    total.value = result.total
-    searchElapsed.value = committedQuery.value ? performance.now() - started : null
-    if (reset && selected.value && !result.sessions.some((item) => item.id === selected.value?.id)) {
-      persistReadingPosition()
-      clearSelectedSession()
-    }
-  } catch (reason) {
-    error.value = String(reason)
-  } finally {
-    loading.value = false
-  }
-}
-
-async function loadMore() {
-  page.value += 1
-  await loadSessions(false)
-}
 
 async function selectSession(id: string) {
   const generation = ++sessionLoadGeneration
@@ -565,19 +524,6 @@ async function confirmClose() {
 function cancelClose() {
   showClosePrompt.value = false
   pendingCloseBehavior.value = null
-}
-
-function resetFilters() {
-  query.value = ''
-  platform.value = ''
-  dateFrom.value = ''
-  dateTo.value = ''
-  void loadSessions()
-}
-
-function selectPlatform(value: string) {
-  platform.value = value
-  void loadSessions()
 }
 
 function startPaneResize(event: PointerEvent) {
