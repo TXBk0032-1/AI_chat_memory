@@ -286,6 +286,7 @@ i.deepseek { background: #5273e6; } i.doubao { background: #e36f53; } i.kimi { b
 .export-format-control { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; padding: 4px; border: 1px solid #d6dcde; border-radius: 6px; background: #f3f5f5; }
 .export-format-control button { min-width: 0; height: 52px; padding: 5px; border: 0; border-radius: 4px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; color: #657075; background: transparent; font-size: 10px; font-weight: 650; }
 .export-format-control button.active { color: #116c56; background: #fff; box-shadow: 0 2px 8px #19282317; }
+.export-format-control button.format-disabled { color: #a6adaf; opacity: .52; cursor: not-allowed; }
 .export-thinking-option { margin-top: 16px; padding: 12px; display: flex; align-items: flex-start; gap: 10px; border: 1px solid #dce1e2; border-radius: 6px; cursor: pointer; }
 .export-thinking-option input { margin-top: 2px; accent-color: #167961; }
 .export-thinking-option span { display: grid; gap: 4px; }

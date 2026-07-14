@@ -2,7 +2,13 @@
 import { Braces, FileImage, FileText, LoaderCircle, X } from 'lucide-vue-next'
 import type { ExportFormat } from '../conversation-export'
 
-defineProps<{ visible: boolean; selectedCount: number; busy: boolean }>()
+defineProps<{
+  visible: boolean
+  selectedCount: number
+  busy: boolean
+  imageDisabled: boolean
+  imageDisabledReason: string
+}>()
 const format = defineModel<ExportFormat>('format', { required: true })
 const includeThinking = defineModel<boolean>('includeThinking', { required: true })
 const emit = defineEmits<{ close: []; export: [] }>()
@@ -13,6 +19,10 @@ const formats: Array<{ value: ExportFormat; label: string; icon: typeof FileImag
   { value: 'md', label: 'Markdown', icon: FileText },
   { value: 'json', label: 'JSON', icon: Braces },
 ]
+
+function isImageFormat(value: ExportFormat) {
+  return value === 'png' || value === 'jpeg'
+}
 </script>
 
 <template>
@@ -25,7 +35,17 @@ const formats: Array<{ value: ExportFormat; label: string; icon: typeof FileImag
         </header>
         <div class="export-dialog-body">
           <div class="export-format-control" role="radiogroup" aria-label="导出格式">
-            <button v-for="item in formats" :key="item.value" :class="{ active: format === item.value }" role="radio" :aria-checked="format === item.value" :disabled="busy" @click="format=item.value">
+            <button
+              v-for="item in formats"
+              :key="item.value"
+              :class="{ active: format === item.value, 'format-disabled': isImageFormat(item.value) && imageDisabled }"
+              role="radio"
+              :aria-checked="format === item.value"
+              :aria-disabled="isImageFormat(item.value) && imageDisabled"
+              :title="isImageFormat(item.value) && imageDisabled ? imageDisabledReason : ''"
+              :disabled="busy"
+              @click="isImageFormat(item.value) && imageDisabled ? undefined : format=item.value"
+            >
               <component :is="item.icon" :size="18" /><span>{{ item.label }}</span>
             </button>
           </div>

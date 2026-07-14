@@ -43,7 +43,9 @@ import {
 } from './conversation'
 import {
   exportDate,
+  exportImagePixelRatio,
   groupConversationTurns,
+  isImageExportTooLarge,
   sanitizeExportFilename,
   selectedTurnSeqs,
   serializeJson,
@@ -86,6 +88,9 @@ const exportSelecting = ref(false)
 const exportSelectionLoading = ref(false)
 const showExportDialog = ref(false)
 const exportBusy = ref(false)
+const exportImageChecking = ref(false)
+const exportImageTooLong = ref(false)
+const exportImageDisabledReason = ref('')
 const exportFormat = ref<ExportFormat>('png')
 const exportIncludeThinking = ref(false)
 const exportTurns = ref<ConversationTurn[]>([])
@@ -108,6 +113,7 @@ let unlistenCloseRequest: UnlistenFn | undefined
 let toastTimer: number | undefined
 let mermaidRenderVersion = 0
 let readingPositionTimer: number | undefined
+let exportPreviewGeneration = 0
 const lastControlClicks = new WeakMap<Element, number>()
 const detail = useSessionDetail(desktopApi)
 const {
@@ -149,6 +155,7 @@ const exportTurnBySeq = computed(() => {
 })
 const selectedExportTurns = computed(() => exportTurns.value.filter((turn) => selectedExportTurnIds.value.has(turn.id)))
 const selectedExportSeqs = computed(() => selectedTurnSeqs(exportTurns.value, selectedExportTurnIds.value))
+const exportImageDisabled = computed(() => exportImageChecking.value || exportImageTooLong.value)
 const virtualizerOptions = computed(() => ({
   count: displayedMessageSeqs.value.length,
   getScrollElement: () => messageListRef.value,
@@ -168,10 +175,14 @@ function measureVirtualElement(element: unknown) {
 }
 
 function cancelExportSelection() {
+  exportPreviewGeneration += 1
   exportSelecting.value = false
   exportSelectionLoading.value = false
   showExportDialog.value = false
   exportBusy.value = false
+  exportImageChecking.value = false
+  exportImageTooLong.value = false
+  exportImageDisabledReason.value = ''
   exportTurns.value = []
   selectedExportTurnIds.value = new Set()
   exportLockedSessionId.value = ''
@@ -277,6 +288,17 @@ function openExportConfirmation() {
   exportFormat.value = 'png'
   exportIncludeThinking.value = false
   showExportDialog.value = true
+  void prepareExportPreview()
+}
+
+function closeExportDialog() {
+  exportPreviewGeneration += 1
+  showExportDialog.value = false
+  exportImageChecking.value = false
+  exportImageTooLong.value = false
+  exportImageDisabledReason.value = ''
+  exportRenderMessages.value = []
+  exportRenderModel.value = null
 }
 
 function selectedMessages(): Message[] {
@@ -327,6 +349,42 @@ async function localizeExportImages(root: HTMLElement) {
   }))
 }
 
+async function prepareExportPreview() {
+  if (!selected.value || !showExportDialog.value) return
+  const generation = ++exportPreviewGeneration
+  exportImageChecking.value = true
+  exportImageTooLong.value = false
+  exportImageDisabledReason.value = '正在检查图片长度'
+  try {
+    const messages = selectedMessages()
+    if (messages.length !== selectedExportSeqs.value.length) throw new Error('所选消息未完整加载')
+    exportRenderModel.value = createExportModel(messages)
+    exportRenderMessages.value = messages
+    await nextTick()
+    const root = exportDocumentRef.value?.getElement()
+    if (!root) throw new Error('图片导出文档未就绪')
+    await renderExportMermaidDiagrams(root)
+    await nextTick()
+    await localizeExportImages(root)
+    await document.fonts?.ready
+    if (generation !== exportPreviewGeneration) return
+    exportImageTooLong.value = isImageExportTooLarge(root.scrollWidth, root.scrollHeight)
+    exportImageDisabledReason.value = exportImageTooLong.value
+      ? '所选内容过长，请减少问答组或选择 Markdown/JSON'
+      : ''
+    if (exportImageTooLong.value && (exportFormat.value === 'png' || exportFormat.value === 'jpeg')) {
+      exportFormat.value = 'md'
+    }
+  } catch (reason) {
+    if (generation !== exportPreviewGeneration) return
+    exportImageTooLong.value = true
+    exportImageDisabledReason.value = `无法预检图片长度：${String(reason)}`
+    if (exportFormat.value === 'png' || exportFormat.value === 'jpeg') exportFormat.value = 'md'
+  } finally {
+    if (generation === exportPreviewGeneration) exportImageChecking.value = false
+  }
+}
+
 async function renderExportImage(format: 'png' | 'jpeg'): Promise<string> {
   await nextTick()
   const root = exportDocumentRef.value?.getElement()
@@ -335,13 +393,10 @@ async function renderExportImage(format: 'png' | 'jpeg'): Promise<string> {
   await nextTick()
   await localizeExportImages(root)
   await document.fonts?.ready
-  const pixelRatio = 2
-  const outputWidth = root.scrollWidth * pixelRatio
-  const outputHeight = root.scrollHeight * pixelRatio
-  if (outputWidth > 32767 || outputHeight > 32767 || outputWidth * outputHeight > 268_435_456) {
+  if (isImageExportTooLarge(root.scrollWidth, root.scrollHeight)) {
     throw new Error('所选内容超过单张图片尺寸限制，请减少问答组或改用 Markdown/JSON')
   }
-  const options = { backgroundColor: '#ffffff', cacheBust: true, pixelRatio }
+  const options = { backgroundColor: '#ffffff', cacheBust: true, pixelRatio: exportImagePixelRatio }
   return format === 'png'
     ? toPng(root, options)
     : toJpeg(root, { ...options, quality: 0.92 })
@@ -349,6 +404,7 @@ async function renderExportImage(format: 'png' | 'jpeg'): Promise<string> {
 
 async function exportSelectedConversation() {
   if (!selected.value || exportBusy.value || !selectedExportTurns.value.length) return
+  if ((exportFormat.value === 'png' || exportFormat.value === 'jpeg') && exportImageDisabled.value) return
   if (selected.value.id !== exportLockedSessionId.value || activeBranchNode.value !== exportLockedBranchId.value) {
     error.value = '当前对话分支已变化，请重新选择导出内容'
     cancelExportSelection()
@@ -385,8 +441,6 @@ async function exportSelectedConversation() {
     error.value = `导出失败：${String(reason)}`
   } finally {
     exportBusy.value = false
-    exportRenderMessages.value = []
-    exportRenderModel.value = null
     if (succeeded) cancelExportSelection()
   }
 }
@@ -707,6 +761,9 @@ watch(committedQuery, () => {
   searchHitIndex.value = -1
   void loadSearchHits()
 })
+watch(exportIncludeThinking, () => {
+  if (showExportDialog.value) void prepareExportPreview()
+})
 watch(detail.error, (value) => {
   if (value) error.value = value
 })
@@ -896,7 +953,9 @@ onBeforeUnmount(() => {
       :visible="showExportDialog"
       :selected-count="selectedExportTurns.length"
       :busy="exportBusy"
-      @close="showExportDialog=false"
+      :image-disabled="exportImageDisabled"
+      :image-disabled-reason="exportImageDisabledReason"
+      @close="closeExportDialog"
       @export="exportSelectedConversation"
     />
     <div v-if="exportRenderModel" class="export-document-host" aria-hidden="true">

@@ -26,6 +26,10 @@ export type ConversationExport = {
 
 export type ConversationItem = Pick<Message, 'seq' | 'role'>
 
+export const exportImagePixelRatio = 2
+export const exportImageMaxDimension = 32767
+export const exportImageMaxArea = 268_435_456
+
 const invalidFilenameCharacters = /[<>:"/\\|?*\u0000-\u001f]/g
 const reservedWindowsFilename = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i
 
@@ -46,6 +50,14 @@ export function groupConversationTurns(items: ConversationItem[]): ConversationT
 
 export function selectedTurnSeqs(turns: ConversationTurn[], selectedIds: Set<string>): number[] {
   return turns.filter((turn) => selectedIds.has(turn.id)).flatMap((turn) => turn.seqs)
+}
+
+export function isImageExportTooLarge(width: number, height: number): boolean {
+  const outputWidth = width * exportImagePixelRatio
+  const outputHeight = height * exportImagePixelRatio
+  return outputWidth > exportImageMaxDimension
+    || outputHeight > exportImageMaxDimension
+    || outputWidth * outputHeight > exportImageMaxArea
 }
 
 export function exportDate(value: string | undefined, fallback = new Date()): string {

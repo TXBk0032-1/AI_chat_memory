@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   exportDate,
   groupConversationTurns,
+  isImageExportTooLarge,
   sanitizeExportFilename,
   selectedTurnSeqs,
   serializeJson,
@@ -81,5 +82,11 @@ describe('conversation export', () => {
     expect(exportDate('invalid', fallback)).toBe('2025-07-14')
     expect(sanitizeExportFilename(' A/B:*?  ', '2025-07-14', 'jpeg')).toBe('A B-2025-07-14.jpeg')
     expect(sanitizeExportFilename('CON', '2025-07-14', 'md')).toBe('_CON-2025-07-14.md')
+  })
+
+  it('detects image exports that exceed the canvas limits', () => {
+    expect(isImageExportTooLarge(960, 10_000)).toBe(false)
+    expect(isImageExportTooLarge(960, 16_384)).toBe(true)
+    expect(isImageExportTooLarge(20_000, 100)).toBe(true)
   })
 })
