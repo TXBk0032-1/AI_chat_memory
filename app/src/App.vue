@@ -97,6 +97,14 @@ const theme = useTheme(settings, (animate) => {
   }, animate ? 180 : 0)
 })
 const { effectiveTheme, commitTheme, previewTheme } = theme
+const branches = useBranchNavigation(selected, desktopApi)
+const {
+  overview: branchOverview,
+  loading: branchesLoading,
+  error: branchesError,
+  activeNode: activeBranchNode,
+  mode: detailMode,
+} = branches
 const displayedMessageSeqs = computed(() => branchMessageSeqs(
   branchOverview.value,
   activeBranchNode.value,
@@ -116,14 +124,6 @@ const virtualizerOptions = computed(() => ({
 const messageVirtualizer = useVirtualizer(virtualizerOptions)
 const virtualMessages = computed(() => messageVirtualizer.value.getVirtualItems())
 const virtualTotalSize = computed(() => messageVirtualizer.value.getTotalSize())
-const branches = useBranchNavigation(selected, desktopApi)
-const {
-  overview: branchOverview,
-  loading: branchesLoading,
-  error: branchesError,
-  activeNode: activeBranchNode,
-  mode: detailMode,
-} = branches
 
 function measureVirtualElement(element: unknown) {
   if (element instanceof Element) messageVirtualizer.value.measureElement(element)
