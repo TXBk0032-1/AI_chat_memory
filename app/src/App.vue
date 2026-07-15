@@ -969,10 +969,12 @@ onBeforeUnmount(() => {
         :include-thinking="exportIncludeThinking"
       />
     </div>
-    <div v-if="contextMenu.visible" class="context-menu" role="menu" :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }" @click.stop>
-      <button role="menuitem" :disabled="!contextMenu.selectedText" @click="copyContextSelection"><Copy :size="15" /><span>复制</span><kbd>Ctrl+C</kbd></button>
-      <button role="menuitem" @click="selectConversationContent"><Clipboard :size="15" /><span>全选对话内容</span><kbd>Ctrl+A</kbd></button>
-    </div>
+    <Transition name="context-menu">
+      <div v-if="contextMenu.visible" class="context-menu" role="menu" :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }" @click.stop>
+        <button role="menuitem" :disabled="!contextMenu.selectedText" @click="copyContextSelection"><Copy :size="15" /><span>复制</span><kbd>Ctrl+C</kbd></button>
+        <button role="menuitem" @click="selectConversationContent"><Clipboard :size="15" /><span>全选对话内容</span><kbd>Ctrl+A</kbd></button>
+      </div>
+    </Transition>
     <Transition name="toast"><div v-if="toast" class="toast" role="status">{{ toast }}</div></Transition>
   </div>
 </template>
