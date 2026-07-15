@@ -40,6 +40,15 @@ pub fn run() {
                 }
             }
             tracing::info!(app_data_dir=%data_dir.display(), "application starting");
+
+            #[cfg(target_os = "windows")]
+            if let Some(window) = app.get_webview_window("main") {
+                match window_vibrancy::apply_mica(&window, None) {
+                    Ok(()) => tracing::info!("mica window effect enabled"),
+                    Err(error) => tracing::warn!(%error, "mica window effect unavailable"),
+                }
+            }
+
             let executable_dir = std::env::current_exe()
                 .ok()
                 .and_then(|path| path.parent().map(std::path::Path::to_path_buf));
