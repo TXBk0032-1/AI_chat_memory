@@ -75,10 +75,6 @@ userscript 请求必须满足：
 
 桌面端设置页可编辑 Origin 白名单并启用、关闭或轮换随机密钥。userscript 菜单可配置后端地址和对应密钥。
 
-## 归档
-
-已停用的 Python 参考实现和旧项目说明存放在 `archive/`，不属于当前应用架构，也不参与构建、测试或发布。
-
 ## 本地 CI/CD
 
 轻量流水线位于 `scripts/ci.ps1`，不依赖 Docker 或外部 CI 服务：
