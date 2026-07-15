@@ -11,7 +11,7 @@ $Root = Split-Path -Parent $PSScriptRoot
 $App = Join-Path $Root "app"
 $Rust = Join-Path $App "src-tauri"
 $Artifacts = Join-Path $Root "artifacts"
-$env:RUSTUP_TOOLCHAIN = "stable"
+$env:RUSTUP_TOOLCHAIN = "1.97.0"
 $env:CARGO_TERM_COLOR = "always"
 
 function Invoke-Step {
