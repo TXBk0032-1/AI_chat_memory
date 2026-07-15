@@ -43,9 +43,9 @@ pub fn run() {
 
             #[cfg(target_os = "windows")]
             if let Some(window) = app.get_webview_window("main") {
-                match window_vibrancy::apply_mica(&window, None) {
-                    Ok(()) => tracing::info!("mica window effect enabled"),
-                    Err(error) => tracing::warn!(%error, "mica window effect unavailable"),
+                match window_vibrancy::apply_acrylic(&window, Some((18, 18, 18, 110))) {
+                    Ok(()) => tracing::info!("acrylic window effect enabled"),
+                    Err(error) => tracing::warn!(%error, "acrylic window effect unavailable"),
                 }
             }
 
