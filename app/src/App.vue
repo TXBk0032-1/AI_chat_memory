@@ -28,6 +28,7 @@ import 'katex/dist/katex.min.css'
 import MessageBlock from './MessageBlock.vue'
 import BranchOverviewView from './BranchOverview.vue'
 import AppSidebar from './components/AppSidebar.vue'
+import AppTitleBar from './components/AppTitleBar.vue'
 import SessionList from './components/SessionList.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import SessionDialogs from './components/SessionDialogs.vue'
@@ -784,6 +785,8 @@ onBeforeUnmount(() => {
 
 <template>
   <div :class="['app-frame', { 'sidebar-collapsed': sidebarCollapsed }]" @click="hidePopupMenus" @contextmenu="handleContextMenu">
+    <AppTitleBar />
+
     <AppSidebar
       :collapsed="sidebarCollapsed"
       :total="total"

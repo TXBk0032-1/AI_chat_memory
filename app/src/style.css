@@ -22,10 +22,17 @@ button { cursor: pointer; outline: none; }
 button:focus-visible, [role="button"]:focus-visible, summary:focus-visible { outline: 2px solid #258a72; outline-offset: 2px; }
 button:disabled { cursor: default; opacity: .55; }
 
-.app-frame { --sidebar-width: 224px; min-height: 100vh; display: grid; grid-template-columns: var(--sidebar-width) minmax(0, 1fr); background: transparent; transition: grid-template-columns .38s cubic-bezier(.2, .85, .25, 1); -webkit-user-select: none; user-select: none; }
+.app-frame { --sidebar-width: 224px; --titlebar-height: 36px; min-height: 100vh; display: grid; grid-template-columns: var(--sidebar-width) minmax(0, 1fr); grid-template-rows: var(--titlebar-height) minmax(0, 1fr); background: transparent; transition: grid-template-columns .38s cubic-bezier(.2, .85, .25, 1); -webkit-user-select: none; user-select: none; }
 .app-frame.sidebar-collapsed { --sidebar-width: 68px; }
 input, textarea, select, .message-block .markdown { -webkit-user-select: text; user-select: text; }
-.sidebar { --sidebar-background: #eef1f2b8; --sidebar-border: #d5dbddcc; --sidebar-text: #333b3f; --sidebar-muted: #737f84; --sidebar-hover: #e1e6e7b8; --sidebar-active: #d7dedfcc; --sidebar-active-text: #20272c; --sidebar-section-text: #78858a; --sidebar-highlight-base: #d9e0e2cc; --sidebar-footer-border: #d4daddcc; --sidebar-strong: #3d474b; --sidebar-small: #7d898e; height: 100vh; min-width: 0; display: flex; flex-direction: column; padding: 20px 14px 14px; overflow: hidden; background: var(--sidebar-background); color: var(--sidebar-text); border-right: 1px solid var(--sidebar-border); transition: padding .38s cubic-bezier(.2, .85, .25, 1); }
+.app-titlebar { position: relative; z-index: 100; grid-column: 1 / -1; grid-row: 1; height: var(--titlebar-height); display: flex; align-items: center; color: #4b555a; background: #eef1f2; border-bottom: 1px solid #d5dbdd; }
+.app-titlebar-label { min-width: 0; flex: 1; height: 100%; display: flex; align-items: center; gap: 8px; padding-left: 14px; font-size: 11px; font-weight: 650; letter-spacing: .01em; }
+.app-titlebar-mark { width: 9px; height: 9px; flex: 0 0 9px; border-radius: 3px; background: #39ad8d; box-shadow: inset 0 0 0 1px #14745d55; }
+.app-titlebar-controls { align-self: stretch; display: flex; }
+.app-titlebar-controls button { width: 46px; height: 100%; padding: 0; border: 0; border-radius: 0; display: grid; place-items: center; color: #596267; background: transparent; transition: color .15s ease, background-color .15s ease; }
+.app-titlebar-controls button:hover { color: #20272c; background: #dce2e4; }
+.app-titlebar-controls .app-titlebar-close:hover { color: #fff; background: #c42b1c; }
+.sidebar { --sidebar-background: #eef1f2b8; --sidebar-border: #d5dbddcc; --sidebar-text: #333b3f; --sidebar-muted: #737f84; --sidebar-hover: #e1e6e7b8; --sidebar-active: #d7dedfcc; --sidebar-active-text: #20272c; --sidebar-section-text: #78858a; --sidebar-highlight-base: #d9e0e2cc; --sidebar-footer-border: #d4daddcc; --sidebar-strong: #3d474b; --sidebar-small: #7d898e; grid-column: 1; grid-row: 2; height: calc(100vh - var(--titlebar-height)); min-width: 0; display: flex; flex-direction: column; padding: 20px 14px 14px; overflow: hidden; background: var(--sidebar-background); color: var(--sidebar-text); border-right: 1px solid var(--sidebar-border); transition: padding .38s cubic-bezier(.2, .85, .25, 1); }
 .identity { position: relative; z-index: 1; height: 56px; flex: 0 0 56px; padding: 0 8px 22px; overflow: visible; }
 .identity-content { position: absolute; inset: 0 8px 22px; display: flex; align-items: center; gap: 11px; opacity: 1; transform: translateX(0) scale(1); transition: opacity .18s ease .12s, transform .32s cubic-bezier(.2, .85, .25, 1) .06s; }
 .identity-mark { width: 34px; height: 34px; display: grid; place-items: center; color: #152a25; background: #71d0b2; border-radius: 7px; }
@@ -87,7 +94,7 @@ i.deepseek { background: #5273e6; } i.doubao { background: #e36f53; } i.kimi { b
 .sidebar-collapsed .settings-button.connected { color: #80e1bd; box-shadow: 0 0 0 1px #55c49e66, 0 0 13px #55c49e7a; animation: settings-connected-pulse 2.2s ease-in-out infinite; }
 @keyframes settings-connected-pulse { 50% { box-shadow: 0 0 0 2px #55c49e3d, 0 0 20px #55c49e9c; transform: scale(1.04); } }
 
-.workspace { height: 100vh; min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
+.workspace { grid-column: 2; grid-row: 2; height: calc(100vh - var(--titlebar-height)); min-width: 0; display: flex; flex-direction: column; overflow: hidden; }
 .workspace-header { min-height: 86px; display: flex; align-items: center; padding: 0 26px; background: #fff; border-bottom: 1px solid #dfe3e5; }
 .workspace-header h1 { margin: 0; font-size: 20px; font-weight: 680; letter-spacing: 0; }
 .workspace-header p { margin: 5px 0 0; color: #7a8287; font-size: 12px; }
@@ -381,6 +388,11 @@ html[data-theme="dark"] { color: #e4e8ea; background: transparent; }
 html[data-theme="dark"]::view-transition-group(root) { background: #171b1e; }
 html[data-theme="dark"] * { scrollbar-color: #566066 #202528; }
 html[data-theme="dark"] .app-frame { color: #e4e8ea; background: transparent; }
+html[data-theme="dark"] .app-titlebar { color: #c5cdd0; background: #181f23; border-color: #111619; }
+html[data-theme="dark"] .app-titlebar-mark { background: #55c49e; box-shadow: inset 0 0 0 1px #8be0c455; }
+html[data-theme="dark"] .app-titlebar-controls button { color: #aeb8bc; }
+html[data-theme="dark"] .app-titlebar-controls button:hover { color: #fff; background: #333d43; }
+html[data-theme="dark"] .app-titlebar-controls .app-titlebar-close:hover { color: #fff; background: #c42b1c; }
 html[data-theme="dark"] .sidebar { --sidebar-background: #181f23b8; --sidebar-border: #111619cc; --sidebar-text: #f7f8f8; --sidebar-muted: #96a2a7; --sidebar-hover: #333d43b8; --sidebar-active: #333d43cc; --sidebar-active-text: #fff; --sidebar-section-text: #78858b; --sidebar-highlight-base: #344147cc; --sidebar-footer-border: #354047cc; --sidebar-strong: #d6dcdf; --sidebar-small: #77858b; }
 html[data-theme="dark"] .source-highlight { background: color-mix(in srgb, var(--source-accent) 20%, var(--sidebar-highlight-base)); }
 html[data-theme="dark"] .workspace-header,
