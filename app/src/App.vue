@@ -8,6 +8,7 @@ import {
   ArrowDown,
   ArrowUp,
   CalendarDays,
+  CheckCircle2,
   ChevronDown,
   Clipboard,
   Copy,
@@ -63,6 +64,7 @@ import { useSessionCatalog } from './composables/useSessionCatalog'
 import { usePaneResize } from './composables/usePaneResize'
 import { useTheme } from './composables/useTheme'
 import { useSettings } from './composables/useSettings'
+import { useToastQueue } from './composables/useToastQueue'
 import { useBranchNavigation } from './composables/useBranchNavigation'
 import { useConversationSearch } from './composables/useConversationSearch'
 import { useSessionDetail } from './composables/useSessionDetail'
@@ -105,13 +107,11 @@ const pendingCloseBehavior = ref<'hide_to_tray' | 'exit' | null>(null)
 const expandedThinking = ref(new Set<string>())
 const settings = ref<SettingsModel>({ setup_complete: false, secret_enabled: false, allowed_origins: [], close_behavior: 'ask', tray_click_behavior: 'show_menu', theme: 'system' })
 const apiStatus = ref<ApiStatus>({ service: { state: 'starting' }, userscript_connected: false })
-const toast = ref('')
 const contextMenu = ref({ visible: false, x: 0, y: 0, selectedText: '' })
 const sidebarCollapsed = ref(loadSidebarCollapsed())
 const clickDebounceMs = 250
 let statusTimer: number | undefined
 let unlistenCloseRequest: UnlistenFn | undefined
-let toastTimer: number | undefined
 let mermaidRenderVersion = 0
 let readingPositionTimer: number | undefined
 let exportPreviewGeneration = 0
@@ -135,6 +135,7 @@ const theme = useTheme(settings, (animate) => {
   }, animate ? 180 : 0)
 })
 const { effectiveTheme, commitTheme, previewTheme } = theme
+const { toasts, showToast, disposeToasts } = useToastQueue()
 const branches = useBranchNavigation(selected, desktopApi)
 const {
   overview: branchOverview,
@@ -233,12 +234,6 @@ const selectedMatches = computed<SearchMatch[]>(() => filterBranchMatches(
   displayedMessageSeqs.value,
 ))
 const compactReferences = computed(() => new Map((selected.value?.references ?? []).map((reference) => [reference.cite_index, reference])))
-
-function showToast(message: string) {
-  toast.value = message
-  window.clearTimeout(toastTimer)
-  toastTimer = window.setTimeout(() => { toast.value = '' }, 2200)
-}
 
 async function enterExportSelection() {
   if (!selected.value || exportSelectionLoading.value) return
@@ -505,9 +500,7 @@ async function navigateSearch(direction: number) {
   if (next < 0 || next >= selectedMatches.value.length) {
     if (!loopSearch.value) return
     next = next < 0 ? selectedMatches.value.length - 1 : 0
-    toast.value = '已循环到当前对话的另一端'
-    window.clearTimeout(toastTimer)
-    toastTimer = window.setTimeout(() => { toast.value = '' }, 1800)
+    showToast('已循环到当前对话的另一端', 2600)
   }
   searchHitIndex.value = next
   const match = selectedMatches.value[next]
@@ -777,7 +770,7 @@ onBeforeUnmount(() => {
   document.removeEventListener('click', preventRapidControlClick, true)
   document.removeEventListener('scroll', hideContextMenu, true)
   window.clearInterval(statusTimer)
-  window.clearTimeout(toastTimer)
+  disposeToasts()
   window.clearTimeout(readingPositionTimer)
   unlistenCloseRequest?.()
 })
@@ -978,6 +971,18 @@ onBeforeUnmount(() => {
         <button role="menuitem" @click="selectConversationContent"><Clipboard :size="15" /><span>全选对话内容</span><kbd>Ctrl+A</kbd></button>
       </div>
     </Transition>
-    <Transition name="toast"><div v-if="toast" class="toast" role="status">{{ toast }}</div></Transition>
+    <TransitionGroup name="toast" tag="div" class="toast-stack" aria-live="polite" aria-atomic="false">
+      <article
+        v-for="notice in toasts"
+        :key="notice.id"
+        class="toast-notice"
+        role="status"
+        :style="{ '--toast-duration': `${notice.duration}ms` }"
+      >
+        <span class="toast-icon" aria-hidden="true"><CheckCircle2 :size="19" /></span>
+        <strong>{{ notice.message }}</strong>
+        <span class="toast-progress" aria-hidden="true"><i></i></span>
+      </article>
+    </TransitionGroup>
   </div>
 </template>
