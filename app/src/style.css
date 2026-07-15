@@ -22,7 +22,8 @@ button { cursor: pointer; outline: none; }
 button:focus-visible, [role="button"]:focus-visible, summary:focus-visible { outline: 2px solid #258a72; outline-offset: 2px; }
 button:disabled { cursor: default; opacity: .55; }
 
-.app-frame { --sidebar-width: 224px; --titlebar-height: 36px; min-height: 100vh; display: grid; grid-template-columns: var(--sidebar-width) minmax(0, 1fr); grid-template-rows: var(--titlebar-height) minmax(0, 1fr); background: transparent; transition: grid-template-columns .38s cubic-bezier(.2, .85, .25, 1); -webkit-user-select: none; user-select: none; }
+.app-frame { --sidebar-width: 224px; --titlebar-height: 36px; min-height: 100vh; display: grid; grid-template-columns: var(--sidebar-width) minmax(0, 1fr); grid-template-rows: var(--titlebar-height) minmax(0, 1fr); overflow: hidden; background: transparent; border-radius: 16px; transition: grid-template-columns .38s cubic-bezier(.2, .85, .25, 1), border-radius .18s ease; -webkit-user-select: none; user-select: none; }
+.window-maximized .app-frame { border-radius: 0; }
 .app-frame.sidebar-collapsed { --sidebar-width: 68px; }
 input, textarea, select, .message-block .markdown { -webkit-user-select: text; user-select: text; }
 .app-titlebar { position: relative; z-index: 100; grid-column: 1 / -1; grid-row: 1; height: var(--titlebar-height); display: flex; align-items: center; color: #4b555a; background: #eef1f2; border-bottom: 1px solid #d5dbdd; }

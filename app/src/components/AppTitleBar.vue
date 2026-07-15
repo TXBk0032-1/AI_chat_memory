@@ -1,12 +1,31 @@
 <script setup lang="ts">
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import { Minus, Square, X } from 'lucide-vue-next'
+import { onBeforeUnmount, onMounted } from 'vue'
 
 const appWindow = getCurrentWindow()
+let unlistenResize: (() => void) | undefined
+
+async function syncMaximizedState() {
+  const maximized = await appWindow.isMaximized()
+  document.documentElement.classList.toggle('window-maximized', maximized)
+}
 
 function runWindowAction(action: () => Promise<void>) {
   void action().catch((error) => console.error('Window action failed', error))
 }
+
+onMounted(() => {
+  void syncMaximizedState().catch((error) => console.error('Failed to read window state', error))
+  void appWindow.onResized(() => {
+    void syncMaximizedState().catch((error) => console.error('Failed to read window state', error))
+  }).then((unlisten) => { unlistenResize = unlisten })
+})
+
+onBeforeUnmount(() => {
+  unlistenResize?.()
+  document.documentElement.classList.remove('window-maximized')
+})
 </script>
 
 <template>
