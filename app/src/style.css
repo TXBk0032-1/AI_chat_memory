@@ -342,9 +342,9 @@ i.deepseek { background: #5273e6; } i.doubao { background: #e36f53; } i.kimi { b
 .theme-options button { min-width: 0; height: 38px; padding: 0 8px; border: 0; border-radius: 4px; display: flex; align-items: center; justify-content: center; gap: 6px; color: #6e777b; background: transparent; font-size: 10px; transition: color .2s ease, background-color .28s cubic-bezier(.2, .8, .2, 1), box-shadow .28s ease, transform .28s cubic-bezier(.2, .8, .2, 1); }
 .theme-options button:hover { color: #32393c; }
 .theme-options button.active { color: #176b58; background: #fff; box-shadow: 0 2px 7px #17231f17; transform: translateY(-1px); }
-.switch { position: relative; width: 36px; height: 20px; flex: 0 0 auto; }
-.switch input { position: absolute; opacity: 0; }
-.switch span { position: absolute; inset: 0; border-radius: 10px; background: #bbc2c5; transition: background .15s; }
+.switch { position: relative; width: 36px; height: 20px; flex: 0 0 auto; cursor: pointer; }
+.switch input { position: absolute; z-index: 1; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.switch span { position: absolute; inset: 0; border-radius: 10px; background: #bbc2c5; pointer-events: none; transition: background .15s; }
 .switch span::after { content: ""; position: absolute; width: 16px; height: 16px; left: 2px; top: 2px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px #18201e30; transition: transform .15s; }
 .switch input:checked + span { background: #198169; }
 .switch input:checked + span::after { transform: translateX(16px); }
