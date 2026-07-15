@@ -1,3 +1,5 @@
+//! 系统托盘图标与菜单的创建及事件处理模块。
+//! 所有托盘相关的 UI 和交互逻辑集中在此
 use tauri::{
     Manager,
     menu::{Menu, MenuItem},
@@ -16,6 +18,7 @@ pub fn build(app: &tauri::App, service: &AppService) -> tauri::Result<()> {
             tauri::async_runtime::block_on(service.settings()).tray_click_behavior,
             TrayClickBehavior::ShowMenu
         ))
+        .icon(app.default_window_icon().unwrap().clone())
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_main_window(app),
             "quit" => {
