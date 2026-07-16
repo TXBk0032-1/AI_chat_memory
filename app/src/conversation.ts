@@ -35,8 +35,11 @@ export type SessionOpen = SessionSummary & {
 export type SearchHit = {
   message_id: string
   seq: number
-  field: 'content' | 'thinking'
+  field: 'content' | 'thinking' | 'semantic'
   count: number
+  score?: number
+  snippet?: string
+  chunk_id?: number
 }
 
 export type SearchMatch = SearchHit & { occurrence: number }

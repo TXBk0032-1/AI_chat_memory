@@ -1,6 +1,6 @@
 import { open } from '@tauri-apps/plugin-dialog'
 import { ref, type Ref } from 'vue'
-import { desktopApi, type DesktopApi, type SettingsModel } from '../desktop-api'
+import { desktopApi, type DesktopApi, type SemanticRuntimeStatus, type SettingsModel } from '../desktop-api'
 
 type ThemePreview = { begin(): void; accept(): void; cancel(): void }
 
@@ -13,6 +13,8 @@ export function useSettings(
   const showSettings = ref(false)
   const originText = ref('')
   const secretCopied = ref(false)
+  const semanticStatus = ref<SemanticRuntimeStatus | null>(null)
+  const semanticBusy = ref(false)
 
   async function openSettings() {
     settings.value = await api.getSettings()
@@ -20,6 +22,11 @@ export function useSettings(
     originText.value = settings.value.allowed_origins.join('\n')
     secretCopied.value = false
     showSettings.value = true
+    try {
+      semanticStatus.value = await api.getSemanticStatus()
+    } catch {
+      semanticStatus.value = null
+    }
   }
 
   function closeSettings(save = false) {
@@ -61,5 +68,65 @@ export function useSettings(
     }
   }
 
-  return { showSettings, originText, secretCopied, openSettings, closeSettings, saveSettings, rotateSecret, copySecret, changeDataDirectory }
+
+  async function refreshSemanticStatus() {
+    try {
+      semanticStatus.value = await api.getSemanticStatus()
+    } catch {
+      semanticStatus.value = null
+    }
+  }
+
+  async function checkEmbedding() {
+    semanticBusy.value = true
+    try {
+      await api.checkEmbeddingBackend()
+      await refreshSemanticStatus()
+    } catch (reason) {
+      error.value = String(reason)
+    } finally {
+      semanticBusy.value = false
+    }
+  }
+
+  async function reindexSemantic() {
+    semanticBusy.value = true
+    try {
+      await api.reindexSemanticSearch()
+      await refreshSemanticStatus()
+    } catch (reason) {
+      error.value = String(reason)
+    } finally {
+      semanticBusy.value = false
+    }
+  }
+
+  async function downloadLocalModel() {
+    semanticBusy.value = true
+    try {
+      await api.downloadLocalEmbeddingModel()
+      await refreshSemanticStatus()
+    } catch (reason) {
+      error.value = String(reason)
+    } finally {
+      semanticBusy.value = false
+    }
+  }
+
+  async function importLocalModel() {
+    const path = await open({ directory: true, multiple: false, title: '选择本地 embedding 模型目录' })
+    if (typeof path !== 'string') return
+    semanticBusy.value = true
+    try {
+      await api.importLocalEmbeddingModel(path)
+      settings.value = await api.getSettings()
+      await refreshSemanticStatus()
+    } catch (reason) {
+      error.value = String(reason)
+    } finally {
+      semanticBusy.value = false
+    }
+  }
+
+  return { showSettings, originText, secretCopied, semanticStatus, semanticBusy, openSettings, closeSettings, saveSettings, rotateSecret, copySecret, changeDataDirectory, checkEmbedding, reindexSemantic, downloadLocalModel, importLocalModel }
 }

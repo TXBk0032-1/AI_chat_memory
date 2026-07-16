@@ -2,11 +2,13 @@ mod branch;
 mod commands;
 mod data_directory;
 mod database;
+mod embedding;
 mod error;
 mod http_api;
 mod logging;
 mod models;
 mod normalizer;
+mod semantic;
 mod service;
 mod settings;
 mod tray;
@@ -73,7 +75,7 @@ pub fn run() {
                 let database_path = database_dir.join("chat_memory.db");
                 let pool = database::connect(&database_path).await?;
                 tracing::info!(path=%database_path.display(), "application database ready");
-                Ok::<_, crate::error::AppError>(AppService::new(pool, settings))
+                Ok::<_, crate::error::AppError>(AppService::new(pool, settings, database_dir).await?)
             })?;
             app.manage(service.clone());
             let http_service = service.clone();
@@ -102,6 +104,11 @@ pub fn run() {
             commands::save_settings,
             commands::rotate_secret,
             commands::get_api_status,
+            commands::get_semantic_status,
+            commands::check_embedding_backend,
+            commands::reindex_semantic_search,
+            commands::download_local_embedding_model,
+            commands::import_local_embedding_model,
             commands::move_data_directory,
             commands::confirm_close_behavior,
             commands::write_export_file

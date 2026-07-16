@@ -8,7 +8,7 @@ describe('useConversationSearch', () => {
     let resolve!: (value: never[]) => void
     const api = { searchSessionHits: vi.fn(() => new Promise<never[]>((done) => { resolve = done })) } as unknown as DesktopApi
     const selected = ref({ id: 'session' } as never)
-    const search = useConversationSearch(selected, ref('needle'), api)
+    const search = useConversationSearch(selected, ref('needle'), ref('hybrid'), api)
     const pending = search.load()
     search.reset()
     resolve([])

@@ -105,7 +105,7 @@ const exportRenderModel = ref<ConversationExport | null>(null)
 const exportDocumentRef = ref<InstanceType<typeof ExportDocument> | null>(null)
 const pendingCloseBehavior = ref<'hide_to_tray' | 'exit' | null>(null)
 const expandedThinking = ref(new Set<string>())
-const settings = ref<SettingsModel>({ setup_complete: false, secret_enabled: false, allowed_origins: [], close_behavior: 'ask', tray_click_behavior: 'show_menu', theme: 'system' })
+const settings = ref<SettingsModel>({ setup_complete: false, secret_enabled: false, allowed_origins: [], close_behavior: 'ask', tray_click_behavior: 'show_menu', theme: 'system', semantic_search: { enabled: true, default_mode: 'hybrid', backend: 'local', local: { model: 'microsoft/harrier-oss-v1-270m' }, ollama: { base_url: 'http://127.0.0.1:11434', model: 'nomic-embed-text' }, llama_cpp: { base_url: 'http://127.0.0.1:8080/v1', model: 'harrier-oss-v1-270m', dimensions: 640 }, openai_compatible: { base_url: 'https://api.openai.com/v1', model: 'text-embedding-3-small' } } })
 const apiStatus = ref<ApiStatus>({ service: { state: 'starting' }, userscript_connected: false })
 const contextMenu = ref({ visible: false, x: 0, y: 0, selectedText: '' })
 const sidebarCollapsed = ref(loadSidebarCollapsed())
@@ -203,20 +203,21 @@ function clearSelectedSession() {
 
 const {
   sessions, loading, error, query, committedQuery, platform, dateFrom, dateTo,
-  showFilters, total, searchElapsed, filtered, loadSessions, loadMore, resetFilters,
-  selectPlatform,
+  showFilters, total, searchElapsed, filtered, searchMode, semanticStatus, loadSessions, loadMore, resetFilters,
+  selectPlatform, setSearchMode,
 } = useSessionCatalog(desktopApi, (visibleIds) => {
   if (selected.value && !visibleIds.has(selected.value.id)) {
     persistReadingPosition()
     clearSelectedSession()
   }
 })
-const conversationSearch = useConversationSearch(selected, committedQuery, desktopApi)
+const conversationSearch = useConversationSearch(selected, committedQuery, searchMode, desktopApi)
 const { hits: sessionSearchHits, index: searchHitIndex, loop: loopSearch } = conversationSearch
 const loadSearchHits = conversationSearch.load
 const {
-  showSettings, originText, secretCopied, openSettings, closeSettings, saveSettings,
-  rotateSecret, copySecret, changeDataDirectory,
+  showSettings, originText, secretCopied, semanticStatus: settingsSemanticStatus, semanticBusy,
+  openSettings, closeSettings, saveSettings, rotateSecret, copySecret, changeDataDirectory,
+  checkEmbedding, reindexSemantic, downloadLocalModel, importLocalModel,
 } = useSettings(settings, error, {
   begin: theme.beginPreview,
   accept: theme.acceptPreview,
@@ -745,6 +746,7 @@ onMounted(async () => {
     showClosePrompt.value = true
   })
   settings.value = await desktopApi.getSettings()
+  searchMode.value = settings.value.semantic_search?.default_mode || 'hybrid'
   commitTheme(settings.value.theme, false)
   await refreshApiStatus()
   statusTimer = window.setInterval(refreshApiStatus, 3000)
@@ -801,8 +803,15 @@ onBeforeUnmount(() => {
 
       <section class="control-bar">
         <div class="search-stack">
-          <label class="search-field"><Search :size="17" /><input v-model="query" placeholder="搜索标题和消息内容" @input="searchElapsed=null" @keyup.enter="loadSessions()" /><button v-if="query" title="清除搜索" @click="query=''; searchElapsed=null; loadSessions()"><X :size="15" /></button></label>
-          <Transition name="search-summary"><div v-if="searchElapsed !== null" class="search-summary">找到 {{ total }} 条结果 · {{ searchElapsed.toFixed(0) }} 毫秒</div></Transition>
+          <div class="search-row">
+            <label class="search-field"><Search :size="17" /><input v-model="query" placeholder="搜索标题和消息内容" @input="searchElapsed=null" @keyup.enter="loadSessions()" /><button v-if="query" title="清除搜索" @click="query=''; searchElapsed=null; loadSessions()"><X :size="15" /></button></label>
+            <select class="search-mode" :value="searchMode" @change="setSearchMode(($event.target as HTMLSelectElement).value as any)">
+              <option value="hybrid">混合</option>
+              <option value="semantic">语义</option>
+              <option value="keyword">关键词</option>
+            </select>
+          </div>
+          <Transition name="search-summary"><div v-if="searchElapsed !== null" class="search-summary">找到 {{ total }} 条结果 · {{ searchElapsed.toFixed(0) }} 毫秒 · {{ searchMode }} · 语义 {{ semanticStatus }}</div></Transition>
         </div>
         <button :class="['filter-button', { active: showFilters || filtered, expanded: showFilters }]" :aria-expanded="showFilters" @click="showFilters=!showFilters"><CalendarDays :size="16" />日期筛选<ChevronDown class="filter-chevron" :size="14" /></button>
         <span class="result-count">{{ sessions.length }} / {{ total }}</span>
@@ -921,12 +930,18 @@ onBeforeUnmount(() => {
       v-model:origin-text="originText"
       :visible="showSettings"
       :secret-copied="secretCopied"
+      :semantic-status="settingsSemanticStatus"
+      :semantic-busy="semanticBusy"
       @close="closeSettings"
       @save="saveSettings"
       @preview-theme="previewTheme"
       @change-data-directory="changeDataDirectory"
       @copy-secret="copySecret"
       @rotate-secret="rotateSecret"
+      @check-embedding="checkEmbedding"
+      @reindex-semantic="reindexSemantic"
+      @download-local-model="downloadLocalModel"
+      @import-local-model="importLocalModel"
     />
 
     <SessionDialogs

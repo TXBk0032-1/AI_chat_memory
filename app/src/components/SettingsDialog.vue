@@ -1,8 +1,19 @@
 <script setup lang="ts">
-import { Check, Clipboard, Monitor, Moon, ShieldCheck, Sun } from 'lucide-vue-next'
-import type { SettingsModel, ThemePreference } from '../desktop-api'
+import { Check, Clipboard, FolderOpen, Monitor, Moon, RefreshCw, ShieldCheck, Sun } from 'lucide-vue-next'
+import type {
+  EmbeddingBackendKind,
+  SearchMode,
+  SemanticRuntimeStatus,
+  SettingsModel,
+  ThemePreference,
+} from '../desktop-api'
 
-defineProps<{ visible: boolean; secretCopied: boolean }>()
+defineProps<{
+  visible: boolean
+  secretCopied: boolean
+  semanticStatus?: SemanticRuntimeStatus | null
+  semanticBusy?: boolean
+}>()
 const settings = defineModel<SettingsModel>('settings', { required: true })
 const originText = defineModel<string>('originText', { required: true })
 const emit = defineEmits<{
@@ -12,7 +23,19 @@ const emit = defineEmits<{
   changeDataDirectory: []
   copySecret: []
   rotateSecret: []
+  checkEmbedding: []
+  reindexSemantic: []
+  downloadLocalModel: []
+  importLocalModel: []
 }>()
+
+function setBackend(backend: EmbeddingBackendKind) {
+  settings.value.semantic_search.backend = backend
+}
+
+function setMode(mode: SearchMode) {
+  settings.value.semantic_search.default_mode = mode
+}
 </script>
 
 <template>
@@ -35,6 +58,66 @@ const emit = defineEmits<{
           <section class="setting-group behavior-settings">
             <label><span>关闭窗口后</span><select v-model="settings.close_behavior"><option value="ask">下次关闭时询问</option><option value="hide_to_tray">隐藏到系统托盘</option><option value="exit">退出应用</option></select></label>
             <label><span>点击托盘图标</span><select v-model="settings.tray_click_behavior"><option value="show_menu">弹出托盘菜单</option><option value="open_window">打开主界面</option><option value="no_action">不执行操作</option></select></label>
+          </section>
+          <section class="setting-group">
+            <div class="setting-row">
+              <div>
+                <h3>语义搜索</h3>
+                <p>默认混合关键词与向量召回。可切换本地模型或远程 embedding 后端。</p>
+              </div>
+              <label class="switch"><input v-model="settings.semantic_search.enabled" type="checkbox" /><span></span></label>
+            </div>
+            <div class="semantic-settings" v-if="settings.semantic_search.enabled">
+              <label>
+                <span>默认模式</span>
+                <select :value="settings.semantic_search.default_mode" @change="setMode(($event.target as HTMLSelectElement).value as SearchMode)">
+                  <option value="hybrid">混合</option>
+                  <option value="semantic">语义</option>
+                  <option value="keyword">关键词</option>
+                </select>
+              </label>
+              <label>
+                <span>Embedding 后端</span>
+                <select :value="settings.semantic_search.backend" @change="setBackend(($event.target as HTMLSelectElement).value as EmbeddingBackendKind)">
+                  <option value="local">本地 Candle / harrier</option>
+                  <option value="ollama">Ollama</option>
+                  <option value="llama_cpp">llama.cpp</option>
+                  <option value="openai_compatible">OpenAI 兼容</option>
+                </select>
+              </label>
+              <template v-if="settings.semantic_search.backend === 'local'">
+                <label><span>模型 ID</span><input v-model="settings.semantic_search.local.model" /></label>
+                <p class="path-value">本地目录：{{ semanticStatus?.local_model_path || settings.semantic_search.local.model_path || '尚未准备' }}</p>
+                <div class="setting-actions">
+                  <button class="secondary-button compact" :disabled="semanticBusy" @click="emit('downloadLocalModel')">下载模型</button>
+                  <button class="secondary-button compact" :disabled="semanticBusy" @click="emit('importLocalModel')"><FolderOpen :size="14" />导入本地模型</button>
+                </div>
+              </template>
+              <template v-else-if="settings.semantic_search.backend === 'ollama'">
+                <label><span>Base URL</span><input v-model="settings.semantic_search.ollama.base_url" /></label>
+                <label><span>模型</span><input v-model="settings.semantic_search.ollama.model" /></label>
+              </template>
+              <template v-else-if="settings.semantic_search.backend === 'llama_cpp'">
+                <label><span>Base URL</span><input v-model="settings.semantic_search.llama_cpp.base_url" /></label>
+                <label><span>模型</span><input v-model="settings.semantic_search.llama_cpp.model" /></label>
+                <label><span>API Key</span><input v-model="settings.semantic_search.llama_cpp.api_key" /></label>
+              </template>
+              <template v-else>
+                <label><span>Base URL</span><input v-model="settings.semantic_search.openai_compatible.base_url" /></label>
+                <label><span>模型</span><input v-model="settings.semantic_search.openai_compatible.model" /></label>
+                <label><span>API Key</span><input v-model="settings.semantic_search.openai_compatible.api_key" /></label>
+              </template>
+              <p class="path-value">
+                状态：{{ semanticStatus?.status || 'unknown' }}
+                · 就绪 {{ semanticStatus?.ready_chunks ?? 0 }}
+                · 待索引 {{ semanticStatus?.pending_chunks ?? 0 }}
+                <template v-if="semanticStatus?.message"> · {{ semanticStatus.message }}</template>
+              </p>
+              <div class="setting-actions">
+                <button class="secondary-button compact" :disabled="semanticBusy" @click="emit('checkEmbedding')">测试后端</button>
+                <button class="secondary-button compact" :disabled="semanticBusy" @click="emit('reindexSemantic')"><RefreshCw :size="14" />重建索引</button>
+              </div>
+            </div>
           </section>
           <section class="setting-group">
             <div class="setting-heading"><ShieldCheck :size="18" /><div><h3>允许的网页来源</h3><p>每行填写一个完整的 HTTP 或 HTTPS Origin，不支持通配符。</p></div></div>

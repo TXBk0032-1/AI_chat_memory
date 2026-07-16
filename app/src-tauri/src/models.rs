@@ -47,14 +47,21 @@ pub struct Reference {
 pub enum SearchHitField {
     Content,
     Thinking,
+    Semantic,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct SessionSearchHit {
     pub message_id: String,
     pub seq: i64,
     pub field: SearchHitField,
     pub count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub score: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chunk_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -107,7 +114,16 @@ pub struct ImportResponse {
     pub skipped: usize,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchMode {
+    Keyword,
+    Semantic,
+    #[default]
+    Hybrid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchQuery {
     pub q: Option<String>,
     pub platform: Option<String>,
@@ -115,12 +131,39 @@ pub struct SearchQuery {
     pub date_to: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+    #[serde(default)]
+    pub mode: Option<SearchMode>,
+}
+
+impl Default for SearchQuery {
+    fn default() -> Self {
+        Self {
+            q: None,
+            platform: None,
+            date_from: None,
+            date_to: None,
+            limit: None,
+            offset: None,
+            mode: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SemanticStatus {
+    Disabled,
+    Ready,
+    Indexing,
+    Unavailable,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionList {
     pub sessions: Vec<SessionSummary>,
     pub total: usize,
+    pub search_mode: SearchMode,
+    pub semantic_status: SemanticStatus,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -138,6 +181,135 @@ pub struct DesktopApiStatus {
     pub last_userscript_request_at: Option<u64>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EmbeddingBackendKind {
+    #[default]
+    Local,
+    Ollama,
+    LlamaCpp,
+    OpenaiCompatible,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LocalEmbeddingSettings {
+    #[serde(default = "default_local_model")]
+    pub model: String,
+    #[serde(default)]
+    pub model_path: Option<String>,
+}
+
+impl Default for LocalEmbeddingSettings {
+    fn default() -> Self {
+        Self {
+            model: default_local_model(),
+            model_path: None,
+        }
+    }
+}
+
+fn default_local_model() -> String {
+    "microsoft/harrier-oss-v1-270m".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RemoteEmbeddingSettings {
+    #[serde(default = "default_ollama_url")]
+    pub base_url: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default = "default_remote_model")]
+    pub model: String,
+    #[serde(default)]
+    pub dimensions: Option<usize>,
+}
+
+impl Default for RemoteEmbeddingSettings {
+    fn default() -> Self {
+        Self {
+            base_url: default_ollama_url(),
+            api_key: None,
+            model: default_remote_model(),
+            dimensions: None,
+        }
+    }
+}
+
+fn default_ollama_url() -> String {
+    "http://127.0.0.1:11434".into()
+}
+
+fn default_openai_url() -> String {
+    "http://127.0.0.1:8080/v1".into()
+}
+
+fn default_remote_model() -> String {
+    "nomic-embed-text".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SemanticSearchSettings {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub default_mode: SearchMode,
+    #[serde(default)]
+    pub backend: EmbeddingBackendKind,
+    #[serde(default)]
+    pub local: LocalEmbeddingSettings,
+    #[serde(default = "default_ollama_settings")]
+    pub ollama: RemoteEmbeddingSettings,
+    #[serde(default = "default_llama_cpp_settings")]
+    pub llama_cpp: RemoteEmbeddingSettings,
+    #[serde(default = "default_openai_settings")]
+    pub openai_compatible: RemoteEmbeddingSettings,
+}
+
+impl Default for SemanticSearchSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            default_mode: SearchMode::Hybrid,
+            backend: EmbeddingBackendKind::Local,
+            local: LocalEmbeddingSettings::default(),
+            ollama: default_ollama_settings(),
+            llama_cpp: default_llama_cpp_settings(),
+            openai_compatible: default_openai_settings(),
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_ollama_settings() -> RemoteEmbeddingSettings {
+    RemoteEmbeddingSettings {
+        base_url: default_ollama_url(),
+        api_key: None,
+        model: default_remote_model(),
+        dimensions: None,
+    }
+}
+
+fn default_llama_cpp_settings() -> RemoteEmbeddingSettings {
+    RemoteEmbeddingSettings {
+        base_url: default_openai_url(),
+        api_key: None,
+        model: "harrier-oss-v1-270m".into(),
+        dimensions: Some(640),
+    }
+}
+
+fn default_openai_settings() -> RemoteEmbeddingSettings {
+    RemoteEmbeddingSettings {
+        base_url: "https://api.openai.com/v1".into(),
+        api_key: None,
+        model: "text-embedding-3-small".into(),
+        dimensions: None,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub setup_complete: bool,
@@ -152,6 +324,8 @@ pub struct AppSettings {
     pub tray_click_behavior: TrayClickBehavior,
     #[serde(default)]
     pub theme: ThemePreference,
+    #[serde(default)]
+    pub semantic_search: SemanticSearchSettings,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -197,6 +371,30 @@ impl Default for AppSettings {
             close_behavior: CloseBehavior::Ask,
             tray_click_behavior: TrayClickBehavior::ShowMenu,
             theme: ThemePreference::System,
+            semantic_search: SemanticSearchSettings::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SemanticRuntimeStatus {
+    pub enabled: bool,
+    pub status: SemanticStatus,
+    pub backend: EmbeddingBackendKind,
+    pub model_id: String,
+    pub dimensions: Option<usize>,
+    pub pending_chunks: i64,
+    pub ready_chunks: i64,
+    pub message: Option<String>,
+    pub local_model_ready: bool,
+    pub local_model_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct EmbeddingHealth {
+    pub ok: bool,
+    pub backend: EmbeddingBackendKind,
+    pub model_id: String,
+    pub dimensions: Option<usize>,
+    pub message: String,
 }

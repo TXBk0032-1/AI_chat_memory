@@ -48,7 +48,7 @@ pub async fn count(pool: &SqlitePool, query: &SearchQuery) -> Result<i64> {
         .await?)
 }
 
-pub(super) fn summary_from_row(row: sqlx::sqlite::SqliteRow) -> SessionSummary {
+pub(crate) fn summary_from_row(row: sqlx::sqlite::SqliteRow) -> SessionSummary {
     SessionSummary {
         id: row.get("id"),
         platform: row.get("platform"),
@@ -59,3 +59,4 @@ pub(super) fn summary_from_row(row: sqlx::sqlite::SqliteRow) -> SessionSummary {
         imported_at: row.get("imported_at"),
     }
 }
+

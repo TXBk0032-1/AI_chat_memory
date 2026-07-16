@@ -2,8 +2,8 @@ mod connection;
 mod details;
 mod imports;
 mod maintenance;
-mod sessions;
-mod timestamp;
+pub mod sessions;
+pub mod timestamp;
 
 pub use connection::{connect, copy_database};
 pub use details::{get_session_branches, get_session_messages, open_session, search_session_hits};

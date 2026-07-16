@@ -592,3 +592,14 @@ html[data-theme="dark"] .export-document .mermaid-diagram { border-color: #d7ddd
   .table-head, .session-row { grid-template-columns: minmax(170px, 1fr) 92px; }
   .table-head span:last-child, .session-row time { display: none; }
 }
+
+
+.search-row { display: flex; align-items: center; gap: 8px; }
+.search-mode { height: 36px; border: 1px solid #cbd1d4; border-radius: 5px; background: #fff; color: #31373a; padding: 0 10px; }
+.semantic-settings { display: grid; gap: 12px; margin-top: 14px; }
+.semantic-settings label { display: grid; gap: 6px; color: #5c666b; font-size: 11px; }
+.semantic-settings input, .semantic-settings select { height: 34px; border: 1px solid #cbd1d4; border-radius: 4px; padding: 0 10px; color: #31373a; background: #fff; }
+.setting-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+html[data-theme="dark"] .search-mode,
+html[data-theme="dark"] .semantic-settings input,
+html[data-theme="dark"] .semantic-settings select { border-color: #4a5358; background: #20272c; color: #e7ecef; }

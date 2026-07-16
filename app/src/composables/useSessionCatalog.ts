@@ -1,5 +1,5 @@
 import { computed, ref } from 'vue'
-import { desktopApi, type DesktopApi } from '../desktop-api'
+import { desktopApi, type DesktopApi, type SearchMode, type SemanticStatus } from '../desktop-api'
 import type { SessionSummary } from '../conversation'
 
 const PAGE_SIZE = 100
@@ -25,7 +25,9 @@ export function useSessionCatalog(
   const total = ref(0)
   const page = ref(0)
   const searchElapsed = ref<number | null>(null)
-  const filtered = computed(() => Boolean(query.value || platform.value || dateFrom.value || dateTo.value))
+  const searchMode = ref<SearchMode>('hybrid')
+  const semanticStatus = ref<SemanticStatus>('disabled')
+  const filtered = computed(() => Boolean(query.value || platform.value || dateFrom.value || dateTo.value || searchMode.value !== 'hybrid'))
 
   async function loadSessions(reset = true) {
     const started = performance.now()
@@ -43,9 +45,11 @@ export function useSessionCatalog(
         date_to: epoch(dateTo.value, true),
         limit: PAGE_SIZE,
         offset: page.value * PAGE_SIZE,
+        mode: searchMode.value,
       })
       sessions.value = reset ? result.sessions : [...sessions.value, ...result.sessions]
       total.value = result.total
+      semanticStatus.value = result.semantic_status
       searchElapsed.value = committedQuery.value ? performance.now() - started : null
       if (reset) onSelectionInvalidated(new Set(result.sessions.map((session) => session.id)))
     } catch (reason) {
@@ -65,6 +69,7 @@ export function useSessionCatalog(
     platform.value = ''
     dateFrom.value = ''
     dateTo.value = ''
+    searchMode.value = 'hybrid'
     showFilters.value = false
     searchElapsed.value = null
     void loadSessions()
@@ -75,9 +80,14 @@ export function useSessionCatalog(
     void loadSessions()
   }
 
+  function setSearchMode(mode: SearchMode) {
+    searchMode.value = mode
+    void loadSessions()
+  }
+
   return {
     sessions, loading, error, query, committedQuery, platform, dateFrom, dateTo,
-    showFilters, total, searchElapsed, filtered, loadSessions, loadMore, resetFilters,
-    selectPlatform,
+    showFilters, total, searchElapsed, filtered, searchMode, semanticStatus,
+    loadSessions, loadMore, resetFilters, selectPlatform, setSearchMode,
   }
 }

@@ -1,13 +1,18 @@
+use base64::{Engine, engine::general_purpose::STANDARD};
+use serde::Deserialize;
+use tauri::{AppHandle, Manager, State};
+
 use crate::{
     models::{
-        AppSettings, BranchOverview, DesktopApiStatus, ImportResponse, Message, SearchQuery,
-        SessionList, SessionOpen, SessionSearchHit,
+        AppSettings, BranchOverview, DesktopApiStatus, EmbeddingHealth, ImportResponse, Message,
+        SearchMode, SearchQuery, SemanticRuntimeStatus, SessionList, SessionOpen, SessionSearchHit,
     },
     service::AppService,
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-use serde::Deserialize;
-use tauri::{AppHandle, Manager, State};
+
+fn message(error: impl ToString) -> String {
+    error.to_string()
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -18,22 +23,8 @@ pub enum ExportEncoding {
 
 #[derive(Debug, Deserialize)]
 pub struct ExportFilePayload {
-    encoding: ExportEncoding,
-    data: String,
-}
-
-fn message(error: crate::error::AppError) -> String {
-    match &error {
-        crate::error::AppError::InvalidData(_)
-        | crate::error::AppError::NotFound(_)
-        | crate::error::AppError::Configuration(_) => {
-            tracing::warn!(%error, "desktop command rejected");
-        }
-        _ => {
-            tracing::error!(%error, "desktop command failed");
-        }
-    }
-    error.to_string()
+    pub encoding: ExportEncoding,
+    pub data: String,
 }
 
 #[tauri::command]
@@ -43,14 +34,19 @@ pub async fn search_sessions(
 ) -> Result<SessionList, String> {
     service.list(query).await.map_err(message)
 }
+
 #[tauri::command]
 pub async fn open_session(
     service: State<'_, AppService>,
     id: String,
     anchor_seq: Option<i64>,
 ) -> Result<SessionOpen, String> {
-    service.open_session(&id, anchor_seq).await.map_err(message)
+    service
+        .open_session(&id, anchor_seq)
+        .await
+        .map_err(message)
 }
+
 #[tauri::command]
 pub async fn get_session_messages(
     service: State<'_, AppService>,
@@ -63,17 +59,20 @@ pub async fn get_session_messages(
         .await
         .map_err(message)
 }
+
 #[tauri::command]
 pub async fn search_session_hits(
     service: State<'_, AppService>,
     id: String,
     query: String,
+    mode: Option<SearchMode>,
 ) -> Result<Vec<SessionSearchHit>, String> {
     service
-        .session_search_hits(&id, &query)
+        .session_search_hits(&id, &query, mode)
         .await
         .map_err(message)
 }
+
 #[tauri::command]
 pub async fn get_session_branches(
     service: State<'_, AppService>,
@@ -81,10 +80,12 @@ pub async fn get_session_branches(
 ) -> Result<BranchOverview, String> {
     service.session_branches(&id).await.map_err(message)
 }
+
 #[tauri::command]
 pub async fn delete_session(service: State<'_, AppService>, id: String) -> Result<(), String> {
     service.delete(&id).await.map_err(message)
 }
+
 #[tauri::command]
 pub async fn import_deepseek_zip(
     service: State<'_, AppService>,
@@ -103,10 +104,12 @@ pub async fn import_deepseek_zip(
     let bytes = tokio::fs::read(path).await.map_err(|e| e.to_string())?;
     service.import_deepseek_zip(bytes).await.map_err(message)
 }
+
 #[tauri::command]
 pub async fn get_settings(service: State<'_, AppService>) -> Result<AppSettings, String> {
     Ok(service.settings().await)
 }
+
 #[tauri::command]
 pub async fn save_settings(
     app: AppHandle,
@@ -123,6 +126,7 @@ pub async fn save_settings(
     }
     Ok(settings)
 }
+
 #[tauri::command]
 pub async fn rotate_secret(service: State<'_, AppService>) -> Result<AppSettings, String> {
     service.rotate_secret().await.map_err(message)
@@ -131,6 +135,43 @@ pub async fn rotate_secret(service: State<'_, AppService>) -> Result<AppSettings
 #[tauri::command]
 pub async fn get_api_status(service: State<'_, AppService>) -> Result<DesktopApiStatus, String> {
     Ok(service.desktop_api_status().await)
+}
+
+#[tauri::command]
+pub async fn get_semantic_status(
+    service: State<'_, AppService>,
+) -> Result<SemanticRuntimeStatus, String> {
+    Ok(service.semantic_status().await)
+}
+
+#[tauri::command]
+pub async fn check_embedding_backend(
+    service: State<'_, AppService>,
+) -> Result<EmbeddingHealth, String> {
+    Ok(service.embedding_healthcheck().await)
+}
+
+#[tauri::command]
+pub async fn reindex_semantic_search(service: State<'_, AppService>) -> Result<usize, String> {
+    service.reindex_semantic().await.map_err(message)
+}
+
+#[tauri::command]
+pub async fn download_local_embedding_model(
+    service: State<'_, AppService>,
+) -> Result<(), String> {
+    service.download_local_model().await.map_err(message)
+}
+
+#[tauri::command]
+pub async fn import_local_embedding_model(
+    service: State<'_, AppService>,
+    path: String,
+) -> Result<(), String> {
+    service
+        .import_local_model(std::path::Path::new(&path))
+        .await
+        .map_err(message)
 }
 
 #[tauri::command]

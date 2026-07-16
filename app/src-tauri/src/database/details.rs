@@ -89,6 +89,9 @@ pub async fn search_session_hits(
                     seq,
                     field,
                     count,
+                    score: None,
+                    snippet: None,
+                    chunk_id: None,
                 });
             }
         }
