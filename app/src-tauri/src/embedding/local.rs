@@ -20,11 +20,11 @@ const DEFAULT_QUERY_INSTRUCTION: &str = "Instruct: Given a chat history search q
 const MODEL_FILES: [&str; 3] = ["config.json", "tokenizer.json", "model.safetensors"];
 const MAX_SEQUENCE_LEN: usize = 2048;
 /// Pull a wider pending window so we can pack similar-length chunks.
-pub const LOCAL_INDEX_CANDIDATE_LIMIT: i64 = 256;
+pub const LOCAL_INDEX_CANDIDATE_LIMIT: i64 = 512;
 /// Hard cap on items in one local embed call.
-pub const LOCAL_INDEX_MAX_BATCH_ITEMS: usize = 48;
-/// Approximate padded token budget: max_len * batch_size.
-pub const LOCAL_INDEX_TOKEN_BUDGET: usize = 8192;
+pub const LOCAL_INDEX_MAX_BATCH_ITEMS: usize = 64;
+/// Fallback padded-token budget used by tests / generic callers.
+pub const LOCAL_INDEX_TOKEN_BUDGET: usize = 16384;
 
 pub type DownloadProgressCallback = Arc<dyn Fn(ModelDownloadProgress) + Send + Sync>;
 
@@ -635,6 +635,26 @@ pub fn estimate_token_count(text: &str) -> usize {
     text.chars().count().clamp(1, MAX_SEQUENCE_LEN)
 }
 
+fn length_band(tokens: usize) -> u8 {
+    match tokens {
+        0..=96 => 0,
+        97..=192 => 1,
+        193..=320 => 2,
+        321..=512 => 3,
+        _ => 4,
+    }
+}
+
+fn token_budget_for_band(band: u8) -> usize {
+    match band {
+        0 => 12_288, // short: pack many items
+        1 => 14_336,
+        2 => 16_384,
+        3 => 16_384,
+        _ => 16_384, // long: allow larger padded batches than before
+    }
+}
+
 /// Pick a dense, similar-length subset under a padded-token budget.
 /// Returns indices into the candidate slice (stable ascending order).
 pub fn plan_local_index_batch(estimated_tokens: &[usize]) -> Vec<usize> {
@@ -649,30 +669,49 @@ pub fn plan_local_index_batch(estimated_tokens: &[usize]) -> Vec<usize> {
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by_key(|&idx| estimated_tokens[idx]);
 
+    // Restrict packing to one length band at a time so short/long never mix.
+    let mut band_ranges: Vec<(usize, usize, u8)> = Vec::new();
+    let mut range_start = 0usize;
+    let mut current_band = length_band(estimated_tokens[order[0]]);
+    for i in 1..n {
+        let band = length_band(estimated_tokens[order[i]]);
+        if band != current_band {
+            band_ranges.push((range_start, i, current_band));
+            range_start = i;
+            current_band = band;
+        }
+    }
+    band_ranges.push((range_start, n, current_band));
+
     let mut best_start = 0usize;
     let mut best_end = 1usize;
     let mut best_score = f64::NEG_INFINITY;
 
-    for start in 0..n {
-        let mut max_len = estimated_tokens[order[start]];
-        let mut sum_tokens = 0usize;
-        let max_end = (start + LOCAL_INDEX_MAX_BATCH_ITEMS).min(n);
-        for end in (start + 1)..=max_end {
-            let tokens = estimated_tokens[order[end - 1]];
-            max_len = max_len.max(tokens);
-            sum_tokens += tokens;
-            let items = end - start;
-            let padded = max_len.saturating_mul(items);
-            if padded > LOCAL_INDEX_TOKEN_BUDGET && items > 1 {
-                break;
-            }
-            // Prefer more items and lower padding; mild bias toward shorter max_len.
-            let pad_ratio = 1.0 - (sum_tokens as f64 / padded.max(1) as f64);
-            let score = (items as f64) * (1.0 - pad_ratio) / (max_len as f64).max(1.0).sqrt();
-            if score > best_score {
-                best_score = score;
-                best_start = start;
-                best_end = end;
+    for (band_start, band_end, band) in band_ranges {
+        let budget = token_budget_for_band(band);
+        for start in band_start..band_end {
+            let mut max_len = estimated_tokens[order[start]];
+            let mut sum_tokens = 0usize;
+            let max_end = (start + LOCAL_INDEX_MAX_BATCH_ITEMS).min(band_end);
+            for end in (start + 1)..=max_end {
+                let tokens = estimated_tokens[order[end - 1]];
+                max_len = max_len.max(tokens);
+                sum_tokens += tokens;
+                let items = end - start;
+                let padded = max_len.saturating_mul(items);
+                if padded > budget && items > 1 {
+                    break;
+                }
+                let pad_ratio = 1.0 - (sum_tokens as f64 / padded.max(1) as f64);
+                // Prefer fuller GPU batches: more items, low pad, good budget fill.
+                let fill = (padded as f64 / budget as f64).clamp(0.15, 1.0);
+                let score = (items as f64) * (1.0 - pad_ratio).powf(1.25) * fill
+                    / (max_len as f64).max(1.0).sqrt();
+                if score > best_score {
+                    best_score = score;
+                    best_start = start;
+                    best_end = end;
+                }
             }
         }
     }
@@ -1331,6 +1370,12 @@ mod packing_tests {
         // Should mostly pick the short cluster.
         let avg = chosen.iter().map(|&i| estimates[i]).sum::<usize>() as f64 / chosen.len() as f64;
         assert!(avg < 100.0, "avg={avg}, chosen={chosen:?}");
+        // Band isolation: no short+long mix.
+        assert!(
+            chosen.iter().all(|&i| estimates[i] < 100)
+                || chosen.iter().all(|&i| estimates[i] >= 100),
+            "mixed bands: {chosen:?}"
+        );
     }
 
     #[test]
@@ -1339,6 +1384,15 @@ mod packing_tests {
         let chosen = plan_local_index_batch(&estimates);
         let max_len = 400;
         assert!(max_len * chosen.len() <= LOCAL_INDEX_TOKEN_BUDGET || chosen.len() == 1);
-        assert!(chosen.len() >= 16);
+        // With 16k budget, medium-long texts should pack more than the old fixed 16.
+        assert!(chosen.len() >= 24, "chosen={}", chosen.len());
+    }
+
+    #[test]
+    fn plan_local_index_batch_packs_many_short_items() {
+        let estimates = vec![40usize; 80];
+        let chosen = plan_local_index_batch(&estimates);
+        assert!(chosen.len() >= 48, "chosen={}", chosen.len());
+        assert!(chosen.len() <= LOCAL_INDEX_MAX_BATCH_ITEMS);
     }
 }

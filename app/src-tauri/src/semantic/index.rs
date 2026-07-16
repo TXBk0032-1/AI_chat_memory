@@ -253,30 +253,42 @@ pub async fn mark_chunks_ready(
         return Ok(());
     }
     let total_started = std::time::Instant::now();
+
+    let prepare_started = std::time::Instant::now();
+    let prepared = items
+        .iter()
+        .map(|(chunk_id, session_id, message_id, platform, embedding)| {
+            let mut vector = embedding.clone();
+            if vector.len() < 640 {
+                vector.resize(640, 0.0);
+            } else if vector.len() > 640 {
+                vector.truncate(640);
+            }
+            let bytes = f32_slice_as_bytes(&vector);
+            (*chunk_id, *session_id, *message_id, *platform, bytes)
+        })
+        .collect::<Vec<_>>();
+    let prepare_ms = prepare_started.elapsed().as_millis();
+
     let mut tx = pool.begin().await?;
     let now = chrono::Utc::now().to_rfc3339();
-    let mut prepare_ms = 0u128;
-    let mut delete_ms = 0u128;
+
+    // One IN-delete is much cheaper than per-row DELETEs on vec0.
+    let delete_started = std::time::Instant::now();
+    let mut delete_sql = String::from("DELETE FROM embedding_vec WHERE chunk_id IN (");
+    for (i, (chunk_id, _, _, _, _)) in prepared.iter().enumerate() {
+        if i > 0 {
+            delete_sql.push(',');
+        }
+        delete_sql.push_str(&chunk_id.to_string());
+    }
+    delete_sql.push(')');
+    let _ = sqlx::query(&delete_sql).execute(&mut *tx).await;
+    let delete_ms = delete_started.elapsed().as_millis();
+
     let mut insert_ms = 0u128;
     let mut update_ms = 0u128;
-    for (chunk_id, session_id, message_id, platform, embedding) in items {
-        let prepare_started = std::time::Instant::now();
-        let mut vector = embedding.clone();
-        if vector.len() < 640 {
-            vector.resize(640, 0.0);
-        } else if vector.len() > 640 {
-            vector.truncate(640);
-        }
-        let bytes = f32_slice_as_bytes(&vector);
-        prepare_ms += prepare_started.elapsed().as_millis();
-
-        let delete_started = std::time::Instant::now();
-        let _ = sqlx::query("DELETE FROM embedding_vec WHERE chunk_id = ?")
-            .bind(chunk_id)
-            .execute(&mut *tx)
-            .await;
-        delete_ms += delete_started.elapsed().as_millis();
-
+    for (chunk_id, session_id, message_id, platform, bytes) in &prepared {
         let insert_started = std::time::Instant::now();
         sqlx::query(
             "INSERT INTO embedding_vec(chunk_id, embedding, session_id, message_id, platform) VALUES (?, ?, ?, ?, ?)",
