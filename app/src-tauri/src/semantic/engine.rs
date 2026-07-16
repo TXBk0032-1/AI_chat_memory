@@ -541,14 +541,47 @@ impl SemanticEngine {
             }
             let identity = manager.identity();
             let backend = manager.active();
-            let batch_size =
-                if matches!(identity.backend, crate::models::EmbeddingBackendKind::Local) {
-                    crate::embedding::local::LOCAL_INDEX_BATCH_SIZE
-                } else {
-                    16
-                };
-            let pending = index::fetch_pending_chunks(&self.pool, &identity, batch_size).await?;
+            let is_local = matches!(identity.backend, crate::models::EmbeddingBackendKind::Local);
+            let fetch_limit = if is_local {
+                crate::embedding::local::LOCAL_INDEX_CANDIDATE_LIMIT
+            } else {
+                16
+            };
+            let candidates =
+                index::fetch_pending_chunks(&self.pool, &identity, fetch_limit).await?;
             drop(manager);
+            if candidates.is_empty() {
+                break;
+            }
+            let pending = if is_local {
+                let estimates = candidates
+                    .iter()
+                    .map(|item| crate::embedding::local::estimate_token_count(&item.text))
+                    .collect::<Vec<_>>();
+                let chosen = crate::embedding::local::plan_local_index_batch(&estimates);
+                let est_tokens: usize = chosen.iter().map(|&i| estimates[i]).sum();
+                let est_max = chosen.iter().map(|&i| estimates[i]).max().unwrap_or(0);
+                let est_pad = if chosen.is_empty() || est_max == 0 {
+                    0.0
+                } else {
+                    1.0 - (est_tokens as f64 / (chosen.len() as f64 * est_max as f64))
+                };
+                tracing::info!(
+                    candidates = candidates.len(),
+                    chosen = chosen.len(),
+                    est_tokens,
+                    est_max_len = est_max,
+                    est_pad_ratio = est_pad,
+                    token_budget = crate::embedding::local::LOCAL_INDEX_TOKEN_BUDGET,
+                    "local index batch planned"
+                );
+                chosen
+                    .into_iter()
+                    .map(|idx| candidates[idx].clone())
+                    .collect::<Vec<_>>()
+            } else {
+                candidates
+            };
             if pending.is_empty() {
                 break;
             }

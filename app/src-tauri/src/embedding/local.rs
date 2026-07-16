@@ -19,7 +19,12 @@ use crate::{
 const DEFAULT_QUERY_INSTRUCTION: &str = "Instruct: Given a chat history search query, retrieve relevant conversation passages that answer the query\nQuery: ";
 const MODEL_FILES: [&str; 3] = ["config.json", "tokenizer.json", "model.safetensors"];
 const MAX_SEQUENCE_LEN: usize = 2048;
-pub const LOCAL_INDEX_BATCH_SIZE: i64 = 16;
+/// Pull a wider pending window so we can pack similar-length chunks.
+pub const LOCAL_INDEX_CANDIDATE_LIMIT: i64 = 256;
+/// Hard cap on items in one local embed call.
+pub const LOCAL_INDEX_MAX_BATCH_ITEMS: usize = 48;
+/// Approximate padded token budget: max_len * batch_size.
+pub const LOCAL_INDEX_TOKEN_BUDGET: usize = 8192;
 
 pub type DownloadProgressCallback = Arc<dyn Fn(ModelDownloadProgress) + Send + Sync>;
 
@@ -622,6 +627,59 @@ fn warmup_model(loaded: &mut LoadedModel) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Cheap token estimate for batch packing.
+/// Chat archives are Chinese-heavy, so char count is a stable upper-ish proxy.
+pub fn estimate_token_count(text: &str) -> usize {
+    text.chars().count().clamp(1, MAX_SEQUENCE_LEN)
+}
+
+/// Pick a dense, similar-length subset under a padded-token budget.
+/// Returns indices into the candidate slice (stable ascending order).
+pub fn plan_local_index_batch(estimated_tokens: &[usize]) -> Vec<usize> {
+    let n = estimated_tokens.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    if n == 1 {
+        return vec![0];
+    }
+
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&idx| estimated_tokens[idx]);
+
+    let mut best_start = 0usize;
+    let mut best_end = 1usize;
+    let mut best_score = f64::NEG_INFINITY;
+
+    for start in 0..n {
+        let mut max_len = estimated_tokens[order[start]];
+        let mut sum_tokens = 0usize;
+        let max_end = (start + LOCAL_INDEX_MAX_BATCH_ITEMS).min(n);
+        for end in (start + 1)..=max_end {
+            let tokens = estimated_tokens[order[end - 1]];
+            max_len = max_len.max(tokens);
+            sum_tokens += tokens;
+            let items = end - start;
+            let padded = max_len.saturating_mul(items);
+            if padded > LOCAL_INDEX_TOKEN_BUDGET && items > 1 {
+                break;
+            }
+            // Prefer more items and lower padding; mild bias toward shorter max_len.
+            let pad_ratio = 1.0 - (sum_tokens as f64 / padded.max(1) as f64);
+            let score = (items as f64) * (1.0 - pad_ratio) / (max_len as f64).max(1.0).sqrt();
+            if score > best_score {
+                best_score = score;
+                best_start = start;
+                best_end = end;
+            }
+        }
+    }
+
+    let mut chosen: Vec<usize> = order[best_start..best_end].to_vec();
+    chosen.sort_unstable();
+    chosen
 }
 
 fn embed_batch(
@@ -1243,5 +1301,44 @@ mod tests {
                 "expected CUDA runtime after driver upgrade, got {device}/{dtype}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod packing_tests {
+    use super::{
+        LOCAL_INDEX_MAX_BATCH_ITEMS, LOCAL_INDEX_TOKEN_BUDGET, estimate_token_count,
+        plan_local_index_batch,
+    };
+
+    #[test]
+    fn estimate_token_count_clamps() {
+        assert_eq!(estimate_token_count(""), 1);
+        assert_eq!(estimate_token_count("你好世界"), 4);
+        assert!(estimate_token_count(&"a".repeat(10_000)) <= 2048);
+    }
+
+    #[test]
+    fn plan_local_index_batch_prefers_similar_lengths() {
+        // Mix very short and long so packing should avoid the long outliers first.
+        let estimates = vec![20, 22, 21, 500, 18, 19, 23, 510, 17];
+        let chosen = plan_local_index_batch(&estimates);
+        assert!(!chosen.is_empty());
+        assert!(chosen.len() <= LOCAL_INDEX_MAX_BATCH_ITEMS);
+        let max_len = chosen.iter().map(|&i| estimates[i]).max().unwrap();
+        let padded = max_len * chosen.len();
+        assert!(padded <= LOCAL_INDEX_TOKEN_BUDGET || chosen.len() == 1);
+        // Should mostly pick the short cluster.
+        let avg = chosen.iter().map(|&i| estimates[i]).sum::<usize>() as f64 / chosen.len() as f64;
+        assert!(avg < 100.0, "avg={avg}, chosen={chosen:?}");
+    }
+
+    #[test]
+    fn plan_local_index_batch_respects_budget() {
+        let estimates = vec![400usize; 64];
+        let chosen = plan_local_index_batch(&estimates);
+        let max_len = 400;
+        assert!(max_len * chosen.len() <= LOCAL_INDEX_TOKEN_BUDGET || chosen.len() == 1);
+        assert!(chosen.len() >= 16);
     }
 }
