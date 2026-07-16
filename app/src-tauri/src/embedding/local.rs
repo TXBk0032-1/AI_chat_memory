@@ -649,12 +649,15 @@ fn length_band(tokens: usize) -> u8 {
 /// attention cost grows roughly with max_len^2.
 /// Returns (token_budget, max_items, preferred_min_items).
 fn band_limits(band: u8) -> (usize, usize, usize) {
+    // Small V5.1 nudge after V5 win:
+    // - short: slightly easier to trigger preferential packing
+    // - mid/long: a bit more room without returning to V2 over-pack
     match band {
-        0 => (12_288, 64, 24), // short: force large packs when available
-        1 => (11_264, 40, 16),
-        2 => (9_216, 24, 8),
-        3 => (8_192, 16, 4),
-        _ => (7_168, 10, 1), // long: restrained
+        0 => (12_288, 64, 16), // short: prefer min 16 (was 24)
+        1 => (11_776, 40, 12),
+        2 => (10_240, 24, 8),
+        3 => (9_216, 18, 6), // medium-long: allow ~18
+        _ => (8_192, 12, 1), // long: 10 -> 12, budget 7k -> 8k
     }
 }
 
@@ -1483,16 +1486,16 @@ mod packing_tests {
     fn plan_local_index_batch_restrains_medium_long_items() {
         let estimates = vec![400usize; 64];
         let chosen = plan_local_index_batch(&estimates);
-        assert!((12..=16).contains(&chosen.len()), "chosen={}", chosen.len());
-        assert!(400 * chosen.len() <= 8192 || chosen.len() == 1);
+        assert!((12..=18).contains(&chosen.len()), "chosen={}", chosen.len());
+        assert!(400 * chosen.len() <= 9216 || chosen.len() == 1);
     }
 
     #[test]
     fn plan_local_index_batch_restrains_long_items() {
         let estimates = vec![600usize; 40];
         let chosen = plan_local_index_batch(&estimates);
-        assert!((8..=10).contains(&chosen.len()), "chosen={}", chosen.len());
-        assert!(600 * chosen.len() <= 7168 || chosen.len() == 1);
+        assert!((8..=12).contains(&chosen.len()), "chosen={}", chosen.len());
+        assert!(600 * chosen.len() <= 8192 || chosen.len() == 1);
     }
 
     #[test]
@@ -1510,7 +1513,7 @@ mod packing_tests {
         estimates.extend(std::iter::repeat_n(600usize, 20));
         let chosen = plan_local_index_batch(&estimates);
         assert!(
-            chosen.len() >= 24,
+            chosen.len() >= 16,
             "expected short-first large pack, chosen={}",
             chosen.len()
         );
