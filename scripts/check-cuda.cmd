@@ -7,7 +7,7 @@ if errorlevel 1 (
 )
 set "CUDA_PATH=C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3"
 set "CUDA_HOME=%CUDA_PATH%"
-set "PATH=%CUDA_PATH%\bin;%PATH%"
+set "PATH=%CUDA_PATH%\bin\x64;%CUDA_PATH%\bin;%PATH%"
 set "NVCC_CCBIN=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64"
 rem CUDA 13.x + MSVC needs the conforming preprocessor for CCCL headers.
 set "NVCC_APPEND_FLAGS=-Xcompiler=/Zc:preprocessor"
