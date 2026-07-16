@@ -43,6 +43,37 @@ impl SemanticEngine {
         self.wake.notify_one();
     }
 
+    pub fn warm_local_model_in_background(self: &Arc<Self>) {
+        let engine = Arc::clone(self);
+        tauri::async_runtime::spawn(async move {
+            // Let the window paint and first keyword listing finish first.
+            tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+            let manager = engine.embeddings.read().await;
+            if !matches!(
+                manager.settings().backend,
+                crate::models::EmbeddingBackendKind::Local
+            ) {
+                return;
+            }
+            if manager.is_ready() {
+                engine.wake.notify_one();
+                return;
+            }
+            let backend = manager.active();
+            drop(manager);
+            // Trigger lazy load via a tiny document encode when files already exist.
+            match backend.embed_documents(&["warmup".into()]).await {
+                Ok(_) => {
+                    tracing::info!("local embedding model warmed in background");
+                    engine.wake.notify_one();
+                }
+                Err(error) => {
+                    tracing::debug!(%error, "background embedding warm-up skipped");
+                }
+            }
+        });
+    }
+
     pub async fn reload_embeddings(
         &self,
         settings: crate::models::SemanticSearchSettings,
@@ -151,18 +182,27 @@ impl SemanticEngine {
             .clone()
             .unwrap_or_else(|| settings.default_mode.clone());
         let runtime = self.runtime_status().await;
+        let backend_ready = self.embeddings.read().await.is_ready();
         let semantic_available = settings.enabled
+            && backend_ready
             && !matches!(
                 runtime.status,
                 SemanticStatus::Disabled | SemanticStatus::Unavailable
             )
             && runtime.ready_chunks > 0;
 
-        let mut effective_mode = match requested {
-            SearchMode::Keyword => SearchMode::Keyword,
-            SearchMode::Semantic if semantic_available => SearchMode::Semantic,
-            SearchMode::Hybrid if semantic_available => SearchMode::Hybrid,
-            SearchMode::Semantic | SearchMode::Hybrid => SearchMode::Keyword,
+        // Empty listing is pure keyword work; do not wait for local model warm-up.
+        let listing_only = query.q.as_deref().map(str::trim).unwrap_or("").is_empty();
+
+        let mut effective_mode = if listing_only {
+            SearchMode::Keyword
+        } else {
+            match requested {
+                SearchMode::Keyword => SearchMode::Keyword,
+                SearchMode::Semantic if semantic_available => SearchMode::Semantic,
+                SearchMode::Hybrid if semantic_available => SearchMode::Hybrid,
+                SearchMode::Semantic | SearchMode::Hybrid => SearchMode::Keyword,
+            }
         };
 
         let limit = query.limit.unwrap_or(500).clamp(1, 1000);
@@ -210,9 +250,6 @@ impl SemanticEngine {
                         Vec::new()
                     }
                 };
-                if semantic.is_empty() && matches!(effective_mode, SearchMode::Hybrid) {
-                    // still hybrid with keyword-only ranks is fine
-                }
                 let merged = index::reciprocal_rank_fusion(&keyword, &semantic, 60.0);
                 let total = merged.len();
                 let page_ids = merged
@@ -282,6 +319,10 @@ impl SemanticEngine {
         if !manager.settings().enabled {
             return Ok(None);
         }
+        // Avoid blocking the first UI search while the 500MB local model is still loading.
+        if !manager.is_ready() {
+            return Ok(None);
+        }
         let backend = manager.active();
         match backend.embed_queries(&[query.to_owned()]).await {
             Ok(mut vectors) => Ok(vectors.pop()),
@@ -321,6 +362,16 @@ impl SemanticEngine {
         loop {
             let manager = self.embeddings.read().await;
             if !manager.settings().enabled {
+                break;
+            }
+            // While the local model is still warming, leave pending chunks alone so
+            // UI-facing requests keep the async runtime free.
+            if !manager.is_ready()
+                && matches!(
+                    manager.settings().backend,
+                    crate::models::EmbeddingBackendKind::Local
+                )
+            {
                 break;
             }
             let identity = manager.identity();

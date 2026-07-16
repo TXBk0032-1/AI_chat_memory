@@ -45,7 +45,9 @@ pub async fn connect(path: &Path) -> Result<SqlitePool> {
         .connect_with(options)
         .await?;
     initialize_schema(&pool).await?;
-    normalize_stored_timestamps(&pool).await?;
+    // Full-table timestamp rewrites are expensive on large archives; only do them
+    // once for small/fresh databases so startup stays interactive.
+    maybe_normalize_stored_timestamps(&pool).await?;
     Ok(pool)
 }
 
@@ -103,6 +105,23 @@ async fn initialize_schema(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
     Ok(())
+}
+
+async fn maybe_normalize_stored_timestamps(pool: &SqlitePool) -> Result<()> {
+    let message_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages")
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+    // Existing large installs already went through the one-time rewrite; skip the
+    // multi-second full-table scan on every launch.
+    if message_count > 2_000 {
+        tracing::info!(
+            message_count,
+            "skipping startup timestamp normalize for large database"
+        );
+        return Ok(());
+    }
+    normalize_stored_timestamps(pool).await
 }
 
 pub(super) async fn normalize_stored_timestamps(pool: &SqlitePool) -> Result<()> {

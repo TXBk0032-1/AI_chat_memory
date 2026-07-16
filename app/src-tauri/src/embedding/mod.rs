@@ -26,6 +26,10 @@ pub struct BackendIdentity {
 #[async_trait]
 pub trait EmbeddingBackend: Send + Sync {
     fn identity(&self) -> BackendIdentity;
+    /// True when the backend can answer embedding requests without a heavy first-load stall.
+    fn is_ready(&self) -> bool {
+        true
+    }
     async fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
     async fn embed_queries(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
     async fn healthcheck(&self) -> Result<EmbeddingHealth>;
@@ -56,6 +60,10 @@ impl EmbeddingManager {
 
     pub fn active(&self) -> Arc<dyn EmbeddingBackend> {
         self.active.clone()
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.active.is_ready()
     }
 
     pub fn identity(&self) -> BackendIdentity {

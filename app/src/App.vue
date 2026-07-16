@@ -741,16 +741,20 @@ onMounted(async () => {
   window.addEventListener('keydown', handleContextMenuKey)
   document.addEventListener('click', preventRapidControlClick, true)
   document.addEventListener('scroll', hideContextMenu, true)
+  // Kick off the first session list immediately so the shell is never empty while
+  // settings / API status catch up in parallel.
+  const sessionsReady = loadSessions()
+  const settingsReady = desktopApi.getSettings().then((value) => {
+    settings.value = value
+    searchMode.value = value.semantic_search?.default_mode || 'hybrid'
+    commitTheme(value.theme, false)
+  })
   unlistenCloseRequest = await listen('close-behavior-requested', () => {
     pendingCloseBehavior.value = null
     showClosePrompt.value = true
   })
-  settings.value = await desktopApi.getSettings()
-  searchMode.value = settings.value.semantic_search?.default_mode || 'hybrid'
-  commitTheme(settings.value.theme, false)
-  await refreshApiStatus()
+  await Promise.allSettled([settingsReady, refreshApiStatus(), sessionsReady])
   statusTimer = window.setInterval(refreshApiStatus, 3000)
-  await loadSessions()
 })
 watch([messageSlots, expandedThinking, detailMode], () => { void renderMermaidDiagrams() }, { flush: 'post' })
 watch(committedQuery, () => {

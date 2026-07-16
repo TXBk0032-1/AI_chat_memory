@@ -39,6 +39,8 @@ impl AppService {
                 .await?;
         let semantic = Arc::new(SemanticEngine::new(pool.clone(), data_dir, embeddings));
         semantic.start_worker();
+        // Warm the local model off the startup path so the first window paint stays snappy.
+        semantic.warm_local_model_in_background();
         Ok(Self {
             pool,
             settings,

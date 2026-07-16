@@ -58,6 +58,7 @@ pub fn run() {
             let working_dir = std::env::current_dir().ok();
             let settings_path = data_dir.join("settings.json");
             let service = tauri::async_runtime::block_on(async {
+                let started = std::time::Instant::now();
                 let settings = Arc::new(SettingsStore::load(settings_path).await?);
                 let settings_value = settings.get().await;
                 let configured_dir = settings_value
@@ -74,8 +75,17 @@ pub fn run() {
                 tokio::fs::create_dir_all(&database_dir).await?;
                 let database_path = database_dir.join("chat_memory.db");
                 let pool = database::connect(&database_path).await?;
-                tracing::info!(path=%database_path.display(), "application database ready");
-                AppService::new(pool, settings, database_dir).await
+                tracing::info!(
+                    path=%database_path.display(),
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "application database ready"
+                );
+                let service = AppService::new(pool, settings, database_dir).await?;
+                tracing::info!(
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "application service ready"
+                );
+                Ok::<_, crate::error::AppError>(service)
             })?;
             app.manage(service.clone());
             let http_service = service.clone();

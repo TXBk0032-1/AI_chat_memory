@@ -22,7 +22,10 @@ pub struct LocalHarrierBackend {
     model_id: String,
     model_dir: PathBuf,
     dimensions: usize,
-    state: Mutex<Option<LoadedModel>>,
+    /// Serialize first-time weight loading across warm-up / indexer / query.
+    load_gate: Mutex<()>,
+    /// CPU-bound model state is guarded by a std mutex so inference can run in spawn_blocking.
+    state: Arc<std::sync::Mutex<Option<LoadedModel>>>,
 }
 
 struct LoadedModel {
@@ -36,16 +39,21 @@ impl LocalHarrierBackend {
         tokio::fs::create_dir_all(&model_dir)
             .await
             .map_err(|error| AppError::Configuration(error.to_string()))?;
-        let backend = Self {
+        // Keep startup cheap: only validate directory here and load weights on first use.
+        Ok(Self {
             model_id,
             model_dir,
             dimensions: 640,
-            state: Mutex::new(None),
-        };
-        if model_files_present(&backend.model_dir) {
-            backend.ensure_loaded().await?;
-        }
-        Ok(backend)
+            load_gate: Mutex::new(()),
+            state: Arc::new(std::sync::Mutex::new(None)),
+        })
+    }
+
+    pub fn is_loaded(&self) -> bool {
+        self.state
+            .lock()
+            .map(|guard| guard.is_some())
+            .unwrap_or(false)
     }
 
     pub fn model_dir(&self) -> &Path {
@@ -97,14 +105,19 @@ impl LocalHarrierBackend {
             tokio::fs::create_dir_all(&dest_dir).await.ok();
             let _ = tokio::fs::copy(pooling, dest_dir.join("config.json")).await;
         }
-        *self.state.lock().await = None;
+        if let Ok(mut guard) = self.state.lock() {
+            *guard = None;
+        }
         self.ensure_loaded().await?;
         Ok(())
     }
 
     async fn ensure_loaded(&self) -> Result<()> {
-        let mut guard = self.state.lock().await;
-        if guard.is_some() {
+        if self.is_loaded() {
+            return Ok(());
+        }
+        let _gate = self.load_gate.lock().await;
+        if self.is_loaded() {
             return Ok(());
         }
         if !model_files_present(&self.model_dir) {
@@ -112,8 +125,18 @@ impl LocalHarrierBackend {
                 "本地 embedding 模型尚未准备好，请先下载或导入模型".into(),
             ));
         }
-        let loaded = load_model(&self.model_dir)?;
-        *guard = Some(loaded);
+        let model_dir = self.model_dir.clone();
+        let loaded = tokio::task::spawn_blocking(move || load_model(&model_dir))
+            .await
+            .map_err(|error| AppError::Configuration(format!("加载本地模型任务失败: {error}")))?
+            .map_err(|error| AppError::Configuration(error.to_string()))?;
+        let mut guard = self
+            .state
+            .lock()
+            .map_err(|_| AppError::Configuration("local model state lock poisoned".into()))?;
+        if guard.is_none() {
+            *guard = Some(loaded);
+        }
         Ok(())
     }
 
@@ -122,45 +145,57 @@ impl LocalHarrierBackend {
             return Ok(Vec::new());
         }
         self.ensure_loaded().await?;
-        let mut guard = self.state.lock().await;
-        let loaded = guard
-            .as_mut()
-            .ok_or_else(|| AppError::Configuration("local model not loaded".into()))?;
-        let mut vectors = Vec::with_capacity(texts.len());
-        for text in texts {
-            let prepared = if is_query {
-                format!("{DEFAULT_QUERY_INSTRUCTION}{text}")
-            } else {
-                text.clone()
-            };
-            let encoding = loaded
-                .tokenizer
-                .encode(prepared, true)
-                .map_err(|error| AppError::Configuration(error.to_string()))?;
-            let ids = encoding.get_ids();
-            if ids.is_empty() {
-                return Err(AppError::Configuration(
-                    "tokenizer produced empty input".into(),
-                ));
+        let state = Arc::clone(&self.state);
+        let texts = texts.to_vec();
+        let dimensions = self.dimensions;
+        let vectors = tokio::task::spawn_blocking(move || {
+            let mut guard = state
+                .lock()
+                .map_err(|_| AppError::Configuration("local model state lock poisoned".into()))?;
+            let loaded = guard
+                .as_mut()
+                .ok_or_else(|| AppError::Configuration("local model not loaded".into()))?;
+            let mut vectors = Vec::with_capacity(texts.len());
+            for text in texts {
+                let prepared = if is_query {
+                    format!("{DEFAULT_QUERY_INSTRUCTION}{text}")
+                } else {
+                    text
+                };
+                let encoding = loaded
+                    .tokenizer
+                    .encode(prepared, true)
+                    .map_err(|error| AppError::Configuration(error.to_string()))?;
+                let ids = encoding.get_ids();
+                if ids.is_empty() {
+                    return Err(AppError::Configuration(
+                        "tokenizer produced empty input".into(),
+                    ));
+                }
+                let ids = if ids.len() > 2048 { &ids[..2048] } else { ids };
+                let input = Tensor::new(ids, &loaded.device)
+                    .map_err(candle_err)?
+                    .unsqueeze(0)
+                    .map_err(candle_err)?;
+                let embedding = loaded
+                    .model
+                    .embed(&input)
+                    .map_err(candle_err)?
+                    .squeeze(0)
+                    .map_err(candle_err)?
+                    .to_dtype(DType::F32)
+                    .map_err(candle_err)?
+                    .to_vec1::<f32>()
+                    .map_err(candle_err)?;
+                vectors.push(embedding);
             }
-            let ids = if ids.len() > 2048 { &ids[..2048] } else { ids };
-            let input = Tensor::new(ids, &loaded.device)
-                .map_err(candle_err)?
-                .unsqueeze(0)
-                .map_err(candle_err)?;
-            let embedding = loaded
-                .model
-                .embed(&input)
-                .map_err(candle_err)?
-                .squeeze(0)
-                .map_err(candle_err)?
-                .to_dtype(DType::F32)
-                .map_err(candle_err)?
-                .to_vec1::<f32>()
-                .map_err(candle_err)?;
-            vectors.push(embedding);
-        }
-        ensure_dimensions(&vectors, self.dimensions)?;
+            ensure_dimensions(&vectors, dimensions)?;
+            Ok(vectors)
+        })
+        .await
+        .map_err(|error| {
+            AppError::Configuration(format!("本地 embedding 推理任务失败: {error}"))
+        })??;
         Ok(vectors)
     }
 }
@@ -185,6 +220,7 @@ impl EmbeddingBackend for LocalHarrierBackend {
     }
 
     async fn healthcheck(&self) -> Result<EmbeddingHealth> {
+        // Avoid loading the 500MB+ model during startup/status polls.
         if !model_files_present(&self.model_dir) {
             return Ok(EmbeddingHealth {
                 ok: false,
@@ -194,22 +230,21 @@ impl EmbeddingBackend for LocalHarrierBackend {
                 message: "本地模型未下载或未导入".into(),
             });
         }
-        match self.embed_queries(&["healthcheck".into()]).await {
-            Ok(vectors) => Ok(EmbeddingHealth {
-                ok: !vectors.is_empty(),
-                backend: EmbeddingBackendKind::Local,
-                model_id: self.model_id.clone(),
-                dimensions: vectors.first().map(Vec::len),
-                message: "ok".into(),
-            }),
-            Err(error) => Ok(EmbeddingHealth {
-                ok: false,
-                backend: EmbeddingBackendKind::Local,
-                model_id: self.model_id.clone(),
-                dimensions: Some(self.dimensions),
-                message: error.to_string(),
-            }),
-        }
+        Ok(EmbeddingHealth {
+            ok: true,
+            backend: EmbeddingBackendKind::Local,
+            model_id: self.model_id.clone(),
+            dimensions: Some(self.dimensions),
+            message: if self.is_loaded() {
+                "本地模型已加载".into()
+            } else {
+                "本地模型文件已就绪".into()
+            },
+        })
+    }
+
+    fn is_ready(&self) -> bool {
+        self.is_loaded()
     }
 }
 
