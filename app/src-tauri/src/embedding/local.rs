@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use candle_core::{D, DType, Device, IndexOp, Module, Tensor};
 use candle_nn::{Activation, Embedding, Linear, VarBuilder, linear_b as linear, ops::softmax};
 use hf_hub::api::tokio::{ApiBuilder, Progress};
+use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokenizers::Tokenizer;
@@ -15,6 +16,7 @@ use crate::{
 
 const DEFAULT_QUERY_INSTRUCTION: &str = "Instruct: Given a chat history search query, retrieve relevant conversation passages that answer the query\nQuery: ";
 const MODEL_FILES: [&str; 3] = ["config.json", "tokenizer.json", "model.safetensors"];
+const MAX_SEQUENCE_LEN: usize = 2048;
 
 pub type DownloadProgressCallback = Arc<dyn Fn(ModelDownloadProgress) + Send + Sync>;
 
@@ -24,11 +26,12 @@ pub struct LocalHarrierBackend {
     dimensions: usize,
     /// Serialize first-time weight loading across warm-up / indexer / query.
     load_gate: Mutex<()>,
-    /// CPU-bound model state is guarded by a std mutex so inference can run in spawn_blocking.
-    state: Arc<std::sync::Mutex<Option<LoadedModel>>>,
+    /// Multiple CPU model replicas for parallel embedding workers.
+    replicas: Arc<std::sync::Mutex<Vec<ModelReplica>>>,
+    worker_count: usize,
 }
 
-struct LoadedModel {
+struct ModelReplica {
     tokenizer: Tokenizer,
     model: HarrierModel,
     device: Device,
@@ -45,14 +48,15 @@ impl LocalHarrierBackend {
             model_dir,
             dimensions: 640,
             load_gate: Mutex::new(()),
-            state: Arc::new(std::sync::Mutex::new(None)),
+            replicas: Arc::new(std::sync::Mutex::new(Vec::new())),
+            worker_count: recommended_worker_count(),
         })
     }
 
     pub fn is_loaded(&self) -> bool {
-        self.state
+        self.replicas
             .lock()
-            .map(|guard| guard.is_some())
+            .map(|guard| !guard.is_empty())
             .unwrap_or(false)
     }
 
@@ -105,8 +109,8 @@ impl LocalHarrierBackend {
             tokio::fs::create_dir_all(&dest_dir).await.ok();
             let _ = tokio::fs::copy(pooling, dest_dir.join("config.json")).await;
         }
-        if let Ok(mut guard) = self.state.lock() {
-            *guard = None;
+        if let Ok(mut guard) = self.replicas.lock() {
+            guard.clear();
         }
         self.ensure_loaded().await?;
         Ok(())
@@ -126,16 +130,18 @@ impl LocalHarrierBackend {
             ));
         }
         let model_dir = self.model_dir.clone();
-        let loaded = tokio::task::spawn_blocking(move || load_model(&model_dir))
+        let worker_count = self.worker_count;
+        let replicas = tokio::task::spawn_blocking(move || load_replicas(&model_dir, worker_count))
             .await
             .map_err(|error| AppError::Configuration(format!("加载本地模型任务失败: {error}")))?
             .map_err(|error| AppError::Configuration(error.to_string()))?;
         let mut guard = self
-            .state
+            .replicas
             .lock()
             .map_err(|_| AppError::Configuration("local model state lock poisoned".into()))?;
-        if guard.is_none() {
-            *guard = Some(loaded);
+        if guard.is_empty() {
+            *guard = replicas;
+            tracing::info!(workers = worker_count, "local embedding CPU workers ready");
         }
         Ok(())
     }
@@ -145,52 +151,12 @@ impl LocalHarrierBackend {
             return Ok(Vec::new());
         }
         self.ensure_loaded().await?;
-        let state = Arc::clone(&self.state);
+        let replicas = Arc::clone(&self.replicas);
         let texts = texts.to_vec();
         let dimensions = self.dimensions;
+        let worker_count = self.worker_count;
         let vectors = tokio::task::spawn_blocking(move || {
-            let mut guard = state
-                .lock()
-                .map_err(|_| AppError::Configuration("local model state lock poisoned".into()))?;
-            let loaded = guard
-                .as_mut()
-                .ok_or_else(|| AppError::Configuration("local model not loaded".into()))?;
-            let mut vectors = Vec::with_capacity(texts.len());
-            for text in texts {
-                let prepared = if is_query {
-                    format!("{DEFAULT_QUERY_INSTRUCTION}{text}")
-                } else {
-                    text
-                };
-                let encoding = loaded
-                    .tokenizer
-                    .encode(prepared, true)
-                    .map_err(|error| AppError::Configuration(error.to_string()))?;
-                let ids = encoding.get_ids();
-                if ids.is_empty() {
-                    return Err(AppError::Configuration(
-                        "tokenizer produced empty input".into(),
-                    ));
-                }
-                let ids = if ids.len() > 2048 { &ids[..2048] } else { ids };
-                let input = Tensor::new(ids, &loaded.device)
-                    .map_err(candle_err)?
-                    .unsqueeze(0)
-                    .map_err(candle_err)?;
-                let embedding = loaded
-                    .model
-                    .embed(&input)
-                    .map_err(candle_err)?
-                    .squeeze(0)
-                    .map_err(candle_err)?
-                    .to_dtype(DType::F32)
-                    .map_err(candle_err)?
-                    .to_vec1::<f32>()
-                    .map_err(candle_err)?;
-                vectors.push(embedding);
-            }
-            ensure_dimensions(&vectors, dimensions)?;
-            Ok(vectors)
+            embed_with_replicas(replicas, texts, is_query, dimensions, worker_count)
         })
         .await
         .map_err(|error| {
@@ -431,7 +397,27 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-fn load_model(model_dir: &Path) -> Result<LoadedModel> {
+fn recommended_worker_count() -> usize {
+    std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(4)
+        .clamp(2, 6)
+}
+
+fn load_replicas(model_dir: &Path, worker_count: usize) -> Result<Vec<ModelReplica>> {
+    let mut replicas = Vec::with_capacity(worker_count);
+    for index in 0..worker_count {
+        replicas.push(load_model(model_dir)?);
+        tracing::debug!(
+            worker = index + 1,
+            workers = worker_count,
+            "local embedding replica loaded"
+        );
+    }
+    Ok(replicas)
+}
+
+fn load_model(model_dir: &Path) -> Result<ModelReplica> {
     let device = Device::Cpu;
     let dtype = DType::F32;
     let config_text = std::fs::read_to_string(model_dir.join("config.json"))
@@ -445,11 +431,125 @@ fn load_model(model_dir: &Path) -> Result<LoadedModel> {
             .map_err(candle_err)?
     };
     let model = HarrierModel::load(&config, vb).map_err(candle_err)?;
-    Ok(LoadedModel {
+    Ok(ModelReplica {
         tokenizer,
         model,
         device,
     })
+}
+
+fn take_replica(replicas: &std::sync::Mutex<Vec<ModelReplica>>) -> Result<ModelReplica> {
+    let mut guard = replicas
+        .lock()
+        .map_err(|_| AppError::Configuration("local model state lock poisoned".into()))?;
+    guard
+        .pop()
+        .ok_or_else(|| AppError::Configuration("no free local embedding worker".into()))
+}
+
+fn return_replica(
+    replicas: &std::sync::Mutex<Vec<ModelReplica>>,
+    replica: ModelReplica,
+) -> Result<()> {
+    let mut guard = replicas
+        .lock()
+        .map_err(|_| AppError::Configuration("local model state lock poisoned".into()))?;
+    guard.push(replica);
+    Ok(())
+}
+
+fn embed_with_replicas(
+    replicas: Arc<std::sync::Mutex<Vec<ModelReplica>>>,
+    texts: Vec<String>,
+    is_query: bool,
+    dimensions: usize,
+    worker_count: usize,
+) -> Result<Vec<Vec<f32>>> {
+    if texts.len() == 1 {
+        let mut replica = take_replica(&replicas)?;
+        let result = embed_one(&mut replica, &texts[0], is_query);
+        return_replica(&replicas, replica)?;
+        let vector = result?;
+        ensure_dimensions(std::slice::from_ref(&vector), dimensions)?;
+        return Ok(vec![vector]);
+    }
+
+    let chunk_size = texts.len().div_ceil(worker_count).max(1);
+    let chunks = texts
+        .chunks(chunk_size)
+        .enumerate()
+        .map(|(chunk_index, chunk)| (chunk_index, chunk.to_vec()))
+        .collect::<Vec<_>>();
+
+    let results = chunks
+        .into_par_iter()
+        .map(|(chunk_index, chunk_texts)| {
+            let mut replica = take_replica(&replicas)?;
+            let mut vectors = Vec::with_capacity(chunk_texts.len());
+            let mut error = None;
+            for text in &chunk_texts {
+                match embed_one(&mut replica, text, is_query) {
+                    Ok(vector) => vectors.push(vector),
+                    Err(err) => {
+                        error = Some(err);
+                        break;
+                    }
+                }
+            }
+            return_replica(&replicas, replica)?;
+            if let Some(err) = error {
+                return Err(err);
+            }
+            Ok((chunk_index, vectors))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut ordered = results;
+    ordered.sort_by_key(|(index, _)| *index);
+    let vectors = ordered
+        .into_iter()
+        .flat_map(|(_, values)| values)
+        .collect::<Vec<_>>();
+    ensure_dimensions(&vectors, dimensions)?;
+    Ok(vectors)
+}
+
+fn embed_one(replica: &mut ModelReplica, text: &str, is_query: bool) -> Result<Vec<f32>> {
+    let prepared = if is_query {
+        format!("{DEFAULT_QUERY_INSTRUCTION}{text}")
+    } else {
+        text.to_owned()
+    };
+    let encoding = replica
+        .tokenizer
+        .encode(prepared, true)
+        .map_err(|error| AppError::Configuration(error.to_string()))?;
+    let ids = encoding.get_ids();
+    if ids.is_empty() {
+        return Err(AppError::Configuration(
+            "tokenizer produced empty input".into(),
+        ));
+    }
+    let ids = if ids.len() > MAX_SEQUENCE_LEN {
+        &ids[..MAX_SEQUENCE_LEN]
+    } else {
+        ids
+    };
+    let input = Tensor::new(ids, &replica.device)
+        .map_err(candle_err)?
+        .unsqueeze(0)
+        .map_err(candle_err)?;
+    let embedding = replica
+        .model
+        .embed(&input)
+        .map_err(candle_err)?
+        .squeeze(0)
+        .map_err(candle_err)?
+        .to_dtype(DType::F32)
+        .map_err(candle_err)?
+        .to_vec1::<f32>()
+        .map_err(candle_err)?;
+    Ok(embedding)
 }
 
 fn candle_err(error: impl ToString) -> AppError {
@@ -534,12 +634,12 @@ impl HarrierModel {
         })
     }
 
-    fn embed(&mut self, input_ids: &Tensor) -> candle_core::Result<Tensor> {
+    fn embed(&self, input_ids: &Tensor) -> candle_core::Result<Tensor> {
         let (b_size, seq_len) = input_ids.dims2()?;
         let mut xs = self.embed_tokens.forward(input_ids)?;
         xs = (xs * (self.hidden_size as f64).sqrt())?;
         let attention_mask = causal_mask(b_size, seq_len, xs.device(), xs.dtype())?;
-        for layer in self.layers.iter_mut() {
+        for layer in &self.layers {
             xs = layer.forward(&xs, Some(&attention_mask))?;
         }
         let xs = self.norm.forward(&xs)?;
@@ -626,11 +726,7 @@ impl DecoderLayer {
         })
     }
 
-    fn forward(
-        &mut self,
-        xs: &Tensor,
-        attention_mask: Option<&Tensor>,
-    ) -> candle_core::Result<Tensor> {
+    fn forward(&self, xs: &Tensor, attention_mask: Option<&Tensor>) -> candle_core::Result<Tensor> {
         let residual = xs;
         let xs = self.input_layernorm.forward(xs)?;
         let xs = self.self_attn.forward(&xs, attention_mask)?;

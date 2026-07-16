@@ -532,7 +532,8 @@ impl SemanticEngine {
             }
             let identity = manager.identity();
             let backend = manager.active();
-            let pending = index::fetch_pending_chunks(&self.pool, &identity, 8).await?;
+            // Larger batches let local CPU workers stay busy and amortize SQLite writes.
+            let pending = index::fetch_pending_chunks(&self.pool, &identity, 32).await?;
             drop(manager);
             if pending.is_empty() {
                 break;
@@ -553,22 +554,20 @@ impl SemanticEngine {
                     break;
                 }
             };
-            for (item, vector) in pending.into_iter().zip(vectors) {
-                if let Some((session_id, message_id, platform)) =
-                    index::chunk_meta(&self.pool, item.id).await?
-                {
-                    index::mark_chunk_ready(
-                        &self.pool,
+            let ready_items = pending
+                .iter()
+                .zip(vectors)
+                .map(|(item, vector)| {
+                    (
                         item.id,
-                        &identity,
-                        &session_id,
-                        &message_id,
-                        &platform,
-                        &vector,
+                        item.session_id.as_str(),
+                        item.message_id.as_str(),
+                        item.platform.as_str(),
+                        vector,
                     )
-                    .await?;
-                }
-            }
+                })
+                .collect::<Vec<_>>();
+            index::mark_chunks_ready(&self.pool, &identity, &ready_items).await?;
             self.note_embedding_progress().await;
         }
         Ok(())

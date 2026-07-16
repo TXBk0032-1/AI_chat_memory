@@ -58,6 +58,7 @@ dependencies = [
  "http",
  "libsqlite3-sys",
  "rand 0.9.5",
+ "rayon",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

@@ -15,6 +15,9 @@ use crate::database::timestamp;
 pub struct PendingChunk {
     pub id: i64,
     pub text: String,
+    pub session_id: String,
+    pub message_id: String,
+    pub platform: String,
 }
 
 pub async fn queue_session_chunks(
@@ -198,7 +201,7 @@ pub async fn fetch_pending_chunks(
     limit: i64,
 ) -> Result<Vec<PendingChunk>> {
     let rows = sqlx::query(
-        "SELECT id, text FROM embedding_chunks WHERE status = 'pending' AND backend_id = ? AND model_id = ? ORDER BY id ASC LIMIT ?",
+        "SELECT id, text, session_id, message_id, platform FROM embedding_chunks WHERE status = 'pending' AND backend_id = ? AND model_id = ? ORDER BY id ASC LIMIT ?",
     )
     .bind(&identity.backend_id)
     .bind(&identity.model_id)
@@ -210,10 +213,14 @@ pub async fn fetch_pending_chunks(
         .map(|row| PendingChunk {
             id: row.get("id"),
             text: row.get("text"),
+            session_id: row.get("session_id"),
+            message_id: row.get("message_id"),
+            platform: row.get("platform"),
         })
         .collect())
 }
 
+#[allow(dead_code)]
 pub async fn mark_chunk_ready(
     pool: &SqlitePool,
     chunk_id: i64,
@@ -223,35 +230,62 @@ pub async fn mark_chunk_ready(
     platform: &str,
     embedding: &[f32],
 ) -> Result<()> {
-    let mut vector = embedding.to_vec();
-    if vector.len() < 640 {
-        vector.resize(640, 0.0);
-    } else if vector.len() > 640 {
-        vector.truncate(640);
+    mark_chunks_ready(
+        pool,
+        identity,
+        &[(
+            chunk_id,
+            session_id,
+            message_id,
+            platform,
+            embedding.to_vec(),
+        )],
+    )
+    .await
+}
+
+pub async fn mark_chunks_ready(
+    pool: &SqlitePool,
+    identity: &BackendIdentity,
+    items: &[(i64, &str, &str, &str, Vec<f32>)],
+) -> Result<()> {
+    if items.is_empty() {
+        return Ok(());
     }
-    let bytes = f32_slice_as_bytes(&vector);
-    let _ = sqlx::query("DELETE FROM embedding_vec WHERE chunk_id = ?")
+    let mut tx = pool.begin().await?;
+    let now = chrono::Utc::now().to_rfc3339();
+    for (chunk_id, session_id, message_id, platform, embedding) in items {
+        let mut vector = embedding.clone();
+        if vector.len() < 640 {
+            vector.resize(640, 0.0);
+        } else if vector.len() > 640 {
+            vector.truncate(640);
+        }
+        let bytes = f32_slice_as_bytes(&vector);
+        let _ = sqlx::query("DELETE FROM embedding_vec WHERE chunk_id = ?")
+            .bind(chunk_id)
+            .execute(&mut *tx)
+            .await;
+        sqlx::query(
+            "INSERT INTO embedding_vec(chunk_id, embedding, session_id, message_id, platform) VALUES (?, ?, ?, ?, ?)",
+        )
         .bind(chunk_id)
-        .execute(pool)
-        .await;
-    sqlx::query(
-        "INSERT INTO embedding_vec(chunk_id, embedding, session_id, message_id, platform) VALUES (?, ?, ?, ?, ?)",
-    )
-    .bind(chunk_id)
-    .bind(bytes)
-    .bind(session_id)
-    .bind(message_id)
-    .bind(platform)
-    .execute(pool)
-    .await?;
-    sqlx::query(
-        "UPDATE embedding_chunks SET status = 'ready', error = NULL, dim = ?, updated_at = ? WHERE id = ?",
-    )
-    .bind(identity.dimensions as i64)
-    .bind(chrono::Utc::now().to_rfc3339())
-    .bind(chunk_id)
-    .execute(pool)
-    .await?;
+        .bind(bytes)
+        .bind(session_id)
+        .bind(message_id)
+        .bind(platform)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE embedding_chunks SET status = 'ready', error = NULL, dim = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(identity.dimensions as i64)
+        .bind(&now)
+        .bind(chunk_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -268,6 +302,7 @@ pub async fn mark_chunk_error(pool: &SqlitePool, chunk_id: i64, error: &str) -> 
     Ok(())
 }
 
+#[allow(dead_code)]
 pub async fn chunk_meta(
     pool: &SqlitePool,
     chunk_id: i64,

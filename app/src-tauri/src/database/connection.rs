@@ -44,6 +44,16 @@ pub async fn connect(path: &Path) -> Result<SqlitePool> {
         .max_connections(5)
         .connect_with(options)
         .await?;
+    // WAL + moderate sync is a better default for large embedding rebuilds.
+    sqlx::query("PRAGMA journal_mode = WAL;")
+        .execute(&pool)
+        .await?;
+    sqlx::query("PRAGMA synchronous = NORMAL;")
+        .execute(&pool)
+        .await?;
+    sqlx::query("PRAGMA temp_store = MEMORY;")
+        .execute(&pool)
+        .await?;
     initialize_schema(&pool).await?;
     // Full-table timestamp rewrites are expensive on large archives; only do them
     // once for small/fresh databases so startup stays interactive.
