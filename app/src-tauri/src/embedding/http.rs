@@ -15,7 +15,7 @@ pub struct HttpEmbeddingBackend {
     settings: RemoteEmbeddingSettings,
     client: Client,
     backend_id: String,
-    dimensions: usize,
+    dimensions: std::sync::Arc<std::sync::RwLock<usize>>,
 }
 
 impl HttpEmbeddingBackend {
@@ -53,13 +53,56 @@ impl HttpEmbeddingBackend {
             .timeout(std::time::Duration::from_secs(60))
             .build()
             .map_err(|error| AppError::Configuration(error.to_string()))?;
+        let configured = settings.dimensions.unwrap_or(0);
         Ok(Self {
             kind,
-            dimensions: settings.dimensions.unwrap_or(640),
+            dimensions: std::sync::Arc::new(std::sync::RwLock::new(if configured > 0 {
+                configured
+            } else {
+                512
+            })),
             settings,
             client,
             backend_id: backend_id.into(),
         })
+    }
+
+    fn current_dimensions(&self) -> usize {
+        *self.dimensions.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn note_dimensions(&self, dim: usize) {
+        if dim == 0 {
+            return;
+        }
+        if let Ok(mut guard) = self.dimensions.write() {
+            *guard = dim;
+        }
+    }
+
+    fn lock_or_infer_dimensions(&self, vectors: &[Vec<f32>]) -> Result<usize> {
+        if let Some(expected) = self.settings.dimensions.filter(|value| *value > 0) {
+            ensure_dimensions(vectors, expected)?;
+            self.note_dimensions(expected);
+            return Ok(expected);
+        }
+        let Some(first) = vectors.first() else {
+            return Ok(self.current_dimensions());
+        };
+        let dim = first.len();
+        if dim == 0 {
+            return Err(AppError::Configuration("embedding vector is empty".into()));
+        }
+        for vector in vectors {
+            if vector.len() != dim {
+                return Err(AppError::Configuration(format!(
+                    "embedding dimension mismatch within batch: expected {dim}, got {}",
+                    vector.len()
+                )));
+            }
+        }
+        self.note_dimensions(dim);
+        Ok(dim)
     }
 
     async fn embed(&self, texts: &[String], _is_query: bool) -> Result<Vec<Vec<f32>>> {
@@ -105,7 +148,7 @@ impl HttpEmbeddingBackend {
                 .map_err(|error| AppError::Configuration(error.to_string()))?;
             vectors.push(payload.embedding);
         }
-        ensure_dimensions(&vectors, self.dimensions)?;
+        self.lock_or_infer_dimensions(&vectors)?;
         Ok(vectors)
     }
 
@@ -152,12 +195,7 @@ impl HttpEmbeddingBackend {
                 "openai-compatible embeddings returned unexpected batch size".into(),
             ));
         }
-        if let Some(dim) = self.settings.dimensions {
-            ensure_dimensions(&vectors, dim)?;
-        } else if let Some(first) = vectors.first() {
-            // lock actual dimension for subsequent health/status reporting
-            let _ = first;
-        }
+        self.lock_or_infer_dimensions(&vectors)?;
         Ok(vectors)
     }
 }
@@ -169,7 +207,7 @@ impl EmbeddingBackend for HttpEmbeddingBackend {
             backend: self.kind.clone(),
             backend_id: self.backend_id.clone(),
             model_id: self.settings.model.clone(),
-            dimensions: self.dimensions,
+            dimensions: self.current_dimensions(),
         }
     }
 
@@ -212,4 +250,44 @@ struct OpenAiEmbeddingResponse {
 struct OpenAiEmbeddingItem {
     index: usize,
     embedding: Vec<f32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn settings(dimensions: Option<usize>) -> RemoteEmbeddingSettings {
+        RemoteEmbeddingSettings {
+            base_url: "http://127.0.0.1:1".into(),
+            api_key: None,
+            model: "test-model".into(),
+            dimensions,
+        }
+    }
+
+    #[test]
+    fn infers_non_640_dimensions_from_response() {
+        let backend = HttpEmbeddingBackend::openai_compatible(
+            EmbeddingBackendKind::OpenaiCompatible,
+            settings(None),
+        )
+        .unwrap();
+        backend
+            .lock_or_infer_dimensions(&[vec![0.0; 384], vec![1.0; 384]])
+            .unwrap();
+        assert_eq!(backend.identity().dimensions, 384);
+    }
+
+    #[test]
+    fn configured_dimensions_reject_mismatch() {
+        let backend = HttpEmbeddingBackend::openai_compatible(
+            EmbeddingBackendKind::OpenaiCompatible,
+            settings(Some(512)),
+        )
+        .unwrap();
+        let error = backend
+            .lock_or_infer_dimensions(&[vec![0.0; 384]])
+            .unwrap_err();
+        assert!(error.to_string().contains("expected 512, got 384"));
+    }
 }

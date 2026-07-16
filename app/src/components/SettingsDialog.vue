@@ -33,6 +33,7 @@ const emit = defineEmits<{
   reindexSemantic: []
   downloadLocalModel: []
   importLocalModel: []
+  cancelSemanticWork: []
 }>()
 
 function setBackend(backend: EmbeddingBackendKind) {
@@ -92,7 +93,7 @@ if (!settings.value.semantic_search.local.dtype) {
               <label>
                 <span>Embedding 后端</span>
                 <select :value="settings.semantic_search.backend" @change="setBackend(($event.target as HTMLSelectElement).value as EmbeddingBackendKind)">
-                  <option value="local">本地 Candle / harrier</option>
+                  <option value="local">本地 Candle / BGE</option>
                   <option value="ollama">Ollama</option>
                   <option value="llama_cpp">llama.cpp</option>
                   <option value="openai_compatible">OpenAI 兼容</option>
@@ -120,8 +121,9 @@ if (!settings.value.semantic_search.local.dtype) {
                 <p class="path-value">下载源：Hugging Face（{{ settings.semantic_search.local.model }}）</p>
                 <p class="path-value">当前设备：{{ semanticStatus?.device || '未加载' }} · 精度 {{ semanticStatus?.dtype || '未加载' }}</p>
                 <div class="setting-actions">
-                  <button class="secondary-button compact" :disabled="semanticBusy" @click="emit('downloadLocalModel')">{{ semanticBusy && downloadProgress ? '下载中…' : '下载模型' }}</button>
+                  <button class="secondary-button compact" :disabled="semanticBusy && !!downloadProgress && downloadProgress.stage !== 'done' && downloadProgress.stage !== 'error' && downloadProgress.stage !== 'cancelled'" @click="emit('downloadLocalModel')">{{ semanticBusy && downloadProgress && downloadProgress.stage !== 'done' && downloadProgress.stage !== 'error' && downloadProgress.stage !== 'cancelled' ? '下载中…' : '下载模型' }}</button>
                   <button class="secondary-button compact" :disabled="semanticBusy" @click="emit('importLocalModel')"><FolderOpen :size="14" />导入本地模型</button>
+                  <button v-if="semanticBusy && downloadProgress && downloadProgress.stage !== 'done' && downloadProgress.stage !== 'error' && downloadProgress.stage !== 'cancelled'" class="secondary-button compact" @click="emit('cancelSemanticWork')">取消下载</button>
                 </div>
                 <div v-if="downloadProgress" class="download-progress" :data-stage="downloadProgress.stage">
                   <div class="download-progress-meta">
@@ -137,16 +139,19 @@ if (!settings.value.semantic_search.local.dtype) {
               <template v-else-if="settings.semantic_search.backend === 'ollama'">
                 <label><span>Base URL</span><input v-model="settings.semantic_search.ollama.base_url" /></label>
                 <label><span>模型</span><input v-model="settings.semantic_search.ollama.model" /></label>
+                <label><span>维度（可空，自动探测）</span><input v-model.number="settings.semantic_search.ollama.dimensions" type="number" min="0" placeholder="自动" /></label>
               </template>
               <template v-else-if="settings.semantic_search.backend === 'llama_cpp'">
                 <label><span>Base URL</span><input v-model="settings.semantic_search.llama_cpp.base_url" /></label>
                 <label><span>模型</span><input v-model="settings.semantic_search.llama_cpp.model" /></label>
                 <label><span>API Key</span><input v-model="settings.semantic_search.llama_cpp.api_key" /></label>
+                <label><span>维度（可空，自动探测）</span><input v-model.number="settings.semantic_search.llama_cpp.dimensions" type="number" min="0" placeholder="自动" /></label>
               </template>
               <template v-else>
                 <label><span>Base URL</span><input v-model="settings.semantic_search.openai_compatible.base_url" /></label>
                 <label><span>模型</span><input v-model="settings.semantic_search.openai_compatible.model" /></label>
                 <label><span>API Key</span><input v-model="settings.semantic_search.openai_compatible.api_key" /></label>
+                <label><span>维度（可空，自动探测）</span><input v-model.number="settings.semantic_search.openai_compatible.dimensions" type="number" min="0" placeholder="自动" /></label>
               </template>
               <p class="path-value">
                 状态：{{ semanticStatus?.status || 'unknown' }}
@@ -156,10 +161,11 @@ if (!settings.value.semantic_search.local.dtype) {
               </p>
               <div class="setting-actions">
                 <button class="secondary-button compact" :disabled="semanticBusy" @click="emit('checkEmbedding')">测试后端</button>
-                <button class="secondary-button compact" :disabled="semanticBusy" @click="emit('reindexSemantic')">
-                  <RefreshCw :size="14" :class="{ spinning: semanticBusy && reindexProgress && reindexProgress.stage !== 'done' && reindexProgress.stage !== 'error' }" />
-                  {{ semanticBusy && reindexProgress && reindexProgress.stage !== 'done' && reindexProgress.stage !== 'error' ? '重建中…' : '重建索引' }}
+                <button class="secondary-button compact" :disabled="!!(semanticBusy && reindexProgress && reindexProgress.stage !== 'done' && reindexProgress.stage !== 'error' && reindexProgress.stage !== 'cancelled')" @click="emit('reindexSemantic')">
+                  <RefreshCw :size="14" :class="{ spinning: semanticBusy && reindexProgress && reindexProgress.stage !== 'done' && reindexProgress.stage !== 'error' && reindexProgress.stage !== 'cancelled' }" />
+                  {{ semanticBusy && reindexProgress && reindexProgress.stage !== 'done' && reindexProgress.stage !== 'error' && reindexProgress.stage !== 'cancelled' ? '重建中…' : '重建索引' }}
                 </button>
+                <button v-if="semanticBusy && reindexProgress && reindexProgress.stage !== 'done' && reindexProgress.stage !== 'error' && reindexProgress.stage !== 'cancelled'" class="secondary-button compact" @click="emit('cancelSemanticWork')">取消编码</button>
               </div>
               <div v-if="reindexProgress" class="download-progress" :data-stage="reindexProgress.stage">
                 <div class="download-progress-meta">

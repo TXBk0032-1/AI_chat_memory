@@ -1,16 +1,19 @@
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{
     error::{AppError, Result},
     models::{EmbeddingBackendKind, EmbeddingHealth, SemanticSearchSettings, SemanticStatus},
 };
 
+pub mod bge;
 mod http;
 pub mod local;
 mod mock;
 
+pub use bge::LocalBgeBackend;
 pub use http::HttpEmbeddingBackend;
 pub use local::LocalHarrierBackend;
 pub use mock::MockEmbeddingBackend;
@@ -45,6 +48,7 @@ pub struct EmbeddingManager {
     data_dir: PathBuf,
     settings: SemanticSearchSettings,
     active: Arc<dyn EmbeddingBackend>,
+    cancel_flag: Arc<AtomicBool>,
 }
 
 impl EmbeddingManager {
@@ -52,11 +56,13 @@ impl EmbeddingManager {
         data_dir: PathBuf,
         settings: SemanticSearchSettings,
     ) -> Result<Self> {
-        let active = build_backend(&data_dir, &settings).await?;
+        let cancel_flag = Arc::new(AtomicBool::new(false));
+        let active = build_backend(&data_dir, &settings, cancel_flag.clone()).await?;
         Ok(Self {
             data_dir,
             settings,
             active,
+            cancel_flag,
         })
     }
 
@@ -74,6 +80,18 @@ impl EmbeddingManager {
 
     pub fn identity(&self) -> BackendIdentity {
         self.active.identity()
+    }
+
+    pub fn cancel_flag(&self) -> Arc<AtomicBool> {
+        self.cancel_flag.clone()
+    }
+
+    pub fn request_cancel(&self) {
+        self.cancel_flag.store(true, Ordering::SeqCst);
+    }
+
+    pub fn clear_cancel(&self) {
+        self.cancel_flag.store(false, Ordering::SeqCst);
     }
 
     pub async fn healthcheck(&self) -> EmbeddingHealth {
@@ -97,6 +115,7 @@ impl EmbeddingManager {
 pub async fn build_backend(
     data_dir: &Path,
     settings: &SemanticSearchSettings,
+    cancel_flag: Arc<AtomicBool>,
 ) -> Result<Arc<dyn EmbeddingBackend>> {
     match settings.backend {
         EmbeddingBackendKind::Local => {
@@ -106,21 +125,43 @@ pub async fn build_backend(
                 .as_ref()
                 .map(PathBuf::from)
                 .unwrap_or_else(|| local_model_dir(data_dir, &settings.local.model));
-            match LocalHarrierBackend::open(
-                settings.local.model.clone(),
-                model_dir,
-                &settings.local,
-            )
-            .await
-            {
-                Ok(backend) => Ok(Arc::new(backend)),
-                Err(error) => {
-                    tracing::warn!(%error, "local embedding backend unavailable; using deterministic mock until model is ready");
-                    Ok(Arc::new(MockEmbeddingBackend::new(
-                        EmbeddingBackendKind::Local,
-                        settings.local.model.clone(),
-                        640,
-                    )))
+            if bge::is_bge_model(&settings.local.model) {
+                match LocalBgeBackend::open(
+                    settings.local.model.clone(),
+                    model_dir,
+                    &settings.local,
+                    cancel_flag,
+                )
+                .await
+                {
+                    Ok(backend) => Ok(Arc::new(backend)),
+                    Err(error) => {
+                        tracing::warn!(%error, "local bge backend unavailable; using deterministic mock until model is ready");
+                        Ok(Arc::new(MockEmbeddingBackend::new(
+                            EmbeddingBackendKind::Local,
+                            settings.local.model.clone(),
+                            512,
+                        )))
+                    }
+                }
+            } else {
+                match LocalHarrierBackend::open(
+                    settings.local.model.clone(),
+                    model_dir,
+                    &settings.local,
+                    cancel_flag,
+                )
+                .await
+                {
+                    Ok(backend) => Ok(Arc::new(backend)),
+                    Err(error) => {
+                        tracing::warn!(%error, "local embedding backend unavailable; using deterministic mock until model is ready");
+                        Ok(Arc::new(MockEmbeddingBackend::new(
+                            EmbeddingBackendKind::Local,
+                            settings.local.model.clone(),
+                            640,
+                        )))
+                    }
                 }
             }
         }

@@ -259,10 +259,11 @@ pub async fn mark_chunks_ready(
         .iter()
         .map(|(chunk_id, session_id, message_id, platform, embedding)| {
             let mut vector = embedding.clone();
-            if vector.len() < 640 {
-                vector.resize(640, 0.0);
-            } else if vector.len() > 640 {
-                vector.truncate(640);
+            let dim = identity.dimensions.max(1);
+            if vector.len() < dim {
+                vector.resize(dim, 0.0);
+            } else if vector.len() > dim {
+                vector.truncate(dim);
             }
             let bytes = f32_slice_as_bytes(&vector);
             (*chunk_id, *session_id, *message_id, *platform, bytes)
@@ -405,10 +406,11 @@ pub async fn semantic_session_scores(
     top_k: i64,
 ) -> Result<Vec<(String, f32)>> {
     let mut vector = embedding.to_vec();
-    if vector.len() < 640 {
-        vector.resize(640, 0.0);
-    } else if vector.len() > 640 {
-        vector.truncate(640);
+    let dim = identity.dimensions.max(1);
+    if vector.len() < dim {
+        vector.resize(dim, 0.0);
+    } else if vector.len() > dim {
+        vector.truncate(dim);
     }
     let bytes = f32_slice_as_bytes(&vector);
     let timestamp = timestamp::expression("s.updated_at");
@@ -460,10 +462,11 @@ pub async fn semantic_session_hits(
     limit: i64,
 ) -> Result<Vec<SessionSearchHit>> {
     let mut vector = embedding.to_vec();
-    if vector.len() < 640 {
-        vector.resize(640, 0.0);
-    } else if vector.len() > 640 {
-        vector.truncate(640);
+    let dim = identity.dimensions.max(1);
+    if vector.len() < dim {
+        vector.resize(dim, 0.0);
+    } else if vector.len() > dim {
+        vector.truncate(dim);
     }
     let bytes = f32_slice_as_bytes(&vector);
     let rows = sqlx::query(

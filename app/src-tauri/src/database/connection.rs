@@ -104,17 +104,148 @@ async fn initialize_schema(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
     sqlx::query(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS embedding_vec USING vec0(
-            chunk_id INTEGER PRIMARY KEY,
-            embedding float[640] distance_metric=cosine,
-            +session_id TEXT,
-            +message_id TEXT,
-            +platform TEXT
+        "CREATE TABLE IF NOT EXISTS embedding_index_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
         );",
     )
     .execute(pool)
     .await?;
+    ensure_embedding_vec_table(pool, None).await?;
     Ok(())
+}
+
+/// Ensure the active sqlite-vec table matches `dimensions`.
+/// When dimensions change, drop and recreate the virtual table.
+pub async fn ensure_embedding_vec_table(
+    pool: &SqlitePool,
+    dimensions: Option<usize>,
+) -> Result<()> {
+    let current: Option<String> =
+        sqlx::query_scalar("SELECT value FROM embedding_index_meta WHERE key = 'vec_dimensions'")
+            .fetch_optional(pool)
+            .await?;
+    let table_sql: Option<String> = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'embedding_vec'",
+    )
+    .fetch_optional(pool)
+    .await?;
+    let inferred = table_sql.as_deref().and_then(infer_vec_dimensions);
+    let current_dim = current
+        .and_then(|value| value.parse::<usize>().ok())
+        .or(inferred);
+    // During schema bootstrap, preserve an existing table. The active backend will
+    // pass an explicit dimension immediately after settings are loaded.
+    let desired = dimensions.or(current_dim).unwrap_or(512).clamp(8, 4096);
+    let table_exists = table_sql.is_some();
+    let needs_rebuild = !table_exists || current_dim != Some(desired);
+    if !needs_rebuild {
+        if current_dim == Some(desired) {
+            sqlx::query(
+                "INSERT INTO embedding_index_meta(key, value) VALUES('vec_dimensions', ?)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            )
+            .bind(desired.to_string())
+            .execute(pool)
+            .await?;
+        }
+        return Ok(());
+    }
+
+    tracing::info!(
+        previous = ?current_dim,
+        desired,
+        "recreating embedding_vec for active dimensions"
+    );
+    let _ = sqlx::query("DROP TABLE IF EXISTS embedding_vec;")
+        .execute(pool)
+        .await;
+    sqlx::query(&format!(
+        "CREATE VIRTUAL TABLE embedding_vec USING vec0(
+            chunk_id INTEGER PRIMARY KEY,
+            embedding float[{desired}] distance_metric=cosine,
+            +session_id TEXT,
+            +message_id TEXT,
+            +platform TEXT
+        );"
+    ))
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "INSERT INTO embedding_index_meta(key, value) VALUES('vec_dimensions', ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(desired.to_string())
+    .execute(pool)
+    .await?;
+    // Active vectors are gone; mark ready chunks pending so they re-embed under new dim.
+    let _ = sqlx::query(
+        "UPDATE embedding_chunks SET status = 'pending', error = NULL, dim = ?, updated_at = ? WHERE status = 'ready'",
+    )
+    .bind(desired as i64)
+    .bind(chrono::Utc::now().to_rfc3339())
+    .execute(pool)
+    .await;
+    Ok(())
+}
+
+pub async fn activate_embedding_index(
+    pool: &SqlitePool,
+    backend_id: &str,
+    model_id: &str,
+) -> Result<bool> {
+    let current_backend: Option<String> =
+        sqlx::query_scalar("SELECT value FROM embedding_index_meta WHERE key = 'active_backend'")
+            .fetch_optional(pool)
+            .await?;
+    let current_model: Option<String> =
+        sqlx::query_scalar("SELECT value FROM embedding_index_meta WHERE key = 'active_model'")
+            .fetch_optional(pool)
+            .await?;
+    let changed = current_backend.as_deref() != Some(backend_id)
+        || current_model.as_deref() != Some(model_id);
+    if !changed {
+        return Ok(false);
+    }
+
+    tracing::info!(
+        previous_backend = ?current_backend,
+        previous_model = ?current_model,
+        backend_id,
+        model_id,
+        "activating new embedding vector space"
+    );
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM embedding_vec")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM embedding_chunks")
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        "INSERT INTO embedding_index_meta(key, value) VALUES('active_backend', ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(backend_id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "INSERT INTO embedding_index_meta(key, value) VALUES('active_model', ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )
+    .bind(model_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
+fn infer_vec_dimensions(sql: &str) -> Option<usize> {
+    let marker = "float[";
+    let start = sql.to_ascii_lowercase().find(marker)? + marker.len();
+    let tail = &sql[start..];
+    let end = tail.find(']')?;
+    tail[..end].trim().parse().ok()
 }
 
 async fn maybe_normalize_stored_timestamps(pool: &SqlitePool) -> Result<()> {
@@ -190,5 +321,67 @@ mod tests {
             .await
             .unwrap();
         assert!(version.starts_with('v'), "{version}");
+    }
+}
+
+#[cfg(test)]
+mod vec_dimension_tests {
+    use super::*;
+
+    #[test]
+    fn infers_existing_vec_dimensions() {
+        assert_eq!(
+            infer_vec_dimensions(
+                "CREATE VIRTUAL TABLE embedding_vec USING vec0(embedding float[768])"
+            ),
+            Some(768)
+        );
+        assert_eq!(infer_vec_dimensions("CREATE TABLE other(x TEXT)"), None);
+    }
+}
+
+#[cfg(test)]
+mod active_index_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn switching_active_model_clears_old_mapping() {
+        register_sqlite_vec();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        initialize_schema(&pool).await.unwrap();
+        assert!(
+            activate_embedding_index(&pool, "local", "model-a")
+                .await
+                .unwrap()
+        );
+        sqlx::query(
+            "INSERT INTO embedding_chunks
+             (message_id, session_id, platform, chunk_index, role, text, content_hash,
+              backend_id, model_id, dim, status, updated_at)
+             VALUES ('m', 's', 'test', 0, 'user', 'text', 'hash',
+                     'local', 'model-a', 512, 'pending', 'now')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(
+            !activate_embedding_index(&pool, "local", "model-a")
+                .await
+                .unwrap()
+        );
+        assert!(
+            activate_embedding_index(&pool, "local", "model-b")
+                .await
+                .unwrap()
+        );
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM embedding_chunks")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
     }
 }

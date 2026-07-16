@@ -219,7 +219,7 @@ impl Default for LocalEmbeddingSettings {
 }
 
 fn default_local_model() -> String {
-    "microsoft/harrier-oss-v1-270m".into()
+    "BAAI/bge-small-zh-v1.5".into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -306,8 +306,8 @@ fn default_llama_cpp_settings() -> RemoteEmbeddingSettings {
     RemoteEmbeddingSettings {
         base_url: default_openai_url(),
         api_key: None,
-        model: "harrier-oss-v1-270m".into(),
-        dimensions: Some(640),
+        model: "bge-small-zh-v1.5".into(),
+        dimensions: None,
     }
 }
 

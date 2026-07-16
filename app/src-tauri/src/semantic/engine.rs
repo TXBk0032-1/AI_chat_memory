@@ -80,11 +80,51 @@ impl SemanticEngine {
         &self,
         settings: crate::models::SemanticSearchSettings,
     ) -> Result<()> {
+        // Cancel any in-flight local download/embed from previous backend first.
+        if let Ok(manager) = self.embeddings.try_read() {
+            manager.request_cancel();
+        }
         let manager = EmbeddingManager::from_settings(self.data_dir.clone(), settings).await?;
+        let identity = manager.identity();
+        crate::database::connection::ensure_embedding_vec_table(
+            &self.pool,
+            Some(identity.dimensions),
+        )
+        .await?;
+        crate::database::connection::activate_embedding_index(
+            &self.pool,
+            &identity.backend_id,
+            &identity.model_id,
+        )
+        .await?;
         *self.embeddings.write().await = manager;
         self.request_reindex_all().await?;
         self.wake.notify_one();
         Ok(())
+    }
+
+    pub async fn cancel_semantic_work(&self) -> Result<()> {
+        let manager = self.embeddings.read().await;
+        manager.request_cancel();
+        self.publish_reindex_progress(
+            crate::models::ReindexProgress {
+                stage: "cancelled".into(),
+                total_sessions: 0,
+                processed_sessions: 0,
+                total_chunks: 0,
+                ready_chunks: 0,
+                pending_chunks: 0,
+                fraction: 0.0,
+                message: "已取消下载/索引任务".into(),
+            },
+            None,
+        )
+        .await;
+        Ok(())
+    }
+
+    pub async fn clear_cancel_flag(&self) {
+        self.embeddings.read().await.clear_cancel();
     }
 
     pub async fn request_session_index(&self, session_id: &str) -> Result<()> {
@@ -102,6 +142,15 @@ impl SemanticEngine {
         &self,
         on_progress: Option<std::sync::Arc<dyn Fn(ReindexProgress) + Send + Sync>>,
     ) -> Result<usize> {
+        {
+            let manager = self.embeddings.read().await;
+            manager.clear_cancel();
+            crate::database::connection::ensure_embedding_vec_table(
+                &self.pool,
+                Some(manager.identity().dimensions),
+            )
+            .await?;
+        }
         let identity = self.embeddings.read().await.identity();
         let total_sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
             .fetch_one(&self.pool)
@@ -268,7 +317,8 @@ impl SemanticEngine {
             .await
             .unwrap_or(0);
         let local_model_path = manager.local_model_dir();
-        let local_model_ready = crate::embedding::local::model_files_present(&local_model_path);
+        let local_model_ready = crate::embedding::local::model_files_present(&local_model_path)
+            || crate::embedding::bge::model_files_present(&local_model_path);
         let status = crate::embedding::semantic_status_from_health(
             manager.settings().enabled,
             pending,
@@ -307,20 +357,37 @@ impl SemanticEngine {
         &self,
         on_progress: Option<crate::embedding::local::DownloadProgressCallback>,
     ) -> Result<()> {
+        self.clear_cancel_flag().await;
+
         let settings = self.embeddings.read().await.settings().clone();
         if !matches!(settings.backend, crate::models::EmbeddingBackendKind::Local) {
             return Ok(());
         }
         let model_dir = crate::embedding::local_model_dir(&self.data_dir, &settings.local.model);
-        let backend = crate::embedding::LocalHarrierBackend::open(
-            settings.local.model.clone(),
-            model_dir,
-            &settings.local,
-        )
-        .await?;
-        backend
-            .ensure_model_files_with_progress(on_progress)
+        let cancel = self.embeddings.read().await.cancel_flag();
+        if crate::embedding::bge::is_bge_model(&settings.local.model) {
+            let backend = crate::embedding::LocalBgeBackend::open(
+                settings.local.model.clone(),
+                model_dir,
+                &settings.local,
+                cancel,
+            )
             .await?;
+            backend
+                .ensure_model_files_with_progress(on_progress)
+                .await?;
+        } else {
+            let backend = crate::embedding::LocalHarrierBackend::open(
+                settings.local.model.clone(),
+                model_dir,
+                &settings.local,
+                cancel,
+            )
+            .await?;
+            backend
+                .ensure_model_files_with_progress(on_progress)
+                .await?;
+        }
         *self.last_error.write().await = None;
         // reload_embeddings also queues a full reindex and wakes the worker.
         self.reload_embeddings(settings).await
@@ -329,14 +396,28 @@ impl SemanticEngine {
     pub async fn import_local_model(&self, path: &Path) -> Result<()> {
         let mut settings = self.embeddings.read().await.settings().clone();
         let model_dir = crate::embedding::local_model_dir(&self.data_dir, &settings.local.model);
-        let backend = crate::embedding::LocalHarrierBackend::open(
-            settings.local.model.clone(),
-            model_dir,
-            &settings.local,
-        )
-        .await?;
-        backend.import_model_dir(path).await?;
-        settings.local.model_path = Some(backend.model_dir().display().to_string());
+        let cancel = self.embeddings.read().await.cancel_flag();
+        if crate::embedding::bge::is_bge_model(&settings.local.model) {
+            let backend = crate::embedding::LocalBgeBackend::open(
+                settings.local.model.clone(),
+                model_dir,
+                &settings.local,
+                cancel,
+            )
+            .await?;
+            backend.import_from_path(path).await?;
+            settings.local.model_path = Some(backend.model_dir().display().to_string());
+        } else {
+            let backend = crate::embedding::LocalHarrierBackend::open(
+                settings.local.model.clone(),
+                model_dir,
+                &settings.local,
+                cancel,
+            )
+            .await?;
+            backend.import_model_dir(path).await?;
+            settings.local.model_path = Some(backend.model_dir().display().to_string());
+        }
         self.reload_embeddings(settings).await
     }
 
@@ -597,8 +678,28 @@ impl SemanticEngine {
                     vectors
                 }
                 Err(error) => {
+                    let message = error.to_string();
+                    *self.last_error.write().await = Some(message.clone());
+                    if message.contains("取消") || message.to_ascii_lowercase().contains("cancel")
+                    {
+                        tracing::info!(%error, pending = pending.len(), "semantic embedding cancelled");
+                        self.publish_reindex_progress(
+                            ReindexProgress {
+                                stage: "cancelled".into(),
+                                total_sessions: 0,
+                                processed_sessions: 0,
+                                total_chunks: 0,
+                                ready_chunks: 0,
+                                pending_chunks: pending.len() as i64,
+                                fraction: 0.0,
+                                message: "索引编码已取消".into(),
+                            },
+                            None,
+                        )
+                        .await;
+                        break;
+                    }
                     // Keep chunks pending so a later successful model load can resume.
-                    *self.last_error.write().await = Some(error.to_string());
                     tracing::warn!(%error, pending = pending.len(), "semantic embedding failed; will retry later");
                     // Avoid a tight spin while CUDA recovers from bad batches.
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -606,6 +707,22 @@ impl SemanticEngine {
                 }
             };
             let embed_ms = embed_started.elapsed().as_millis();
+            // HTTP backends may discover their actual dimensions from the first response.
+            // Recreate vec0 before writing rather than padding/truncating to a stale guess.
+            let write_identity = backend.identity();
+            if write_identity.dimensions != identity.dimensions {
+                crate::database::connection::ensure_embedding_vec_table(
+                    &self.pool,
+                    Some(write_identity.dimensions),
+                )
+                .await?;
+                tracing::info!(
+                    previous = identity.dimensions,
+                    actual = write_identity.dimensions,
+                    model = %write_identity.model_id,
+                    "embedding endpoint dimensions discovered"
+                );
+            }
             let ready_items = pending
                 .iter()
                 .zip(vectors)
@@ -620,7 +737,7 @@ impl SemanticEngine {
                 })
                 .collect::<Vec<_>>();
             let write_started = std::time::Instant::now();
-            index::mark_chunks_ready(&self.pool, &identity, &ready_items).await?;
+            index::mark_chunks_ready(&self.pool, &write_identity, &ready_items).await?;
             let write_ms = write_started.elapsed().as_millis();
             let elapsed_ms = started.elapsed().as_millis();
             let chunks_per_sec = if elapsed_ms == 0 {

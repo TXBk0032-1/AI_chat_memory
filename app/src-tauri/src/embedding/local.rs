@@ -4,6 +4,7 @@ use candle_nn::{Activation, Embedding, Linear, VarBuilder, linear_b as linear, o
 use hf_hub::api::tokio::{ApiBuilder, Progress};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokenizers::Tokenizer;
 use tokio::sync::Mutex;
 
@@ -40,6 +41,7 @@ pub struct LocalHarrierBackend {
     state: Arc<std::sync::Mutex<Option<LoadedModel>>>,
     runtime_device: Arc<std::sync::Mutex<String>>,
     runtime_dtype: Arc<std::sync::Mutex<String>>,
+    cancel_flag: Arc<AtomicBool>,
 }
 
 struct LoadedModel {
@@ -55,6 +57,7 @@ impl LocalHarrierBackend {
         model_id: String,
         model_dir: PathBuf,
         settings: &LocalEmbeddingSettings,
+        cancel_flag: Arc<AtomicBool>,
     ) -> Result<Self> {
         tokio::fs::create_dir_all(&model_dir)
             .await
@@ -70,6 +73,7 @@ impl LocalHarrierBackend {
             state: Arc::new(std::sync::Mutex::new(None)),
             runtime_device: Arc::new(std::sync::Mutex::new("unloaded".into())),
             runtime_dtype: Arc::new(std::sync::Mutex::new("unloaded".into())),
+            cancel_flag,
         })
     }
 
@@ -117,7 +121,13 @@ impl LocalHarrierBackend {
             }
             return Ok(());
         }
-        download_model(&self.model_id, &self.model_dir, on_progress).await
+        download_model(
+            &self.model_id,
+            &self.model_dir,
+            on_progress,
+            Some(self.cancel_flag.clone()),
+        )
+        .await
     }
 
     pub async fn import_model_dir(&self, source: &Path) -> Result<()> {
@@ -196,6 +206,9 @@ impl LocalHarrierBackend {
     async fn embed(&self, texts: &[String], is_query: bool) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());
+        }
+        if self.cancel_flag.load(Ordering::SeqCst) {
+            return Err(AppError::Cancelled("本地编码已取消".into()));
         }
         self.ensure_loaded().await?;
         let state = Arc::clone(&self.state);
@@ -288,6 +301,7 @@ async fn download_model(
     model_id: &str,
     model_dir: &Path,
     on_progress: Option<DownloadProgressCallback>,
+    cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<()> {
     tokio::fs::create_dir_all(model_dir)
         .await
@@ -313,6 +327,12 @@ async fn download_model(
     let file_count = MODEL_FILES.len();
 
     for (file_index, file) in MODEL_FILES.iter().enumerate() {
+        if cancel_flag
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::SeqCst))
+        {
+            return Err(AppError::Cancelled("模型下载已取消".into()));
+        }
         if let Some(on_progress) = &on_progress {
             on_progress(ModelDownloadProgress {
                 stage: "file".into(),
@@ -337,7 +357,16 @@ async fn download_model(
         let path = repo
             .download_with_progress(file, progress)
             .await
-            .map_err(|error| AppError::Configuration(format!("download {file} failed: {error}")))?;
+            .map_err(|error| {
+                if cancel_flag
+                    .as_ref()
+                    .is_some_and(|flag| flag.load(Ordering::SeqCst))
+                {
+                    AppError::Cancelled("模型下载已取消".into())
+                } else {
+                    AppError::Configuration(format!("download {file} failed: {error}"))
+                }
+            })?;
 
         if let Some(on_progress) = &on_progress {
             on_progress(ModelDownloadProgress {
@@ -1448,10 +1477,14 @@ mod tests {
             return;
         }
         let settings = LocalEmbeddingSettings::default();
-        let backend =
-            LocalHarrierBackend::open("microsoft/harrier-oss-v1-270m".into(), model_dir, &settings)
-                .await
-                .expect("open local backend");
+        let backend = LocalHarrierBackend::open(
+            "microsoft/harrier-oss-v1-270m".into(),
+            model_dir,
+            &settings,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+        .await
+        .expect("open local backend");
         let vectors = backend
             .embed_documents(&[
                 "hello semantic search".into(),

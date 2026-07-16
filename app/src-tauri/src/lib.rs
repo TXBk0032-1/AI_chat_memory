@@ -119,6 +119,7 @@ pub fn run() {
             commands::reindex_semantic_search,
             commands::download_local_embedding_model,
             commands::import_local_embedding_model,
+            commands::cancel_semantic_work,
             commands::move_data_directory,
             commands::confirm_close_behavior,
             commands::write_export_file

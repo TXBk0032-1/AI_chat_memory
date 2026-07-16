@@ -37,7 +37,7 @@ export function useSettings(
     showSettings.value = true
     try {
       await refreshSemanticStatus()
-      if (semanticStatus.value?.reindex && semanticStatus.value.reindex.stage !== 'done') {
+      if (semanticStatus.value?.reindex && !['done', 'error', 'cancelled'].includes(semanticStatus.value.reindex.stage)) {
         startReindexPolling()
       }
     } catch {
@@ -53,6 +53,12 @@ export function useSettings(
   async function saveSettings() {
     settings.value.allowed_origins = originText.value.split('\n').map((value) => value.trim()).filter(Boolean)
     settings.value.setup_complete = true
+    for (const backend of ['ollama', 'llama_cpp', 'openai_compatible'] as const) {
+      const value = settings.value.semantic_search[backend].dimensions
+      if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+        delete settings.value.semantic_search[backend].dimensions
+      }
+    }
     try {
       settings.value = await api.saveSettings(settings.value)
       theme.accept()
@@ -104,7 +110,7 @@ export function useSettings(
       semanticStatus.value = status
       if (status.reindex) {
         reindexProgress.value = status.reindex
-        if (status.reindex.stage === 'done' || status.reindex.stage === 'error') {
+        if (status.reindex.stage === 'done' || status.reindex.stage === 'error' || status.reindex.stage === 'cancelled') {
           stopReindexPolling()
           semanticBusy.value = false
         }
@@ -192,16 +198,18 @@ export function useSettings(
         }
       }
     } catch (reason) {
-      error.value = String(reason)
+      const message = String(reason)
+      const cancelled = message.includes('取消') || message.toLowerCase().includes('cancel')
+      if (!cancelled) error.value = message
       reindexProgress.value = {
-        stage: 'error',
+        stage: cancelled ? 'cancelled' : 'error',
         total_sessions: reindexProgress.value?.total_sessions ?? 0,
         processed_sessions: reindexProgress.value?.processed_sessions ?? 0,
         total_chunks: reindexProgress.value?.total_chunks ?? 0,
         ready_chunks: reindexProgress.value?.ready_chunks ?? 0,
         pending_chunks: reindexProgress.value?.pending_chunks ?? 0,
         fraction: reindexProgress.value?.fraction ?? 0,
-        message: String(reason),
+        message: cancelled ? '索引任务已取消' : message,
       }
       stopReindexPolling()
       semanticBusy.value = false
@@ -240,15 +248,17 @@ export function useSettings(
         }
       }
     } catch (reason) {
-      error.value = String(reason)
+      const message = String(reason)
+      const cancelled = message.includes('取消') || message.toLowerCase().includes('cancel')
+      if (!cancelled) error.value = message
       downloadProgress.value = {
-        stage: 'error',
+        stage: cancelled ? 'cancelled' : 'error',
         file_index: downloadProgress.value?.file_index ?? 0,
         file_count: downloadProgress.value?.file_count ?? 3,
         downloaded_bytes: downloadProgress.value?.downloaded_bytes ?? 0,
         total_bytes: downloadProgress.value?.total_bytes,
         fraction: downloadProgress.value?.fraction ?? 0,
-        message: String(reason),
+        message: cancelled ? '下载已取消' : message,
       }
     } finally {
       unlistenDownload?.()
@@ -272,9 +282,49 @@ export function useSettings(
     }
   }
 
+
+  async function cancelSemanticWork() {
+    try {
+      await api.cancelSemanticWork()
+      if (downloadProgress.value && downloadProgress.value.stage !== 'done') {
+        downloadProgress.value = {
+          stage: 'cancelled',
+          file_index: downloadProgress.value.file_index ?? 0,
+          file_count: downloadProgress.value.file_count ?? 3,
+          downloaded_bytes: downloadProgress.value.downloaded_bytes ?? 0,
+          total_bytes: downloadProgress.value.total_bytes,
+          fraction: downloadProgress.value.fraction ?? 0,
+          message: '下载已取消',
+        }
+      }
+      if (reindexProgress.value && reindexProgress.value.stage !== 'done') {
+        reindexProgress.value = {
+          stage: 'cancelled',
+          total_sessions: reindexProgress.value.total_sessions ?? 0,
+          processed_sessions: reindexProgress.value.processed_sessions ?? 0,
+          total_chunks: reindexProgress.value.total_chunks ?? 0,
+          ready_chunks: reindexProgress.value.ready_chunks ?? 0,
+          pending_chunks: reindexProgress.value.pending_chunks ?? 0,
+          fraction: reindexProgress.value.fraction ?? 0,
+          message: '索引任务已取消',
+        }
+      }
+      stopReindexPolling()
+      await refreshSemanticStatus()
+    } catch (reason) {
+      error.value = String(reason)
+    } finally {
+      semanticBusy.value = false
+      unlistenDownload?.()
+      unlistenDownload = undefined
+      unlistenReindex?.()
+      unlistenReindex = undefined
+    }
+  }
+
   return {
     showSettings, originText, secretCopied, semanticStatus, semanticBusy, downloadProgress, reindexProgress,
     openSettings, closeSettings, saveSettings, rotateSecret, copySecret, changeDataDirectory,
-    checkEmbedding, reindexSemantic, downloadLocalModel, importLocalModel,
+    checkEmbedding, reindexSemantic, downloadLocalModel, importLocalModel, cancelSemanticWork,
   }
 }

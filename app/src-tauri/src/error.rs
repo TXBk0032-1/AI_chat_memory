@@ -14,6 +14,8 @@ pub enum AppError {
     NotFound(String),
     #[error("configuration error: {0}")]
     Configuration(String),
+    #[error("cancelled: {0}")]
+    Cancelled(String),
 }
 
 pub type Result<T> = std::result::Result<T, AppError>;

@@ -133,6 +133,7 @@ export interface DesktopApi {
   reindexSemanticSearch(): Promise<number>
   downloadLocalEmbeddingModel(): Promise<void>
   importLocalEmbeddingModel(path: string): Promise<void>
+  cancelSemanticWork(): Promise<void>
   moveDataDirectory(path: string): Promise<void>
   confirmCloseBehavior(behavior: Exclude<CloseBehavior, 'ask'>): Promise<void>
   writeExportFile(path: string, payload: ExportFilePayload): Promise<void>
@@ -155,6 +156,7 @@ export const desktopApi: DesktopApi = {
   reindexSemanticSearch: () => invoke('reindex_semantic_search'),
   downloadLocalEmbeddingModel: () => invoke('download_local_embedding_model'),
   importLocalEmbeddingModel: (path) => invoke('import_local_embedding_model', { path }),
+  cancelSemanticWork: () => invoke('cancel_semantic_work'),
   moveDataDirectory: (path) => invoke('move_data_directory', { path }),
   confirmCloseBehavior: (behavior) => invoke('confirm_close_behavior', { behavior }),
   writeExportFile: (path, payload) => invoke('write_export_file', { path, payload }),

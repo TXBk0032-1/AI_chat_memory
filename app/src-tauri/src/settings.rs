@@ -14,7 +14,7 @@ pub struct SettingsStore {
 
 impl SettingsStore {
     pub async fn load(path: PathBuf) -> Result<Self> {
-        let value = if path.exists() {
+        let mut value = if path.exists() {
             match serde_json::from_slice(&tokio::fs::read(&path).await?) {
                 Ok(value) => value,
                 Err(error) => {
@@ -28,6 +28,11 @@ impl SettingsStore {
         } else {
             AppSettings::default()
         };
+        if value.semantic_search.local.model == "microsoft/harrier-oss-v1-270m" {
+            value.semantic_search.local.model = "BAAI/bge-small-zh-v1.5".into();
+            value.semantic_search.local.model_path = None;
+            tracing::info!("migrated default local embedding model to bge-small-zh-v1.5");
+        }
         Ok(Self {
             path,
             value: RwLock::new(value),

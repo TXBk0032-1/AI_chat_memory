@@ -37,6 +37,18 @@ impl AppService {
         let embeddings =
             EmbeddingManager::from_settings(data_dir.clone(), settings_value.semantic_search)
                 .await?;
+        crate::database::connection::ensure_embedding_vec_table(
+            &pool,
+            Some(embeddings.identity().dimensions),
+        )
+        .await?;
+        let identity = embeddings.identity();
+        crate::database::connection::activate_embedding_index(
+            &pool,
+            &identity.backend_id,
+            &identity.model_id,
+        )
+        .await?;
         let semantic = Arc::new(SemanticEngine::new(pool.clone(), data_dir, embeddings));
         semantic.start_worker();
         // Warm the local model off the startup path so the first window paint stays snappy.
@@ -271,5 +283,9 @@ impl AppService {
 
     pub async fn import_local_model(&self, path: &Path) -> Result<()> {
         self.semantic.import_local_model(path).await
+    }
+
+    pub async fn cancel_semantic_work(&self) -> Result<()> {
+        self.semantic.cancel_semantic_work().await
     }
 }

@@ -278,3 +278,8 @@ mod export_tests {
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
 }
+
+#[tauri::command]
+pub async fn cancel_semantic_work(service: State<'_, AppService>) -> Result<(), String> {
+    service.cancel_semantic_work().await.map_err(message)
+}
