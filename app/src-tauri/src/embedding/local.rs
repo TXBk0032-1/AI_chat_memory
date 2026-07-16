@@ -630,9 +630,37 @@ fn warmup_model(loaded: &mut LoadedModel) -> Result<()> {
 }
 
 /// Cheap token estimate for batch packing.
-/// Chat archives are Chinese-heavy, so char count is a stable upper-ish proxy.
+/// Calibrated against live harrier tokenizer logs: plain char-count over-estimated
+/// by ~1.7x on this corpus, so apply script-aware weights with a small safety margin.
 pub fn estimate_token_count(text: &str) -> usize {
-    text.chars().count().clamp(1, MAX_SEQUENCE_LEN)
+    let mut cjk = 0usize;
+    let mut space = 0usize;
+    let mut other = 0usize;
+    for ch in text.chars() {
+        if ch.is_whitespace() {
+            space += 1;
+        } else if is_cjk(ch) {
+            cjk += 1;
+        } else {
+            other += 1;
+        }
+    }
+    // Live V5.1 pairing showed est/real ~1.7 with 1-char=1-token.
+    // Target a mild remaining over-estimate (~10%) rather than under-pack risk.
+    let est = (cjk as f32 * 0.62) + (other as f32 * 0.35) + (space as f32 * 0.15);
+    (est.ceil().max(1.0) as usize).clamp(1, MAX_SEQUENCE_LEN)
+}
+
+fn is_cjk(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{4E00}'..='\u{9FFF}'   // CJK Unified
+        | '\u{3400}'..='\u{4DBF}' // CJK Extension A
+        | '\u{F900}'..='\u{FAFF}' // CJK Compatibility
+        | '\u{3000}'..='\u{303F}' // CJK punctuation
+        | '\u{3040}'..='\u{30FF}' // Hiragana/Katakana
+        | '\u{AC00}'..='\u{D7AF}' // Hangul
+    )
 }
 
 fn length_band(tokens: usize) -> u8 {
@@ -1074,6 +1102,8 @@ impl HarrierModel {
         let xs = self.norm.forward(&xs)?;
         // last valid token pooling for padded batches
         let mut pooled_rows = Vec::with_capacity(b_size);
+        // Contiguous once before many narrow/index ops.
+        let xs = xs.contiguous()?;
         for (batch_idx, length) in lengths.iter().enumerate() {
             let token_idx = length.saturating_sub(1).min(seq_len.saturating_sub(1));
             pooled_rows.push(xs.i((batch_idx, token_idx, ..))?);
@@ -1254,14 +1284,16 @@ impl Attention {
             .rotary_emb
             .apply_rotary_emb_qkv(&query_states, &key_states)?;
 
-        let key_states = repeat_kv(key_states, self.num_heads / self.num_kv_heads.max(1))?;
-        let value_states = repeat_kv(value_states, self.num_heads / self.num_kv_heads.max(1))?;
+        let n_rep = self.num_heads / self.num_kv_heads.max(1);
+        let key_states = repeat_kv(key_states, n_rep)?;
+        let value_states = repeat_kv(value_states, n_rep)?;
 
-        let attn_weights = (query_states.matmul(&key_states.transpose(2, 3)?)? * self.scale)?;
-        let attn_weights = match attention_mask {
-            None => attn_weights,
-            Some(mask) => attn_weights.broadcast_add(mask)?,
-        };
+        // Fold scale into Q to keep the large score matmul as a single kernel.
+        let query_states = (query_states * self.scale)?;
+        let mut attn_weights = query_states.matmul(&key_states.t()?)?;
+        if let Some(mask) = attention_mask {
+            attn_weights = attn_weights.broadcast_add(mask)?;
+        }
         let attn_weights = softmax(&attn_weights, D::Minus1)?;
         let attn_output = attn_weights.matmul(&value_states)?;
         attn_output
@@ -1338,21 +1370,25 @@ fn causal_mask(
     dtype: DType,
 ) -> candle_core::Result<Tensor> {
     // Keep a real 4D mask even for seq=1 so broadcast shapes stay consistent.
+    // Only touch the upper triangle of valid query rows; pad rows remain zero so
+    // softmax never sees an all -inf row.
     let mut data = vec![0f32; batch * seq * seq];
     for (b, &length) in lengths.iter().enumerate() {
         let valid = length.min(seq).max(1);
         let base = b * seq * seq;
-        for i in 0..seq {
-            for j in 0..seq {
-                // Only apply causal masking on valid query rows.
-                // Padding rows stay zero so softmax never sees an all -inf row.
-                if i < valid && j > i {
-                    data[base + i * seq + j] = f32::NEG_INFINITY;
-                }
+        for i in 0..valid {
+            let row = base + i * seq;
+            for j in (i + 1)..seq {
+                data[row + j] = f32::NEG_INFINITY;
             }
         }
     }
-    Tensor::from_vec(data, (batch, 1, seq, seq), device)?.to_dtype(dtype)
+    let mask = Tensor::from_vec(data, (batch, 1, seq, seq), device)?;
+    if dtype == DType::F32 {
+        Ok(mask)
+    } else {
+        mask.to_dtype(dtype)
+    }
 }
 
 struct Mlp {
@@ -1453,8 +1489,15 @@ mod packing_tests {
     #[test]
     fn estimate_token_count_clamps() {
         assert_eq!(estimate_token_count(""), 1);
-        assert_eq!(estimate_token_count("你好世界"), 4);
+        // CJK is weighted < 1.0 token/char after calibration.
+        let cjk = estimate_token_count("你好世界");
+        assert!((2..=4).contains(&cjk), "cjk={cjk}");
+        let latin = estimate_token_count("hello world");
+        assert!(latin >= 1 && latin < 11, "latin={latin}");
         assert!(estimate_token_count(&"a".repeat(10_000)) <= 2048);
+        // Should stay well below naive char-count for Chinese text.
+        let long_zh = "中文检索语句".repeat(20);
+        assert!(estimate_token_count(&long_zh) < long_zh.chars().count());
     }
 
     #[test]
