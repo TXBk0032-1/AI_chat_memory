@@ -273,17 +273,35 @@ pub async fn mark_chunks_ready(
     let mut tx = pool.begin().await?;
     let now = chrono::Utc::now().to_rfc3339();
 
-    // One IN-delete is much cheaper than per-row DELETEs on vec0.
+    // Fresh pending chunks usually have no prior vector row. Only delete when
+    // some already exist (reindex/stale rewrite), to avoid expensive no-op vec0 DELETEs.
     let delete_started = std::time::Instant::now();
-    let mut delete_sql = String::from("DELETE FROM embedding_vec WHERE chunk_id IN (");
-    for (i, (chunk_id, _, _, _, _)) in prepared.iter().enumerate() {
-        if i > 0 {
-            delete_sql.push(',');
+    let mut existing_ids = Vec::new();
+    {
+        let mut exists_sql = String::from("SELECT chunk_id FROM embedding_vec WHERE chunk_id IN (");
+        for (i, (chunk_id, _, _, _, _)) in prepared.iter().enumerate() {
+            if i > 0 {
+                exists_sql.push(',');
+            }
+            exists_sql.push_str(&chunk_id.to_string());
         }
-        delete_sql.push_str(&chunk_id.to_string());
+        exists_sql.push(')');
+        let rows = sqlx::query(&exists_sql).fetch_all(&mut *tx).await?;
+        for row in rows {
+            existing_ids.push(row.get::<i64, _>("chunk_id"));
+        }
     }
-    delete_sql.push(')');
-    let _ = sqlx::query(&delete_sql).execute(&mut *tx).await;
+    if !existing_ids.is_empty() {
+        let mut delete_sql = String::from("DELETE FROM embedding_vec WHERE chunk_id IN (");
+        for (i, chunk_id) in existing_ids.iter().enumerate() {
+            if i > 0 {
+                delete_sql.push(',');
+            }
+            delete_sql.push_str(&chunk_id.to_string());
+        }
+        delete_sql.push(')');
+        let _ = sqlx::query(&delete_sql).execute(&mut *tx).await;
+    }
     let delete_ms = delete_started.elapsed().as_millis();
 
     let mut insert_ms = 0u128;
@@ -319,6 +337,7 @@ pub async fn mark_chunks_ready(
     let total_ms = total_started.elapsed().as_millis();
     tracing::info!(
         batch_size = items.len(),
+        existing_vectors = existing_ids.len(),
         prepare_ms,
         delete_ms,
         insert_ms,

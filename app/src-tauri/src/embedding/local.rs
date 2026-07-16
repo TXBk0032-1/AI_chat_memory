@@ -21,10 +21,10 @@ const MODEL_FILES: [&str; 3] = ["config.json", "tokenizer.json", "model.safetens
 const MAX_SEQUENCE_LEN: usize = 2048;
 /// Pull a wider pending window so we can pack similar-length chunks.
 pub const LOCAL_INDEX_CANDIDATE_LIMIT: i64 = 512;
-/// Hard cap on items in one local embed call.
+/// Absolute hard cap on items in one local embed call.
 pub const LOCAL_INDEX_MAX_BATCH_ITEMS: usize = 64;
 /// Fallback padded-token budget used by tests / generic callers.
-pub const LOCAL_INDEX_TOKEN_BUDGET: usize = 16384;
+pub const LOCAL_INDEX_TOKEN_BUDGET: usize = 12288;
 
 pub type DownloadProgressCallback = Arc<dyn Fn(ModelDownloadProgress) + Send + Sync>;
 
@@ -645,13 +645,16 @@ fn length_band(tokens: usize) -> u8 {
     }
 }
 
-fn token_budget_for_band(band: u8) -> usize {
+/// Short texts can fill the GPU; long texts must stay restrained because
+/// attention cost grows roughly with max_len^2.
+fn band_limits(band: u8) -> (usize, usize) {
+    // (token_budget, max_items)
     match band {
-        0 => 12_288, // short: pack many items
-        1 => 14_336,
-        2 => 16_384,
-        3 => 16_384,
-        _ => 16_384, // long: allow larger padded batches than before
+        0 => (12_288, 64), // short: aggressive
+        1 => (11_264, 40),
+        2 => (9_216, 24),
+        3 => (8_192, 16),
+        _ => (7_168, 10), // long: restrained
     }
 }
 
@@ -688,11 +691,12 @@ pub fn plan_local_index_batch(estimated_tokens: &[usize]) -> Vec<usize> {
     let mut best_score = f64::NEG_INFINITY;
 
     for (band_start, band_end, band) in band_ranges {
-        let budget = token_budget_for_band(band);
+        let (budget, max_items) = band_limits(band);
+        let max_items = max_items.min(LOCAL_INDEX_MAX_BATCH_ITEMS);
         for start in band_start..band_end {
             let mut max_len = estimated_tokens[order[start]];
             let mut sum_tokens = 0usize;
-            let max_end = (start + LOCAL_INDEX_MAX_BATCH_ITEMS).min(band_end);
+            let max_end = (start + max_items).min(band_end);
             for end in (start + 1)..=max_end {
                 let tokens = estimated_tokens[order[end - 1]];
                 max_len = max_len.max(tokens);
@@ -703,10 +707,10 @@ pub fn plan_local_index_batch(estimated_tokens: &[usize]) -> Vec<usize> {
                     break;
                 }
                 let pad_ratio = 1.0 - (sum_tokens as f64 / padded.max(1) as f64);
-                // Prefer fuller GPU batches: more items, low pad, good budget fill.
-                let fill = (padded as f64 / budget as f64).clamp(0.15, 1.0);
-                let score = (items as f64) * (1.0 - pad_ratio).powf(1.25) * fill
-                    / (max_len as f64).max(1.0).sqrt();
+                // Approximate throughput score: items / cost(max_len), with pad penalty.
+                // Long sequences are heavily penalized (attention ~ seq^2).
+                let score = (items as f64) * (1.0 - pad_ratio).powf(1.15)
+                    / (max_len as f64).max(1.0).powf(1.35);
                 if score > best_score {
                     best_score = score;
                     best_start = start;
@@ -1379,13 +1383,19 @@ mod packing_tests {
     }
 
     #[test]
-    fn plan_local_index_batch_respects_budget() {
+    fn plan_local_index_batch_restrains_medium_long_items() {
         let estimates = vec![400usize; 64];
         let chosen = plan_local_index_batch(&estimates);
-        let max_len = 400;
-        assert!(max_len * chosen.len() <= LOCAL_INDEX_TOKEN_BUDGET || chosen.len() == 1);
-        // With 16k budget, medium-long texts should pack more than the old fixed 16.
-        assert!(chosen.len() >= 24, "chosen={}", chosen.len());
+        assert!((12..=16).contains(&chosen.len()), "chosen={}", chosen.len());
+        assert!(400 * chosen.len() <= 8192 || chosen.len() == 1);
+    }
+
+    #[test]
+    fn plan_local_index_batch_restrains_long_items() {
+        let estimates = vec![600usize; 40];
+        let chosen = plan_local_index_batch(&estimates);
+        assert!((8..=10).contains(&chosen.len()), "chosen={}", chosen.len());
+        assert!(600 * chosen.len() <= 7168 || chosen.len() == 1);
     }
 
     #[test]
