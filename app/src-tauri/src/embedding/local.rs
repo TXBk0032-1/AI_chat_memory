@@ -19,7 +19,7 @@ use crate::{
 const DEFAULT_QUERY_INSTRUCTION: &str = "Instruct: Given a chat history search query, retrieve relevant conversation passages that answer the query\nQuery: ";
 const MODEL_FILES: [&str; 3] = ["config.json", "tokenizer.json", "model.safetensors"];
 const MAX_SEQUENCE_LEN: usize = 2048;
-pub const LOCAL_INDEX_BATCH_SIZE: i64 = 64;
+pub const LOCAL_INDEX_BATCH_SIZE: i64 = 16;
 
 pub type DownloadProgressCallback = Arc<dyn Fn(ModelDownloadProgress) + Send + Sync>;
 
@@ -203,7 +203,7 @@ impl LocalHarrierBackend {
             let loaded = guard
                 .as_mut()
                 .ok_or_else(|| AppError::Configuration("local model not loaded".into()))?;
-            embed_batch(loaded, &texts, is_query, dimensions)
+            embed_batch_resilient(loaded, &texts, is_query, dimensions)
         })
         .await
         .map_err(|error| {
@@ -677,6 +677,30 @@ fn embed_batch(
     Ok(vectors)
 }
 
+fn embed_batch_resilient(
+    loaded: &mut LoadedModel,
+    texts: &[String],
+    is_query: bool,
+    dimensions: usize,
+) -> Result<Vec<Vec<f32>>> {
+    match embed_batch(loaded, texts, is_query, dimensions) {
+        Ok(vectors) => Ok(vectors),
+        Err(error) if texts.len() > 1 => {
+            tracing::warn!(
+                %error,
+                batch_size = texts.len(),
+                "local embedding batch failed; splitting and retrying"
+            );
+            let mid = texts.len() / 2;
+            let mut left = embed_batch_resilient(loaded, &texts[..mid], is_query, dimensions)?;
+            let right = embed_batch_resilient(loaded, &texts[mid..], is_query, dimensions)?;
+            left.extend(right);
+            Ok(left)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 fn candle_err(error: impl ToString) -> AppError {
     AppError::Configuration(error.to_string())
 }
@@ -1060,18 +1084,16 @@ fn causal_mask(
     device: &Device,
     dtype: DType,
 ) -> candle_core::Result<Tensor> {
-    if seq <= 1 {
-        return Tensor::zeros((batch, 1, 1, 1), dtype, device);
-    }
+    // Keep a real 4D mask even for seq=1 so broadcast shapes stay consistent.
     let mut data = vec![0f32; batch * seq * seq];
     for (b, &length) in lengths.iter().enumerate() {
-        let valid = length.min(seq);
+        let valid = length.min(seq).max(1);
         let base = b * seq * seq;
         for i in 0..seq {
             for j in 0..seq {
-                let causal_block = j > i;
-                let pad_block = j >= valid || i >= valid;
-                if causal_block || pad_block {
+                // Only apply causal masking on valid query rows.
+                // Padding rows stay zero so softmax never sees an all -inf row.
+                if i < valid && j > i {
                     data[base + i * seq + j] = f32::NEG_INFINITY;
                 }
             }
@@ -1139,13 +1161,20 @@ mod tests {
                 .await
                 .expect("open local backend");
         let vectors = backend
-            .embed_documents(&["hello semantic search".into()])
+            .embed_documents(&[
+                "hello semantic search".into(),
+                "another chat about project planning and weekly goals".into(),
+                "short".into(),
+                "这是一条中文消息，用于验证批处理 padding 与 attention mask".into(),
+            ])
             .await
-            .expect("embed document");
-        assert_eq!(vectors.len(), 1);
-        assert_eq!(vectors[0].len(), 640);
-        let norm = vectors[0].iter().map(|v| v * v).sum::<f32>().sqrt();
-        assert!((norm - 1.0).abs() < 1e-3, "norm={norm}");
+            .expect("embed documents batch");
+        assert_eq!(vectors.len(), 4);
+        for vector in &vectors {
+            assert_eq!(vector.len(), 640);
+            let norm = vector.iter().map(|v| v * v).sum::<f32>().sqrt();
+            assert!(norm.is_finite() && (norm - 1.0).abs() < 1e-3, "norm={norm}");
+        }
         let device = backend.runtime_device_label();
         let dtype = backend.runtime_dtype_label();
         eprintln!("local harrier runtime device={device} dtype={dtype}");

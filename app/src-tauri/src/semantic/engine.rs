@@ -566,6 +566,8 @@ impl SemanticEngine {
                     // Keep chunks pending so a later successful model load can resume.
                     *self.last_error.write().await = Some(error.to_string());
                     tracing::warn!(%error, pending = pending.len(), "semantic embedding failed; will retry later");
+                    // Avoid a tight spin while CUDA recovers from bad batches.
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     break;
                 }
             };
