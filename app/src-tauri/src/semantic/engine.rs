@@ -113,7 +113,10 @@ impl SemanticEngine {
         self.embeddings.read().await.healthcheck().await
     }
 
-    pub async fn ensure_local_model(&self) -> Result<()> {
+    pub async fn ensure_local_model(
+        &self,
+        on_progress: Option<crate::embedding::local::DownloadProgressCallback>,
+    ) -> Result<()> {
         let settings = self.embeddings.read().await.settings().clone();
         if !matches!(settings.backend, crate::models::EmbeddingBackendKind::Local) {
             return Ok(());
@@ -122,7 +125,9 @@ impl SemanticEngine {
         let backend =
             crate::embedding::LocalHarrierBackend::open(settings.local.model.clone(), model_dir)
                 .await?;
-        backend.ensure_model_files().await?;
+        backend
+            .ensure_model_files_with_progress(on_progress)
+            .await?;
         self.reload_embeddings(settings).await
     }
 

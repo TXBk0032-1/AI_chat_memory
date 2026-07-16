@@ -603,3 +603,16 @@ html[data-theme="dark"] .export-document .mermaid-diagram { border-color: #d7ddd
 html[data-theme="dark"] .search-mode,
 html[data-theme="dark"] .semantic-settings input,
 html[data-theme="dark"] .semantic-settings select { border-color: #4a5358; background: #20272c; color: #e7ecef; }
+
+
+.download-progress { display: grid; gap: 8px; margin-top: 4px; padding: 12px; border: 1px solid #d7dddf; border-radius: 6px; background: #f7f9f9; }
+.download-progress-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #4d575c; font-size: 11px; }
+.download-progress-meta strong { color: #1f7a63; font-size: 12px; }
+.download-progress-track { height: 8px; overflow: hidden; border-radius: 999px; background: #dfe5e7; }
+.download-progress-track i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #39ad8d, #258a72); transition: width .18s ease; }
+.download-progress[data-stage="error"] .download-progress-meta strong,
+.download-progress[data-stage="error"] .download-progress-meta span { color: #b42318; }
+.download-progress[data-stage="error"] .download-progress-track i { background: #d92d20; }
+html[data-theme="dark"] .download-progress { border-color: #3b4347; background: #1b2226; }
+html[data-theme="dark"] .download-progress-meta { color: #b7c0c4; }
+html[data-theme="dark"] .download-progress-track { background: #2b3439; }

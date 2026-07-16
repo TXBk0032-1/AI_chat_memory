@@ -1,6 +1,13 @@
 import { open } from '@tauri-apps/plugin-dialog'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { ref, type Ref } from 'vue'
-import { desktopApi, type DesktopApi, type SemanticRuntimeStatus, type SettingsModel } from '../desktop-api'
+import {
+  desktopApi,
+  type DesktopApi,
+  type ModelDownloadProgress,
+  type SemanticRuntimeStatus,
+  type SettingsModel,
+} from '../desktop-api'
 
 type ThemePreview = { begin(): void; accept(): void; cancel(): void }
 
@@ -15,6 +22,8 @@ export function useSettings(
   const secretCopied = ref(false)
   const semanticStatus = ref<SemanticRuntimeStatus | null>(null)
   const semanticBusy = ref(false)
+  const downloadProgress = ref<ModelDownloadProgress | null>(null)
+  let unlistenDownload: UnlistenFn | undefined
 
   async function openSettings() {
     settings.value = await api.getSettings()
@@ -68,7 +77,6 @@ export function useSettings(
     }
   }
 
-
   async function refreshSemanticStatus() {
     try {
       semanticStatus.value = await api.getSemanticStatus()
@@ -103,12 +111,46 @@ export function useSettings(
 
   async function downloadLocalModel() {
     semanticBusy.value = true
+    downloadProgress.value = {
+      stage: 'starting',
+      file_index: 0,
+      file_count: 3,
+      downloaded_bytes: 0,
+      fraction: 0,
+      message: '准备下载本地模型…',
+    }
     try {
+      unlistenDownload?.()
+      unlistenDownload = await listen<ModelDownloadProgress>('local-model-download-progress', (event) => {
+        downloadProgress.value = event.payload
+      })
       await api.downloadLocalEmbeddingModel()
       await refreshSemanticStatus()
+      if (downloadProgress.value?.stage !== 'done') {
+        downloadProgress.value = {
+          stage: 'done',
+          file_index: downloadProgress.value?.file_count ?? 3,
+          file_count: downloadProgress.value?.file_count ?? 3,
+          downloaded_bytes: downloadProgress.value?.downloaded_bytes ?? 0,
+          total_bytes: downloadProgress.value?.total_bytes,
+          fraction: 1,
+          message: '下载完成',
+        }
+      }
     } catch (reason) {
       error.value = String(reason)
+      downloadProgress.value = {
+        stage: 'error',
+        file_index: downloadProgress.value?.file_index ?? 0,
+        file_count: downloadProgress.value?.file_count ?? 3,
+        downloaded_bytes: downloadProgress.value?.downloaded_bytes ?? 0,
+        total_bytes: downloadProgress.value?.total_bytes,
+        fraction: downloadProgress.value?.fraction ?? 0,
+        message: String(reason),
+      }
     } finally {
+      unlistenDownload?.()
+      unlistenDownload = undefined
       semanticBusy.value = false
     }
   }
@@ -128,5 +170,9 @@ export function useSettings(
     }
   }
 
-  return { showSettings, originText, secretCopied, semanticStatus, semanticBusy, openSettings, closeSettings, saveSettings, rotateSecret, copySecret, changeDataDirectory, checkEmbedding, reindexSemantic, downloadLocalModel, importLocalModel }
+  return {
+    showSettings, originText, secretCopied, semanticStatus, semanticBusy, downloadProgress,
+    openSettings, closeSettings, saveSettings, rotateSecret, copySecret, changeDataDirectory,
+    checkEmbedding, reindexSemantic, downloadLocalModel, importLocalModel,
+  }
 }

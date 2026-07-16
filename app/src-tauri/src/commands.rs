@@ -1,6 +1,6 @@
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::Deserialize;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::{
     models::{
@@ -154,8 +154,17 @@ pub async fn reindex_semantic_search(service: State<'_, AppService>) -> Result<u
 }
 
 #[tauri::command]
-pub async fn download_local_embedding_model(service: State<'_, AppService>) -> Result<(), String> {
-    service.download_local_model().await.map_err(message)
+pub async fn download_local_embedding_model(
+    app: AppHandle,
+    service: State<'_, AppService>,
+) -> Result<(), String> {
+    let emitter = app.clone();
+    service
+        .download_local_model(Some(std::sync::Arc::new(move |progress| {
+            let _ = emitter.emit("local-model-download-progress", progress);
+        })))
+        .await
+        .map_err(message)
 }
 
 #[tauri::command]

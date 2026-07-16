@@ -2,6 +2,7 @@
 import { Check, Clipboard, FolderOpen, Monitor, Moon, RefreshCw, ShieldCheck, Sun } from 'lucide-vue-next'
 import type {
   EmbeddingBackendKind,
+  ModelDownloadProgress,
   SearchMode,
   SemanticRuntimeStatus,
   SettingsModel,
@@ -13,6 +14,7 @@ defineProps<{
   secretCopied: boolean
   semanticStatus?: SemanticRuntimeStatus | null
   semanticBusy?: boolean
+  downloadProgress?: ModelDownloadProgress | null
 }>()
 const settings = defineModel<SettingsModel>('settings', { required: true })
 const originText = defineModel<string>('originText', { required: true })
@@ -88,9 +90,20 @@ function setMode(mode: SearchMode) {
               <template v-if="settings.semantic_search.backend === 'local'">
                 <label><span>模型 ID</span><input v-model="settings.semantic_search.local.model" /></label>
                 <p class="path-value">本地目录：{{ semanticStatus?.local_model_path || settings.semantic_search.local.model_path || '尚未准备' }}</p>
+                <p class="path-value">下载源：Hugging Face（{{ settings.semantic_search.local.model }}）</p>
                 <div class="setting-actions">
-                  <button class="secondary-button compact" :disabled="semanticBusy" @click="emit('downloadLocalModel')">下载模型</button>
+                  <button class="secondary-button compact" :disabled="semanticBusy" @click="emit('downloadLocalModel')">{{ semanticBusy && downloadProgress ? '下载中…' : '下载模型' }}</button>
                   <button class="secondary-button compact" :disabled="semanticBusy" @click="emit('importLocalModel')"><FolderOpen :size="14" />导入本地模型</button>
+                </div>
+                <div v-if="downloadProgress" class="download-progress" :data-stage="downloadProgress.stage">
+                  <div class="download-progress-meta">
+                    <span>{{ downloadProgress.message }}</span>
+                    <strong>{{ Math.round((downloadProgress.fraction || 0) * 100) }}%</strong>
+                  </div>
+                  <div class="download-progress-track" aria-hidden="true">
+                    <i :style="{ width: `${Math.max(2, Math.round((downloadProgress.fraction || 0) * 100))}%` }"></i>
+                  </div>
+                  <p v-if="downloadProgress.file" class="path-value">文件 {{ downloadProgress.file_index + 1 }}/{{ downloadProgress.file_count }}：{{ downloadProgress.file }}</p>
                 </div>
               </template>
               <template v-else-if="settings.semantic_search.backend === 'ollama'">

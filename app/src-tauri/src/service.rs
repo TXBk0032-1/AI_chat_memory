@@ -255,8 +255,11 @@ impl AppService {
         self.semantic.request_reindex_all().await
     }
 
-    pub async fn download_local_model(&self) -> Result<()> {
-        self.semantic.ensure_local_model().await
+    pub async fn download_local_model(
+        &self,
+        on_progress: Option<crate::embedding::local::DownloadProgressCallback>,
+    ) -> Result<()> {
+        self.semantic.ensure_local_model(on_progress).await
     }
 
     pub async fn import_local_model(&self, path: &Path) -> Result<()> {

@@ -1,18 +1,22 @@
 use async_trait::async_trait;
 use candle_core::{D, DType, Device, Module, Tensor};
 use candle_nn::{Activation, Embedding, Linear, VarBuilder, linear_b as linear, ops::softmax};
-use hf_hub::api::tokio::ApiBuilder;
+use hf_hub::api::tokio::{ApiBuilder, Progress};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokenizers::Tokenizer;
 use tokio::sync::Mutex;
 
 use super::{BackendIdentity, EmbeddingBackend, ensure_dimensions};
 use crate::{
     error::{AppError, Result},
-    models::{EmbeddingBackendKind, EmbeddingHealth},
+    models::{EmbeddingBackendKind, EmbeddingHealth, ModelDownloadProgress},
 };
 
 const DEFAULT_QUERY_INSTRUCTION: &str = "Instruct: Given a chat history search query, retrieve relevant conversation passages that answer the query\nQuery: ";
+const MODEL_FILES: [&str; 3] = ["config.json", "tokenizer.json", "model.safetensors"];
+
+pub type DownloadProgressCallback = Arc<dyn Fn(ModelDownloadProgress) + Send + Sync>;
 
 pub struct LocalHarrierBackend {
     model_id: String,
@@ -48,11 +52,26 @@ impl LocalHarrierBackend {
         &self.model_dir
     }
 
-    pub async fn ensure_model_files(&self) -> Result<()> {
+    pub async fn ensure_model_files_with_progress(
+        &self,
+        on_progress: Option<DownloadProgressCallback>,
+    ) -> Result<()> {
         if model_files_present(&self.model_dir) {
+            if let Some(on_progress) = &on_progress {
+                on_progress(ModelDownloadProgress {
+                    stage: "done".into(),
+                    file: None,
+                    file_index: MODEL_FILES.len(),
+                    file_count: MODEL_FILES.len(),
+                    downloaded_bytes: 0,
+                    total_bytes: None,
+                    fraction: 1.0,
+                    message: "本地模型已就绪".into(),
+                });
+            }
             return Ok(());
         }
-        download_model(&self.model_id, &self.model_dir).await
+        download_model(&self.model_id, &self.model_dir, on_progress).await
     }
 
     pub async fn import_model_dir(&self, source: &Path) -> Result<()> {
@@ -62,7 +81,7 @@ impl LocalHarrierBackend {
                     .into(),
             ));
         }
-        for file in ["config.json", "tokenizer.json", "model.safetensors"] {
+        for file in MODEL_FILES {
             let from = source.join(file);
             if !from.exists() {
                 return Err(AppError::Configuration(format!("导入目录缺少 {file}")));
@@ -195,31 +214,186 @@ impl EmbeddingBackend for LocalHarrierBackend {
 }
 
 pub fn model_files_present(dir: &Path) -> bool {
-    dir.join("config.json").exists()
-        && dir.join("tokenizer.json").exists()
-        && dir.join("model.safetensors").exists()
+    MODEL_FILES.iter().all(|file| dir.join(file).exists())
 }
 
-async fn download_model(model_id: &str, model_dir: &Path) -> Result<()> {
+async fn download_model(
+    model_id: &str,
+    model_dir: &Path,
+    on_progress: Option<DownloadProgressCallback>,
+) -> Result<()> {
     tokio::fs::create_dir_all(model_dir)
         .await
         .map_err(|error| AppError::Configuration(error.to_string()))?;
+    if let Some(on_progress) = &on_progress {
+        on_progress(ModelDownloadProgress {
+            stage: "starting".into(),
+            file: None,
+            file_index: 0,
+            file_count: MODEL_FILES.len(),
+            downloaded_bytes: 0,
+            total_bytes: None,
+            fraction: 0.0,
+            message: format!("开始从 Hugging Face 下载 {model_id}"),
+        });
+    }
+
     let api = ApiBuilder::new()
-        .with_progress(true)
+        .with_progress(false)
         .build()
         .map_err(|error| AppError::Configuration(error.to_string()))?;
     let repo = api.model(model_id.to_string());
-    for file in ["config.json", "tokenizer.json", "model.safetensors"] {
+    let file_count = MODEL_FILES.len();
+
+    for (file_index, file) in MODEL_FILES.iter().enumerate() {
+        if let Some(on_progress) = &on_progress {
+            on_progress(ModelDownloadProgress {
+                stage: "file".into(),
+                file: Some((*file).into()),
+                file_index,
+                file_count,
+                downloaded_bytes: 0,
+                total_bytes: None,
+                fraction: file_index as f32 / file_count as f32,
+                message: format!("正在下载 {file} ({}/{file_count})", file_index + 1),
+            });
+        }
+
+        let progress = CallbackProgress {
+            on_progress: on_progress.clone(),
+            file: (*file).into(),
+            file_index,
+            file_count,
+            downloaded_bytes: 0,
+            total_bytes: None,
+        };
         let path = repo
-            .get(file)
+            .download_with_progress(file, progress)
             .await
             .map_err(|error| AppError::Configuration(format!("download {file} failed: {error}")))?;
+
+        if let Some(on_progress) = &on_progress {
+            on_progress(ModelDownloadProgress {
+                stage: "copying".into(),
+                file: Some((*file).into()),
+                file_index,
+                file_count,
+                downloaded_bytes: 0,
+                total_bytes: None,
+                fraction: (file_index as f32 + 0.95) / file_count as f32,
+                message: format!("正在写入本地缓存 {file}"),
+            });
+        }
         let destination = model_dir.join(file);
         tokio::fs::copy(&path, &destination)
             .await
             .map_err(|error| AppError::Configuration(error.to_string()))?;
     }
+
+    if let Some(on_progress) = &on_progress {
+        on_progress(ModelDownloadProgress {
+            stage: "done".into(),
+            file: None,
+            file_index: file_count,
+            file_count,
+            downloaded_bytes: 0,
+            total_bytes: None,
+            fraction: 1.0,
+            message: format!("模型已保存到 {}", model_dir.display()),
+        });
+    }
     Ok(())
+}
+
+#[derive(Clone)]
+struct CallbackProgress {
+    on_progress: Option<DownloadProgressCallback>,
+    file: String,
+    file_index: usize,
+    file_count: usize,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+}
+
+impl CallbackProgress {
+    fn emit(&self, stage: &str, message: String) {
+        let Some(on_progress) = &self.on_progress else {
+            return;
+        };
+        let file_fraction = match self.total_bytes {
+            Some(total) if total > 0 => {
+                (self.downloaded_bytes as f32 / total as f32).clamp(0.0, 1.0)
+            }
+            _ => 0.0,
+        };
+        let fraction = (self.file_index as f32 + file_fraction) / self.file_count.max(1) as f32;
+        on_progress(ModelDownloadProgress {
+            stage: stage.into(),
+            file: Some(self.file.clone()),
+            file_index: self.file_index,
+            file_count: self.file_count,
+            downloaded_bytes: self.downloaded_bytes,
+            total_bytes: self.total_bytes,
+            fraction: fraction.clamp(0.0, 0.999),
+            message,
+        });
+    }
+}
+
+impl Progress for CallbackProgress {
+    async fn init(&mut self, size: usize, _filename: &str) {
+        self.total_bytes = if size == 0 { None } else { Some(size as u64) };
+        self.downloaded_bytes = 0;
+        self.emit(
+            "file",
+            format!(
+                "开始下载 {} ({}/{})",
+                self.file,
+                self.file_index + 1,
+                self.file_count
+            ),
+        );
+    }
+
+    async fn update(&mut self, size: usize) {
+        self.downloaded_bytes = self.downloaded_bytes.saturating_add(size as u64);
+        let total = self
+            .total_bytes
+            .map(format_bytes)
+            .unwrap_or_else(|| "?".into());
+        self.emit(
+            "file",
+            format!(
+                "下载 {}：{} / {}",
+                self.file,
+                format_bytes(self.downloaded_bytes),
+                total
+            ),
+        );
+    }
+
+    async fn finish(&mut self) {
+        if let Some(total) = self.total_bytes {
+            self.downloaded_bytes = total;
+        }
+        self.emit("file", format!("{} 下载完成", self.file));
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let value = bytes as f64;
+    if value >= GB {
+        format!("{:.2} GB", value / GB)
+    } else if value >= MB {
+        format!("{:.1} MB", value / MB)
+    } else if value >= KB {
+        format!("{:.0} KB", value / KB)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 fn load_model(model_dir: &Path) -> Result<LoadedModel> {

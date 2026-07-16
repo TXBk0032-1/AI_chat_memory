@@ -57,6 +57,17 @@ export type SemanticRuntimeStatus = {
   local_model_path?: string
 }
 
+export type ModelDownloadProgress = {
+  stage: string
+  file?: string
+  file_index: number
+  file_count: number
+  downloaded_bytes: number
+  total_bytes?: number
+  fraction: number
+  message: string
+}
+
 export type EmbeddingHealth = {
   ok: boolean
   backend: EmbeddingBackendKind

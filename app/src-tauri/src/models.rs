@@ -377,6 +377,18 @@ pub struct SemanticRuntimeStatus {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ModelDownloadProgress {
+    pub stage: String,
+    pub file: Option<String>,
+    pub file_index: usize,
+    pub file_count: usize,
+    pub downloaded_bytes: u64,
+    pub total_bytes: Option<u64>,
+    pub fraction: f32,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct EmbeddingHealth {
     pub ok: bool,
     pub backend: EmbeddingBackendKind,
