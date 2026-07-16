@@ -229,6 +229,7 @@ pub async fn mark_chunk_ready(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub async fn mark_chunk_error(pool: &SqlitePool, chunk_id: i64, error: &str) -> Result<()> {
     sqlx::query(
         "UPDATE embedding_chunks SET status = 'error', error = ?, updated_at = ? WHERE id = ?",

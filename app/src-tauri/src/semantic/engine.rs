@@ -128,6 +128,8 @@ impl SemanticEngine {
         backend
             .ensure_model_files_with_progress(on_progress)
             .await?;
+        *self.last_error.write().await = None;
+        // reload_embeddings also queues a full reindex and wakes the worker.
         self.reload_embeddings(settings).await
     }
 
@@ -333,12 +335,14 @@ impl SemanticEngine {
                 .map(|item| item.text.clone())
                 .collect::<Vec<_>>();
             let vectors = match backend.embed_documents(&texts).await {
-                Ok(vectors) => vectors,
+                Ok(vectors) => {
+                    *self.last_error.write().await = None;
+                    vectors
+                }
                 Err(error) => {
-                    for item in &pending {
-                        index::mark_chunk_error(&self.pool, item.id, &error.to_string()).await?;
-                    }
+                    // Keep chunks pending so a later successful model load can resume.
                     *self.last_error.write().await = Some(error.to_string());
+                    tracing::warn!(%error, pending = pending.len(), "semantic embedding failed; will retry later");
                     break;
                 }
             };

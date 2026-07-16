@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use candle_core::{D, DType, Device, Module, Tensor};
+use candle_core::{D, DType, Device, IndexOp, Module, Tensor};
 use candle_nn::{Activation, Embedding, Linear, VarBuilder, linear_b as linear, ops::softmax};
 use hf_hub::api::tokio::{ApiBuilder, Progress};
 use std::path::{Path, PathBuf};
@@ -431,12 +431,17 @@ struct HarrierConfig {
     head_dim: usize,
     rms_norm_eps: f64,
     vocab_size: usize,
+    rope_theta: f64,
+    #[serde(default = "default_rope_local")]
+    rope_local_base_freq: f64,
     #[serde(default = "default_query_scalar")]
     query_pre_attn_scalar: usize,
     #[serde(default = "default_sliding_pattern")]
     sliding_window_pattern: usize,
     #[serde(default = "default_sliding_window")]
     sliding_window: usize,
+    #[serde(default = "default_max_pos")]
+    max_position_embeddings: usize,
     #[serde(default)]
     attention_bias: bool,
 }
@@ -450,6 +455,12 @@ fn default_sliding_window() -> usize {
 fn default_sliding_pattern() -> usize {
     1
 }
+fn default_rope_local() -> f64 {
+    10_000.0
+}
+fn default_max_pos() -> usize {
+    32_768
+}
 
 struct HarrierModel {
     embed_tokens: Embedding,
@@ -460,6 +471,7 @@ struct HarrierModel {
 
 impl HarrierModel {
     fn load(cfg: &HarrierConfig, vb: VarBuilder) -> candle_core::Result<Self> {
+        // Published harrier weights are stored without a leading "model." prefix.
         let vb_m = if vb.contains_tensor("model.embed_tokens.weight") {
             vb.pp("model")
         } else {
@@ -470,6 +482,7 @@ impl HarrierModel {
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
         let vb_l = vb_m.pp("layers");
         for layer_idx in 0..cfg.num_hidden_layers {
+            // pattern=1 means every layer is full attention for this checkpoint.
             let sliding = (layer_idx + 1) % cfg.sliding_window_pattern.max(1) > 0;
             layers.push(DecoderLayer::load(
                 cfg,
@@ -487,14 +500,16 @@ impl HarrierModel {
     }
 
     fn embed(&mut self, input_ids: &Tensor) -> candle_core::Result<Tensor> {
-        let (_b, seq_len) = input_ids.dims2()?;
+        let (b_size, seq_len) = input_ids.dims2()?;
         let mut xs = self.embed_tokens.forward(input_ids)?;
         xs = (xs * (self.hidden_size as f64).sqrt())?;
+        let attention_mask = causal_mask(b_size, seq_len, xs.device(), xs.dtype())?;
         for layer in self.layers.iter_mut() {
-            xs = layer.forward(&xs)?;
+            xs = layer.forward(&xs, Some(&attention_mask))?;
         }
         let xs = self.norm.forward(&xs)?;
-        let pooled = xs.narrow(1, seq_len - 1, 1)?.squeeze(1)?;
+        // last-token pooling for harrier embeddings
+        let pooled = xs.i((.., seq_len - 1, ..))?;
         let norm = pooled
             .sqr()?
             .sum_keepdim(D::Minus1)?
@@ -528,6 +543,7 @@ impl Module for RmsNorm {
         let x = x.to_dtype(internal_dtype)?;
         let norm_x = (x.sqr()?.sum_keepdim(D::Minus1)? / hidden_size as f64)?;
         let x_normed = x.broadcast_div(&(norm_x + self.eps)?.sqrt()?)?;
+        // Gemma-style RMSNorm stores weight-1.
         x_normed
             .to_dtype(x_dtype)?
             .broadcast_mul(&(&self.weight + 1.0)?)
@@ -539,6 +555,8 @@ struct DecoderLayer {
     mlp: Mlp,
     input_layernorm: RmsNorm,
     post_attention_layernorm: RmsNorm,
+    pre_feedforward_layernorm: RmsNorm,
+    post_feedforward_layernorm: RmsNorm,
 }
 
 impl DecoderLayer {
@@ -560,18 +578,34 @@ impl DecoderLayer {
                 cfg.rms_norm_eps,
                 vb.pp("post_attention_layernorm"),
             )?,
+            pre_feedforward_layernorm: RmsNorm::new(
+                cfg.hidden_size,
+                cfg.rms_norm_eps,
+                vb.pp("pre_feedforward_layernorm"),
+            )?,
+            post_feedforward_layernorm: RmsNorm::new(
+                cfg.hidden_size,
+                cfg.rms_norm_eps,
+                vb.pp("post_feedforward_layernorm"),
+            )?,
         })
     }
 
-    fn forward(&mut self, xs: &Tensor) -> candle_core::Result<Tensor> {
+    fn forward(
+        &mut self,
+        xs: &Tensor,
+        attention_mask: Option<&Tensor>,
+    ) -> candle_core::Result<Tensor> {
         let residual = xs;
         let xs = self.input_layernorm.forward(xs)?;
-        let xs = self.self_attn.forward(&xs)?;
+        let xs = self.self_attn.forward(&xs, attention_mask)?;
+        let xs = self.post_attention_layernorm.forward(&xs)?;
         let xs = (xs + residual)?;
         let residual = &xs;
-        let xs = self.post_attention_layernorm.forward(&xs)?;
+        let xs = self.pre_feedforward_layernorm.forward(&xs)?;
         let xs = self.mlp.forward(&xs)?;
-        xs + residual
+        let xs = self.post_feedforward_layernorm.forward(&xs)?;
+        residual + xs
     }
 }
 
@@ -580,17 +614,20 @@ struct Attention {
     k_proj: Linear,
     v_proj: Linear,
     o_proj: Linear,
+    q_norm: RmsNorm,
+    k_norm: RmsNorm,
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
     scale: f64,
+    rotary_emb: RotaryEmbedding,
 }
 
 impl Attention {
     fn load(
         cfg: &HarrierConfig,
         vb: VarBuilder,
-        _sliding_window: Option<usize>,
+        sliding_window: Option<usize>,
     ) -> candle_core::Result<Self> {
         Ok(Self {
             q_proj: linear(
@@ -617,40 +654,104 @@ impl Attention {
                 cfg.attention_bias,
                 vb.pp("o_proj"),
             )?,
+            q_norm: RmsNorm::new(cfg.head_dim, cfg.rms_norm_eps, vb.pp("q_norm"))?,
+            k_norm: RmsNorm::new(cfg.head_dim, cfg.rms_norm_eps, vb.pp("k_norm"))?,
             num_heads: cfg.num_attention_heads,
             num_kv_heads: cfg.num_key_value_heads,
             head_dim: cfg.head_dim,
+            // Gemma3 uses query_pre_attn_scalar for attention scaling.
             scale: 1.0 / (cfg.query_pre_attn_scalar as f64).sqrt(),
+            rotary_emb: RotaryEmbedding::new(vb.dtype(), cfg, vb.device(), sliding_window)?,
         })
     }
 
-    fn forward(&self, xs: &Tensor) -> candle_core::Result<Tensor> {
-        let (b, seq, _h) = xs.dims3()?;
-        let q = self
+    fn forward(&self, xs: &Tensor, attention_mask: Option<&Tensor>) -> candle_core::Result<Tensor> {
+        let (b_sz, q_len, _) = xs.dims3()?;
+        let query_states = self
             .q_proj
             .forward(xs)?
-            .reshape((b, seq, self.num_heads, self.head_dim))?
+            .reshape((b_sz, q_len, self.num_heads, self.head_dim))?
             .transpose(1, 2)?;
-        let k = self
+        let key_states = self
             .k_proj
             .forward(xs)?
-            .reshape((b, seq, self.num_kv_heads, self.head_dim))?
+            .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
             .transpose(1, 2)?;
-        let v = self
+        let value_states = self
             .v_proj
             .forward(xs)?
-            .reshape((b, seq, self.num_kv_heads, self.head_dim))?
+            .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
             .transpose(1, 2)?;
-        let k = repeat_kv(k, self.num_heads / self.num_kv_heads.max(1))?;
-        let v = repeat_kv(v, self.num_heads / self.num_kv_heads.max(1))?;
-        let attn = (q.matmul(&k.transpose(D::Minus1, D::Minus2)?)? * self.scale)?;
-        let mask = causal_mask(seq, xs.device())?;
-        let attn = softmax(&(attn + mask)?, D::Minus1)?;
-        let out =
-            attn.matmul(&v)?
-                .transpose(1, 2)?
-                .reshape((b, seq, self.num_heads * self.head_dim))?;
-        self.o_proj.forward(&out)
+
+        let query_states = self.q_norm.forward(&query_states)?;
+        let key_states = self.k_norm.forward(&key_states)?;
+        let (query_states, key_states) = self
+            .rotary_emb
+            .apply_rotary_emb_qkv(&query_states, &key_states)?;
+
+        let key_states = repeat_kv(key_states, self.num_heads / self.num_kv_heads.max(1))?;
+        let value_states = repeat_kv(value_states, self.num_heads / self.num_kv_heads.max(1))?;
+
+        let attn_weights = (query_states.matmul(&key_states.transpose(2, 3)?)? * self.scale)?;
+        let attn_weights = match attention_mask {
+            None => attn_weights,
+            Some(mask) => attn_weights.broadcast_add(mask)?,
+        };
+        let attn_weights = softmax(&attn_weights, D::Minus1)?;
+        let attn_output = attn_weights.matmul(&value_states)?;
+        attn_output
+            .transpose(1, 2)?
+            .reshape((b_sz, q_len, self.num_heads * self.head_dim))?
+            .apply(&self.o_proj)
+    }
+}
+
+struct RotaryEmbedding {
+    sin: Tensor,
+    cos: Tensor,
+}
+
+impl RotaryEmbedding {
+    fn new(
+        dtype: DType,
+        cfg: &HarrierConfig,
+        dev: &Device,
+        sliding_window: Option<usize>,
+    ) -> candle_core::Result<Self> {
+        let dim = cfg.head_dim;
+        let max_seq_len = cfg.max_position_embeddings;
+        let rope_freq = if sliding_window.is_some() {
+            cfg.rope_local_base_freq
+        } else {
+            cfg.rope_theta
+        };
+        let inv_freq: Vec<f32> = (0..dim)
+            .step_by(2)
+            .map(|i| 1f32 / rope_freq.powf(i as f64 / dim as f64) as f32)
+            .collect();
+        let inv_freq_len = inv_freq.len();
+        let inv_freq = Tensor::from_vec(inv_freq, (1, inv_freq_len), dev)?.to_dtype(dtype)?;
+        let t = Tensor::arange(0u32, max_seq_len as u32, dev)?
+            .to_dtype(dtype)?
+            .reshape((max_seq_len, 1))?;
+        let freqs = t.matmul(&inv_freq)?;
+        Ok(Self {
+            sin: freqs.sin()?,
+            cos: freqs.cos()?,
+        })
+    }
+
+    fn apply_rotary_emb_qkv(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+    ) -> candle_core::Result<(Tensor, Tensor)> {
+        let (_b, _h, seq_len, _d) = q.dims4()?;
+        let cos = self.cos.narrow(0, 0, seq_len)?;
+        let sin = self.sin.narrow(0, 0, seq_len)?;
+        let q_embed = candle_nn::rotary_emb::rope(&q.contiguous()?, &cos, &sin)?;
+        let k_embed = candle_nn::rotary_emb::rope(&k.contiguous()?, &cos, &sin)?;
+        Ok((q_embed, k_embed))
     }
 }
 
@@ -664,14 +765,24 @@ fn repeat_kv(xs: Tensor, n_rep: usize) -> candle_core::Result<Tensor> {
         .reshape((b, n_kv * n_rep, s, d))
 }
 
-fn causal_mask(seq: usize, device: &Device) -> candle_core::Result<Tensor> {
+fn causal_mask(
+    batch: usize,
+    seq: usize,
+    device: &Device,
+    dtype: DType,
+) -> candle_core::Result<Tensor> {
+    if seq <= 1 {
+        return Tensor::zeros((batch, 1, 1, 1), dtype, device);
+    }
     let mut data = vec![0f32; seq * seq];
     for i in 0..seq {
         for j in (i + 1)..seq {
             data[i * seq + j] = f32::NEG_INFINITY;
         }
     }
-    Tensor::from_vec(data, (1, 1, seq, seq), device)
+    Tensor::from_vec(data, (seq, seq), device)?
+        .to_dtype(dtype)?
+        .broadcast_as((batch, 1, seq, seq))
 }
 
 struct Mlp {
@@ -710,5 +821,33 @@ impl Mlp {
         let gate = self.gate_proj.forward(xs)?.apply(&self.act)?;
         let up = self.up_proj.forward(xs)?;
         self.down_proj.forward(&(gate * up)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[tokio::test]
+    async fn embeds_with_downloaded_local_harrier_if_present() {
+        let model_dir = PathBuf::from(std::env::var("APPDATA").unwrap())
+            .join("dev.aichatmemory.desktop")
+            .join("models")
+            .join("microsoft__harrier-oss-v1-270m");
+        if !model_files_present(&model_dir) {
+            return;
+        }
+        let backend = LocalHarrierBackend::open("microsoft/harrier-oss-v1-270m".into(), model_dir)
+            .await
+            .expect("open local backend");
+        let vectors = backend
+            .embed_documents(&["hello semantic search".into()])
+            .await
+            .expect("embed document");
+        assert_eq!(vectors.len(), 1);
+        assert_eq!(vectors[0].len(), 640);
+        let norm = vectors[0].iter().map(|v| v * v).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-3, "norm={norm}");
     }
 }
