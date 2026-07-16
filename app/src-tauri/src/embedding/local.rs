@@ -1493,7 +1493,7 @@ mod packing_tests {
         let cjk = estimate_token_count("你好世界");
         assert!((2..=4).contains(&cjk), "cjk={cjk}");
         let latin = estimate_token_count("hello world");
-        assert!(latin >= 1 && latin < 11, "latin={latin}");
+        assert!((1..11).contains(&latin), "latin={latin}");
         assert!(estimate_token_count(&"a".repeat(10_000)) <= 2048);
         // Should stay well below naive char-count for Chinese text.
         let long_zh = "中文检索语句".repeat(20);
