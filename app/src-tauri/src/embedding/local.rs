@@ -630,8 +630,9 @@ fn warmup_model(loaded: &mut LoadedModel) -> Result<()> {
 }
 
 /// Cheap token estimate for batch packing.
-/// Calibrated against live harrier tokenizer logs: plain char-count over-estimated
-/// by ~1.7x on this corpus, so apply script-aware weights with a small safety margin.
+/// Fitted on local archive chunks with the real harrier tokenizer
+/// (12k-sample calibration): target mild over-estimate so packing does not
+/// under-budget long Chinese passages.
 pub fn estimate_token_count(text: &str) -> usize {
     let mut cjk = 0usize;
     let mut space = 0usize;
@@ -645,9 +646,11 @@ pub fn estimate_token_count(text: &str) -> usize {
             other += 1;
         }
     }
-    // Live V5.1 pairing showed est/real ~1.7 with 1-char=1-token.
-    // Target a mild remaining over-estimate (~10%) rather than under-pack risk.
-    let est = (cjk as f32 * 0.62) + (other as f32 * 0.35) + (space as f32 * 0.15);
+    // artifacts/token-estimate-calibration.json
+    // grid fit: cjk=0.76, other=0.55, space=0.36, safety=1.05
+    // held-out style metrics on local data:
+    // ratio_p50≈1.16, long_under(<0.9)≈3%
+    let est = ((cjk as f32 * 0.76) + (other as f32 * 0.55) + (space as f32 * 0.36)) * 1.05;
     (est.ceil().max(1.0) as usize).clamp(1, MAX_SEQUENCE_LEN)
 }
 
@@ -1491,13 +1494,17 @@ mod packing_tests {
         assert_eq!(estimate_token_count(""), 1);
         // CJK is weighted < 1.0 token/char after calibration.
         let cjk = estimate_token_count("你好世界");
-        assert!((2..=4).contains(&cjk), "cjk={cjk}");
+        assert!((3..=5).contains(&cjk), "cjk={cjk}");
         let latin = estimate_token_count("hello world");
         assert!((1..11).contains(&latin), "latin={latin}");
         assert!(estimate_token_count(&"a".repeat(10_000)) <= 2048);
-        // Should stay well below naive char-count for Chinese text.
+        // Should stay below naive char-count for Chinese text, but not as low as the
+        // previous under-estimating formula.
         let long_zh = "中文检索语句".repeat(20);
-        assert!(estimate_token_count(&long_zh) < long_zh.chars().count());
+        let chars = long_zh.chars().count();
+        let est = estimate_token_count(&long_zh);
+        assert!(est < chars, "est={est} chars={chars}");
+        assert!(est > chars / 2, "est={est} chars={chars}");
     }
 
     #[test]
