@@ -496,9 +496,10 @@ fn select_device(preferred: &LocalEmbeddingDevice) -> Result<(Device, String)> {
 fn select_dtype(preferred: &LocalEmbeddingDType, device: &Device) -> (DType, String) {
     let wants_f16 = match preferred {
         LocalEmbeddingDType::F16 => true,
-        LocalEmbeddingDType::F32 => false,
-        LocalEmbeddingDType::Auto => !matches!(device, Device::Cpu),
+        // CUDA F16 currently tends to produce NaNs in this harrier port; prefer F32 by default.
+        LocalEmbeddingDType::F32 | LocalEmbeddingDType::Auto => false,
     };
+    let _ = device;
     if wants_f16 {
         (DType::F16, "F16".into())
     } else {
@@ -606,13 +607,19 @@ fn load_model(
 }
 
 fn warmup_model(loaded: &mut LoadedModel) -> Result<()> {
-    // Force a tiny forward pass so CUDA PTX/runtime mismatches fail during load,
-    // where we can still fall back to CPU instead of breaking the first index batch.
+    // Force a tiny forward pass so CUDA PTX/runtime mismatches and NaN-producing
+    // kernels fail during load, where we can still fall back to a safer device/dtype.
     let vectors = embed_batch(loaded, &["warmup".into()], false, 640)?;
     if vectors.len() != 1 || vectors[0].len() != 640 {
         return Err(AppError::Configuration(
             "local embedding warmup returned unexpected shape".into(),
         ));
+    }
+    let norm = vectors[0].iter().map(|v| v * v).sum::<f32>().sqrt();
+    if !norm.is_finite() || (norm - 1.0).abs() > 5e-2 {
+        return Err(AppError::Configuration(format!(
+            "local embedding warmup produced invalid vector norm={norm}"
+        )));
     }
     Ok(())
 }
@@ -666,11 +673,29 @@ fn embed_batch(
     let embeddings = embeddings.to_dtype(DType::F32).map_err(candle_err)?;
     let vectors = embeddings.to_vec2::<f32>().map_err(candle_err)?;
     ensure_dimensions(&vectors, dimensions)?;
+    ensure_finite_vectors(&vectors)?;
     Ok(vectors)
 }
 
 fn candle_err(error: impl ToString) -> AppError {
     AppError::Configuration(error.to_string())
+}
+
+fn ensure_finite_vectors(vectors: &[Vec<f32>]) -> Result<()> {
+    for (row_idx, vector) in vectors.iter().enumerate() {
+        if vector.iter().any(|value| !value.is_finite()) {
+            return Err(AppError::Configuration(format!(
+                "embedding vector {row_idx} contains non-finite values"
+            )));
+        }
+        let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
+        if !norm.is_finite() || norm < 1e-6 {
+            return Err(AppError::Configuration(format!(
+                "embedding vector {row_idx} has invalid L2 norm {norm}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -1121,5 +1146,17 @@ mod tests {
         assert_eq!(vectors[0].len(), 640);
         let norm = vectors[0].iter().map(|v| v * v).sum::<f32>().sqrt();
         assert!((norm - 1.0).abs() < 1e-3, "norm={norm}");
+        let device = backend.runtime_device_label();
+        let dtype = backend.runtime_dtype_label();
+        eprintln!("local harrier runtime device={device} dtype={dtype}");
+        if matches!(
+            settings.device,
+            LocalEmbeddingDevice::Auto | LocalEmbeddingDevice::Cuda
+        ) {
+            assert!(
+                device.starts_with("CUDA"),
+                "expected CUDA runtime after driver upgrade, got {device}/{dtype}"
+            );
+        }
     }
 }
