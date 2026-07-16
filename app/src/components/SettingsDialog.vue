@@ -2,6 +2,8 @@
 import { Check, Clipboard, FolderOpen, Monitor, Moon, RefreshCw, ShieldCheck, Sun } from 'lucide-vue-next'
 import type {
   EmbeddingBackendKind,
+  LocalEmbeddingDevice,
+  LocalEmbeddingDType,
   ModelDownloadProgress,
   ReindexProgress,
   SearchMode,
@@ -39,6 +41,13 @@ function setBackend(backend: EmbeddingBackendKind) {
 
 function setMode(mode: SearchMode) {
   settings.value.semantic_search.default_mode = mode
+}
+
+if (!settings.value.semantic_search.local.device) {
+  settings.value.semantic_search.local.device = 'auto' as LocalEmbeddingDevice
+}
+if (!settings.value.semantic_search.local.dtype) {
+  settings.value.semantic_search.local.dtype = 'auto' as LocalEmbeddingDType
 }
 </script>
 
@@ -91,8 +100,25 @@ function setMode(mode: SearchMode) {
               </label>
               <template v-if="settings.semantic_search.backend === 'local'">
                 <label><span>模型 ID</span><input v-model="settings.semantic_search.local.model" /></label>
+                <label>
+                  <span>计算设备</span>
+                  <select v-model="settings.semantic_search.local.device">
+                    <option value="auto">自动</option>
+                    <option value="cuda">CUDA</option>
+                    <option value="cpu">CPU</option>
+                  </select>
+                </label>
+                <label>
+                  <span>精度</span>
+                  <select v-model="settings.semantic_search.local.dtype">
+                    <option value="auto">自动</option>
+                    <option value="f16">F16</option>
+                    <option value="f32">F32</option>
+                  </select>
+                </label>
                 <p class="path-value">本地目录：{{ semanticStatus?.local_model_path || settings.semantic_search.local.model_path || '尚未准备' }}</p>
                 <p class="path-value">下载源：Hugging Face（{{ settings.semantic_search.local.model }}）</p>
+                <p class="path-value">当前设备：{{ semanticStatus?.device || '未加载' }} · 精度 {{ semanticStatus?.dtype || '未加载' }}</p>
                 <div class="setting-actions">
                   <button class="secondary-button compact" :disabled="semanticBusy" @click="emit('downloadLocalModel')">{{ semanticBusy && downloadProgress ? '下载中…' : '下载模型' }}</button>
                   <button class="secondary-button compact" :disabled="semanticBusy" @click="emit('importLocalModel')"><FolderOpen :size="14" />导入本地模型</button>

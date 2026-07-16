@@ -2,7 +2,6 @@ use async_trait::async_trait;
 use candle_core::{D, DType, Device, IndexOp, Module, Tensor};
 use candle_nn::{Activation, Embedding, Linear, VarBuilder, linear_b as linear, ops::softmax};
 use hf_hub::api::tokio::{ApiBuilder, Progress};
-use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokenizers::Tokenizer;
@@ -11,12 +10,16 @@ use tokio::sync::Mutex;
 use super::{BackendIdentity, EmbeddingBackend, ensure_dimensions};
 use crate::{
     error::{AppError, Result},
-    models::{EmbeddingBackendKind, EmbeddingHealth, ModelDownloadProgress},
+    models::{
+        EmbeddingBackendKind, EmbeddingHealth, LocalEmbeddingDType, LocalEmbeddingDevice,
+        LocalEmbeddingSettings, ModelDownloadProgress,
+    },
 };
 
 const DEFAULT_QUERY_INSTRUCTION: &str = "Instruct: Given a chat history search query, retrieve relevant conversation passages that answer the query\nQuery: ";
 const MODEL_FILES: [&str; 3] = ["config.json", "tokenizer.json", "model.safetensors"];
 const MAX_SEQUENCE_LEN: usize = 2048;
+pub const LOCAL_INDEX_BATCH_SIZE: i64 = 64;
 
 pub type DownloadProgressCallback = Arc<dyn Fn(ModelDownloadProgress) + Send + Sync>;
 
@@ -24,21 +27,30 @@ pub struct LocalHarrierBackend {
     model_id: String,
     model_dir: PathBuf,
     dimensions: usize,
+    preferred_device: LocalEmbeddingDevice,
+    preferred_dtype: LocalEmbeddingDType,
     /// Serialize first-time weight loading across warm-up / indexer / query.
     load_gate: Mutex<()>,
-    /// Multiple CPU model replicas for parallel embedding workers.
-    replicas: Arc<std::sync::Mutex<Vec<ModelReplica>>>,
-    worker_count: usize,
+    /// Single loaded model replica (CUDA preferred, CPU fallback).
+    state: Arc<std::sync::Mutex<Option<LoadedModel>>>,
+    runtime_device: Arc<std::sync::Mutex<String>>,
+    runtime_dtype: Arc<std::sync::Mutex<String>>,
 }
 
-struct ModelReplica {
+struct LoadedModel {
     tokenizer: Tokenizer,
     model: HarrierModel,
     device: Device,
+    device_label: String,
+    dtype_label: String,
 }
 
 impl LocalHarrierBackend {
-    pub async fn open(model_id: String, model_dir: PathBuf) -> Result<Self> {
+    pub async fn open(
+        model_id: String,
+        model_dir: PathBuf,
+        settings: &LocalEmbeddingSettings,
+    ) -> Result<Self> {
         tokio::fs::create_dir_all(&model_dir)
             .await
             .map_err(|error| AppError::Configuration(error.to_string()))?;
@@ -47,21 +59,38 @@ impl LocalHarrierBackend {
             model_id,
             model_dir,
             dimensions: 640,
+            preferred_device: settings.device.clone(),
+            preferred_dtype: settings.dtype.clone(),
             load_gate: Mutex::new(()),
-            replicas: Arc::new(std::sync::Mutex::new(Vec::new())),
-            worker_count: recommended_worker_count(),
+            state: Arc::new(std::sync::Mutex::new(None)),
+            runtime_device: Arc::new(std::sync::Mutex::new("unloaded".into())),
+            runtime_dtype: Arc::new(std::sync::Mutex::new("unloaded".into())),
         })
     }
 
     pub fn is_loaded(&self) -> bool {
-        self.replicas
+        self.state
             .lock()
-            .map(|guard| !guard.is_empty())
+            .map(|guard| guard.is_some())
             .unwrap_or(false)
     }
 
     pub fn model_dir(&self) -> &Path {
         &self.model_dir
+    }
+
+    pub fn runtime_device_label(&self) -> String {
+        self.runtime_device
+            .lock()
+            .map(|value| value.clone())
+            .unwrap_or_else(|_| "unknown".into())
+    }
+
+    pub fn runtime_dtype_label(&self) -> String {
+        self.runtime_dtype
+            .lock()
+            .map(|value| value.clone())
+            .unwrap_or_else(|_| "unknown".into())
     }
 
     pub async fn ensure_model_files_with_progress(
@@ -109,8 +138,8 @@ impl LocalHarrierBackend {
             tokio::fs::create_dir_all(&dest_dir).await.ok();
             let _ = tokio::fs::copy(pooling, dest_dir.join("config.json")).await;
         }
-        if let Ok(mut guard) = self.replicas.lock() {
-            guard.clear();
+        if let Ok(mut guard) = self.state.lock() {
+            *guard = None;
         }
         self.ensure_loaded().await?;
         Ok(())
@@ -130,18 +159,31 @@ impl LocalHarrierBackend {
             ));
         }
         let model_dir = self.model_dir.clone();
-        let worker_count = self.worker_count;
-        let replicas = tokio::task::spawn_blocking(move || load_replicas(&model_dir, worker_count))
-            .await
-            .map_err(|error| AppError::Configuration(format!("加载本地模型任务失败: {error}")))?
-            .map_err(|error| AppError::Configuration(error.to_string()))?;
+        let preferred_device = self.preferred_device.clone();
+        let preferred_dtype = self.preferred_dtype.clone();
+        let loaded = tokio::task::spawn_blocking(move || {
+            load_model(&model_dir, preferred_device, preferred_dtype)
+        })
+        .await
+        .map_err(|error| AppError::Configuration(format!("加载本地模型任务失败: {error}")))?
+        .map_err(|error| AppError::Configuration(error.to_string()))?;
+        if let Ok(mut device) = self.runtime_device.lock() {
+            *device = loaded.device_label.clone();
+        }
+        if let Ok(mut dtype) = self.runtime_dtype.lock() {
+            *dtype = loaded.dtype_label.clone();
+        }
         let mut guard = self
-            .replicas
+            .state
             .lock()
             .map_err(|_| AppError::Configuration("local model state lock poisoned".into()))?;
-        if guard.is_empty() {
-            *guard = replicas;
-            tracing::info!(workers = worker_count, "local embedding CPU workers ready");
+        if guard.is_none() {
+            tracing::info!(
+                device = %loaded.device_label,
+                dtype = %loaded.dtype_label,
+                "local embedding model ready"
+            );
+            *guard = Some(loaded);
         }
         Ok(())
     }
@@ -151,12 +193,17 @@ impl LocalHarrierBackend {
             return Ok(Vec::new());
         }
         self.ensure_loaded().await?;
-        let replicas = Arc::clone(&self.replicas);
+        let state = Arc::clone(&self.state);
         let texts = texts.to_vec();
         let dimensions = self.dimensions;
-        let worker_count = self.worker_count;
         let vectors = tokio::task::spawn_blocking(move || {
-            embed_with_replicas(replicas, texts, is_query, dimensions, worker_count)
+            let mut guard = state
+                .lock()
+                .map_err(|_| AppError::Configuration("local model state lock poisoned".into()))?;
+            let loaded = guard
+                .as_mut()
+                .ok_or_else(|| AppError::Configuration("local model not loaded".into()))?;
+            embed_batch(loaded, &texts, is_query, dimensions)
         })
         .await
         .map_err(|error| {
@@ -196,21 +243,35 @@ impl EmbeddingBackend for LocalHarrierBackend {
                 message: "本地模型未下载或未导入".into(),
             });
         }
+        let device = self.runtime_device_label();
+        let dtype = self.runtime_dtype_label();
         Ok(EmbeddingHealth {
             ok: true,
             backend: EmbeddingBackendKind::Local,
             model_id: self.model_id.clone(),
             dimensions: Some(self.dimensions),
             message: if self.is_loaded() {
-                "本地模型已加载".into()
+                format!("本地模型已加载（{device}/{dtype}）")
             } else {
-                "本地模型文件已就绪".into()
+                format!(
+                    "本地模型文件已就绪（偏好 {}/{})",
+                    device_pref_label(&self.preferred_device),
+                    dtype_pref_label(&self.preferred_dtype)
+                )
             },
         })
     }
 
     fn is_ready(&self) -> bool {
         self.is_loaded()
+    }
+
+    fn runtime_device(&self) -> Option<String> {
+        Some(self.runtime_device_label())
+    }
+
+    fn runtime_dtype(&self) -> Option<String> {
+        Some(self.runtime_dtype_label())
     }
 }
 
@@ -397,159 +458,154 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-fn recommended_worker_count() -> usize {
-    std::thread::available_parallelism()
-        .map(|value| value.get())
-        .unwrap_or(4)
-        .clamp(2, 6)
-}
-
-fn load_replicas(model_dir: &Path, worker_count: usize) -> Result<Vec<ModelReplica>> {
-    let mut replicas = Vec::with_capacity(worker_count);
-    for index in 0..worker_count {
-        replicas.push(load_model(model_dir)?);
-        tracing::debug!(
-            worker = index + 1,
-            workers = worker_count,
-            "local embedding replica loaded"
-        );
+fn device_pref_label(device: &LocalEmbeddingDevice) -> &'static str {
+    match device {
+        LocalEmbeddingDevice::Auto => "auto",
+        LocalEmbeddingDevice::Cuda => "cuda",
+        LocalEmbeddingDevice::Cpu => "cpu",
     }
-    Ok(replicas)
 }
 
-fn load_model(model_dir: &Path) -> Result<ModelReplica> {
-    let device = Device::Cpu;
-    let dtype = DType::F32;
+fn dtype_pref_label(dtype: &LocalEmbeddingDType) -> &'static str {
+    match dtype {
+        LocalEmbeddingDType::Auto => "auto",
+        LocalEmbeddingDType::F16 => "f16",
+        LocalEmbeddingDType::F32 => "f32",
+    }
+}
+
+fn select_device(preferred: &LocalEmbeddingDevice) -> Result<(Device, String)> {
+    match preferred {
+        LocalEmbeddingDevice::Cpu => Ok((Device::Cpu, "CPU".into())),
+        LocalEmbeddingDevice::Cuda => {
+            let device = Device::new_cuda(0).map_err(|error| {
+                AppError::Configuration(format!("无法初始化 CUDA 设备: {error}"))
+            })?;
+            Ok((device, "CUDA:0".into()))
+        }
+        LocalEmbeddingDevice::Auto => match Device::new_cuda(0) {
+            Ok(device) => Ok((device, "CUDA:0".into())),
+            Err(error) => {
+                tracing::warn!(%error, "CUDA unavailable; falling back to CPU for local embeddings");
+                Ok((Device::Cpu, "CPU".into()))
+            }
+        },
+    }
+}
+
+fn select_dtype(preferred: &LocalEmbeddingDType, device: &Device) -> (DType, String) {
+    let wants_f16 = match preferred {
+        LocalEmbeddingDType::F16 => true,
+        LocalEmbeddingDType::F32 => false,
+        LocalEmbeddingDType::Auto => !matches!(device, Device::Cpu),
+    };
+    if wants_f16 {
+        (DType::F16, "F16".into())
+    } else {
+        (DType::F32, "F32".into())
+    }
+}
+
+fn load_model(
+    model_dir: &Path,
+    preferred_device: LocalEmbeddingDevice,
+    preferred_dtype: LocalEmbeddingDType,
+) -> Result<LoadedModel> {
+    let (device, device_label) = select_device(&preferred_device)?;
+    let (dtype, dtype_label) = select_dtype(&preferred_dtype, &device);
     let config_text = std::fs::read_to_string(model_dir.join("config.json"))
         .map_err(|error| AppError::Configuration(error.to_string()))?;
     let config: HarrierConfig = serde_json::from_str(&config_text)
         .map_err(|error| AppError::Configuration(error.to_string()))?;
     let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json"))
         .map_err(|error| AppError::Configuration(error.to_string()))?;
-    let vb = unsafe {
-        VarBuilder::from_mmaped_safetensors(&[model_dir.join("model.safetensors")], dtype, &device)
+    let try_load = |device: &Device, dtype: DType| -> Result<HarrierModel> {
+        let vb = unsafe {
+            VarBuilder::from_mmaped_safetensors(
+                &[model_dir.join("model.safetensors")],
+                dtype,
+                device,
+            )
             .map_err(candle_err)?
+        };
+        HarrierModel::load(&config, vb).map_err(candle_err)
     };
-    let model = HarrierModel::load(&config, vb).map_err(candle_err)?;
-    Ok(ModelReplica {
+
+    let (model, device, device_label, dtype_label) = match try_load(&device, dtype) {
+        Ok(model) => (model, device, device_label, dtype_label),
+        Err(error) if !matches!(device, Device::Cpu) && matches!(dtype, DType::F16) => {
+            tracing::warn!(%error, "F16 CUDA load failed; retrying CUDA F32");
+            let model = try_load(&device, DType::F32)?;
+            (model, device, device_label, "F32".into())
+        }
+        Err(error) if !matches!(device, Device::Cpu) => {
+            tracing::warn!(%error, "CUDA model load failed; falling back to CPU F32");
+            let cpu = Device::Cpu;
+            let model = try_load(&cpu, DType::F32)?;
+            (model, cpu, "CPU".into(), "F32".into())
+        }
+        Err(error) => return Err(error),
+    };
+
+    Ok(LoadedModel {
         tokenizer,
         model,
         device,
+        device_label,
+        dtype_label,
     })
 }
 
-fn take_replica(replicas: &std::sync::Mutex<Vec<ModelReplica>>) -> Result<ModelReplica> {
-    let mut guard = replicas
-        .lock()
-        .map_err(|_| AppError::Configuration("local model state lock poisoned".into()))?;
-    guard
-        .pop()
-        .ok_or_else(|| AppError::Configuration("no free local embedding worker".into()))
-}
-
-fn return_replica(
-    replicas: &std::sync::Mutex<Vec<ModelReplica>>,
-    replica: ModelReplica,
-) -> Result<()> {
-    let mut guard = replicas
-        .lock()
-        .map_err(|_| AppError::Configuration("local model state lock poisoned".into()))?;
-    guard.push(replica);
-    Ok(())
-}
-
-fn embed_with_replicas(
-    replicas: Arc<std::sync::Mutex<Vec<ModelReplica>>>,
-    texts: Vec<String>,
+fn embed_batch(
+    loaded: &mut LoadedModel,
+    texts: &[String],
     is_query: bool,
     dimensions: usize,
-    worker_count: usize,
 ) -> Result<Vec<Vec<f32>>> {
-    if texts.len() == 1 {
-        let mut replica = take_replica(&replicas)?;
-        let result = embed_one(&mut replica, &texts[0], is_query);
-        return_replica(&replicas, replica)?;
-        let vector = result?;
-        ensure_dimensions(std::slice::from_ref(&vector), dimensions)?;
-        return Ok(vec![vector]);
+    let mut token_batches = Vec::with_capacity(texts.len());
+    let mut lengths = Vec::with_capacity(texts.len());
+    let mut max_len = 1usize;
+    for text in texts {
+        let prepared = if is_query {
+            format!("{DEFAULT_QUERY_INSTRUCTION}{text}")
+        } else {
+            text.clone()
+        };
+        let encoding = loaded
+            .tokenizer
+            .encode(prepared, true)
+            .map_err(|error| AppError::Configuration(error.to_string()))?;
+        let mut ids = encoding.get_ids().to_vec();
+        if ids.is_empty() {
+            return Err(AppError::Configuration(
+                "tokenizer produced empty input".into(),
+            ));
+        }
+        if ids.len() > MAX_SEQUENCE_LEN {
+            ids.truncate(MAX_SEQUENCE_LEN);
+        }
+        max_len = max_len.max(ids.len());
+        lengths.push(ids.len());
+        token_batches.push(ids);
     }
 
-    let chunk_size = texts.len().div_ceil(worker_count).max(1);
-    let chunks = texts
-        .chunks(chunk_size)
-        .enumerate()
-        .map(|(chunk_index, chunk)| (chunk_index, chunk.to_vec()))
-        .collect::<Vec<_>>();
-
-    let results = chunks
-        .into_par_iter()
-        .map(|(chunk_index, chunk_texts)| {
-            let mut replica = take_replica(&replicas)?;
-            let mut vectors = Vec::with_capacity(chunk_texts.len());
-            let mut error = None;
-            for text in &chunk_texts {
-                match embed_one(&mut replica, text, is_query) {
-                    Ok(vector) => vectors.push(vector),
-                    Err(err) => {
-                        error = Some(err);
-                        break;
-                    }
-                }
-            }
-            return_replica(&replicas, replica)?;
-            if let Some(err) = error {
-                return Err(err);
-            }
-            Ok((chunk_index, vectors))
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    let mut ordered = results;
-    ordered.sort_by_key(|(index, _)| *index);
-    let vectors = ordered
-        .into_iter()
-        .flat_map(|(_, values)| values)
-        .collect::<Vec<_>>();
+    let mut flat = Vec::with_capacity(token_batches.len() * max_len);
+    for ids in &token_batches {
+        flat.extend_from_slice(ids);
+        if ids.len() < max_len {
+            flat.extend(std::iter::repeat_n(0u32, max_len - ids.len()));
+        }
+    }
+    let input = Tensor::from_vec(flat, (token_batches.len(), max_len), &loaded.device)
+        .map_err(candle_err)?;
+    let embeddings = loaded
+        .model
+        .embed_tokens_batch(&input, &lengths)
+        .map_err(candle_err)?;
+    let embeddings = embeddings.to_dtype(DType::F32).map_err(candle_err)?;
+    let vectors = embeddings.to_vec2::<f32>().map_err(candle_err)?;
     ensure_dimensions(&vectors, dimensions)?;
     Ok(vectors)
-}
-
-fn embed_one(replica: &mut ModelReplica, text: &str, is_query: bool) -> Result<Vec<f32>> {
-    let prepared = if is_query {
-        format!("{DEFAULT_QUERY_INSTRUCTION}{text}")
-    } else {
-        text.to_owned()
-    };
-    let encoding = replica
-        .tokenizer
-        .encode(prepared, true)
-        .map_err(|error| AppError::Configuration(error.to_string()))?;
-    let ids = encoding.get_ids();
-    if ids.is_empty() {
-        return Err(AppError::Configuration(
-            "tokenizer produced empty input".into(),
-        ));
-    }
-    let ids = if ids.len() > MAX_SEQUENCE_LEN {
-        &ids[..MAX_SEQUENCE_LEN]
-    } else {
-        ids
-    };
-    let input = Tensor::new(ids, &replica.device)
-        .map_err(candle_err)?
-        .unsqueeze(0)
-        .map_err(candle_err)?;
-    let embedding = replica
-        .model
-        .embed(&input)
-        .map_err(candle_err)?
-        .squeeze(0)
-        .map_err(candle_err)?
-        .to_dtype(DType::F32)
-        .map_err(candle_err)?
-        .to_vec1::<f32>()
-        .map_err(candle_err)?;
-    Ok(embedding)
 }
 
 fn candle_err(error: impl ToString) -> AppError {
@@ -634,17 +690,32 @@ impl HarrierModel {
         })
     }
 
-    fn embed(&self, input_ids: &Tensor) -> candle_core::Result<Tensor> {
+    fn embed_tokens_batch(
+        &self,
+        input_ids: &Tensor,
+        lengths: &[usize],
+    ) -> candle_core::Result<Tensor> {
         let (b_size, seq_len) = input_ids.dims2()?;
+        if lengths.len() != b_size {
+            candle_core::bail!(
+                "batch length mismatch: ids={b_size}, lengths={}",
+                lengths.len()
+            );
+        }
         let mut xs = self.embed_tokens.forward(input_ids)?;
         xs = (xs * (self.hidden_size as f64).sqrt())?;
-        let attention_mask = causal_mask(b_size, seq_len, xs.device(), xs.dtype())?;
+        let attention_mask = causal_mask(b_size, seq_len, lengths, xs.device(), xs.dtype())?;
         for layer in &self.layers {
             xs = layer.forward(&xs, Some(&attention_mask))?;
         }
         let xs = self.norm.forward(&xs)?;
-        // last-token pooling for harrier embeddings
-        let pooled = xs.i((.., seq_len - 1, ..))?;
+        // last valid token pooling for padded batches
+        let mut pooled_rows = Vec::with_capacity(b_size);
+        for (batch_idx, length) in lengths.iter().enumerate() {
+            let token_idx = length.saturating_sub(1).min(seq_len.saturating_sub(1));
+            pooled_rows.push(xs.i((batch_idx, token_idx, ..))?);
+        }
+        let pooled = Tensor::stack(&pooled_rows, 0)?;
         let norm = pooled
             .sqr()?
             .sum_keepdim(D::Minus1)?
@@ -899,21 +970,28 @@ fn repeat_kv(xs: Tensor, n_rep: usize) -> candle_core::Result<Tensor> {
 fn causal_mask(
     batch: usize,
     seq: usize,
+    lengths: &[usize],
     device: &Device,
     dtype: DType,
 ) -> candle_core::Result<Tensor> {
     if seq <= 1 {
         return Tensor::zeros((batch, 1, 1, 1), dtype, device);
     }
-    let mut data = vec![0f32; seq * seq];
-    for i in 0..seq {
-        for j in (i + 1)..seq {
-            data[i * seq + j] = f32::NEG_INFINITY;
+    let mut data = vec![0f32; batch * seq * seq];
+    for (b, &length) in lengths.iter().enumerate() {
+        let valid = length.min(seq);
+        let base = b * seq * seq;
+        for i in 0..seq {
+            for j in 0..seq {
+                let causal_block = j > i;
+                let pad_block = j >= valid || i >= valid;
+                if causal_block || pad_block {
+                    data[base + i * seq + j] = f32::NEG_INFINITY;
+                }
+            }
         }
     }
-    Tensor::from_vec(data, (seq, seq), device)?
-        .to_dtype(dtype)?
-        .broadcast_as((batch, 1, seq, seq))
+    Tensor::from_vec(data, (batch, 1, seq, seq), device)?.to_dtype(dtype)
 }
 
 struct Mlp {
@@ -969,9 +1047,11 @@ mod tests {
         if !model_files_present(&model_dir) {
             return;
         }
-        let backend = LocalHarrierBackend::open("microsoft/harrier-oss-v1-270m".into(), model_dir)
-            .await
-            .expect("open local backend");
+        let settings = LocalEmbeddingSettings::default();
+        let backend =
+            LocalHarrierBackend::open("microsoft/harrier-oss-v1-270m".into(), model_dir, &settings)
+                .await
+                .expect("open local backend");
         let vectors = backend
             .embed_documents(&["hello semantic search".into()])
             .await

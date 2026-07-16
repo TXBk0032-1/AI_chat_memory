@@ -281,6 +281,7 @@ impl SemanticEngine {
             .map(|item| item.message.clone())
             .or(last_error)
             .or_else(|| (!health.ok).then_some(health.message.clone()));
+        let active = manager.active();
         SemanticRuntimeStatus {
             enabled: manager.settings().enabled,
             status,
@@ -292,6 +293,8 @@ impl SemanticEngine {
             message,
             local_model_ready,
             local_model_path: Some(local_model_path.display().to_string()),
+            device: active.runtime_device(),
+            dtype: active.runtime_dtype(),
             reindex,
         }
     }
@@ -309,9 +312,12 @@ impl SemanticEngine {
             return Ok(());
         }
         let model_dir = crate::embedding::local_model_dir(&self.data_dir, &settings.local.model);
-        let backend =
-            crate::embedding::LocalHarrierBackend::open(settings.local.model.clone(), model_dir)
-                .await?;
+        let backend = crate::embedding::LocalHarrierBackend::open(
+            settings.local.model.clone(),
+            model_dir,
+            &settings.local,
+        )
+        .await?;
         backend
             .ensure_model_files_with_progress(on_progress)
             .await?;
@@ -323,9 +329,12 @@ impl SemanticEngine {
     pub async fn import_local_model(&self, path: &Path) -> Result<()> {
         let mut settings = self.embeddings.read().await.settings().clone();
         let model_dir = crate::embedding::local_model_dir(&self.data_dir, &settings.local.model);
-        let backend =
-            crate::embedding::LocalHarrierBackend::open(settings.local.model.clone(), model_dir)
-                .await?;
+        let backend = crate::embedding::LocalHarrierBackend::open(
+            settings.local.model.clone(),
+            model_dir,
+            &settings.local,
+        )
+        .await?;
         backend.import_model_dir(path).await?;
         settings.local.model_path = Some(backend.model_dir().display().to_string());
         self.reload_embeddings(settings).await
@@ -532,8 +541,13 @@ impl SemanticEngine {
             }
             let identity = manager.identity();
             let backend = manager.active();
-            // Larger batches let local CPU workers stay busy and amortize SQLite writes.
-            let pending = index::fetch_pending_chunks(&self.pool, &identity, 32).await?;
+            let batch_size =
+                if matches!(identity.backend, crate::models::EmbeddingBackendKind::Local) {
+                    crate::embedding::local::LOCAL_INDEX_BATCH_SIZE
+                } else {
+                    16
+                };
+            let pending = index::fetch_pending_chunks(&self.pool, &identity, batch_size).await?;
             drop(manager);
             if pending.is_empty() {
                 break;
@@ -542,6 +556,7 @@ impl SemanticEngine {
                 .iter()
                 .map(|item| item.text.clone())
                 .collect::<Vec<_>>();
+            let started = std::time::Instant::now();
             let vectors = match backend.embed_documents(&texts).await {
                 Ok(vectors) => {
                     *self.last_error.write().await = None;
@@ -554,6 +569,20 @@ impl SemanticEngine {
                     break;
                 }
             };
+            let elapsed_ms = started.elapsed().as_millis();
+            let chunks_per_sec = if elapsed_ms == 0 {
+                pending.len() as f64
+            } else {
+                (pending.len() as f64) * 1000.0 / (elapsed_ms as f64)
+            };
+            tracing::info!(
+                batch_size = pending.len(),
+                device = backend.runtime_device().as_deref().unwrap_or("unknown"),
+                dtype = backend.runtime_dtype().as_deref().unwrap_or("unknown"),
+                elapsed_ms,
+                chunks_per_sec,
+                "semantic embedding batch completed"
+            );
             let ready_items = pending
                 .iter()
                 .zip(vectors)

@@ -177,12 +177,34 @@ pub enum EmbeddingBackendKind {
     OpenaiCompatible,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalEmbeddingDevice {
+    #[default]
+    Auto,
+    Cuda,
+    Cpu,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LocalEmbeddingDType {
+    #[default]
+    Auto,
+    F16,
+    F32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LocalEmbeddingSettings {
     #[serde(default = "default_local_model")]
     pub model: String,
     #[serde(default)]
     pub model_path: Option<String>,
+    #[serde(default)]
+    pub device: LocalEmbeddingDevice,
+    #[serde(default)]
+    pub dtype: LocalEmbeddingDType,
 }
 
 impl Default for LocalEmbeddingSettings {
@@ -190,6 +212,8 @@ impl Default for LocalEmbeddingSettings {
         Self {
             model: default_local_model(),
             model_path: None,
+            device: LocalEmbeddingDevice::Auto,
+            dtype: LocalEmbeddingDType::Auto,
         }
     }
 }
@@ -386,6 +410,10 @@ pub struct SemanticRuntimeStatus {
     pub message: Option<String>,
     pub local_model_ready: bool,
     pub local_model_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dtype: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reindex: Option<ReindexProgress>,
 }

@@ -14,6 +14,56 @@ $Artifacts = Join-Path $Root "artifacts"
 $env:RUSTUP_TOOLCHAIN = "1.97.0"
 $env:CARGO_TERM_COLOR = "always"
 
+function Initialize-CudaBuildEnvironment {
+    $cudaRoot = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3"
+    $msvcBin = "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64"
+    $vcvars = "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+    $nvcc = Join-Path $cudaRoot "bin\nvcc.exe"
+    $cl = Join-Path $msvcBin "cl.exe"
+
+    if (-not (Test-Path -LiteralPath $nvcc)) {
+        throw "CUDA Toolkit not found at $cudaRoot. Install CUDA Toolkit and ensure nvcc is available."
+    }
+    if (-not (Test-Path -LiteralPath $cl)) {
+        throw "MSVC cl.exe not found at $msvcBin. Install Visual Studio C++ build tools."
+    }
+    if (-not (Test-Path -LiteralPath $vcvars)) {
+        throw "vcvars64.bat not found at $vcvars."
+    }
+
+    $probe = cmd.exe /c "`"$vcvars`" >nul && echo INCLUDE=%INCLUDE%&& echo LIB=%LIB%&& echo LIBPATH=%LIBPATH%&& echo PATH=%PATH%"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to initialize MSVC environment via vcvars64.bat"
+    }
+    foreach ($line in $probe) {
+        if ($line -like "INCLUDE=*") {
+            $env:INCLUDE = $line.Substring(8)
+        } elseif ($line -like "LIB=*") {
+            $env:LIB = $line.Substring(4)
+        } elseif ($line -like "LIBPATH=*") {
+            $env:LIBPATH = $line.Substring(8)
+        } elseif ($line -like "PATH=*") {
+            $env:PATH = $line.Substring(5)
+        }
+    }
+
+    $env:CUDA_PATH = $cudaRoot
+    $env:CUDA_HOME = $cudaRoot
+    $env:NVCC_CCBIN = $msvcBin
+    # CUDA 13.x CCCL requires MSVC's conforming preprocessor.
+    $env:NVCC_APPEND_FLAGS = "-Xcompiler=/Zc:preprocessor"
+    $env:PATH = "$cudaRoot\bin;$msvcBin;$env:PATH"
+
+    if (-not (Get-Command nvcc -ErrorAction SilentlyContinue)) {
+        throw "nvcc is not available after CUDA environment setup"
+    }
+    if (-not (Get-Command cl -ErrorAction SilentlyContinue)) {
+        throw "cl.exe is not available after MSVC environment setup"
+    }
+}
+
+Initialize-CudaBuildEnvironment
+
 function Invoke-Step {
     param([string]$Name, [scriptblock]$Action)
     Write-Host "`n==> $Name" -ForegroundColor Cyan

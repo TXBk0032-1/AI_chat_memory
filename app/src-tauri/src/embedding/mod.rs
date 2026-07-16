@@ -30,6 +30,12 @@ pub trait EmbeddingBackend: Send + Sync {
     fn is_ready(&self) -> bool {
         true
     }
+    fn runtime_device(&self) -> Option<String> {
+        None
+    }
+    fn runtime_dtype(&self) -> Option<String> {
+        None
+    }
     async fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
     async fn embed_queries(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
     async fn healthcheck(&self) -> Result<EmbeddingHealth>;
@@ -100,7 +106,13 @@ pub async fn build_backend(
                 .as_ref()
                 .map(PathBuf::from)
                 .unwrap_or_else(|| local_model_dir(data_dir, &settings.local.model));
-            match LocalHarrierBackend::open(settings.local.model.clone(), model_dir).await {
+            match LocalHarrierBackend::open(
+                settings.local.model.clone(),
+                model_dir,
+                &settings.local,
+            )
+            .await
+            {
                 Ok(backend) => Ok(Arc::new(backend)),
                 Err(error) => {
                     tracing::warn!(%error, "local embedding backend unavailable; using deterministic mock until model is ready");

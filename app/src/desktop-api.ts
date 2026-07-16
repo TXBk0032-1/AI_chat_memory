@@ -8,6 +8,8 @@ export type TrayClickBehavior = 'show_menu' | 'open_window' | 'no_action'
 export type SearchMode = 'keyword' | 'semantic' | 'hybrid'
 export type SemanticStatus = 'disabled' | 'ready' | 'indexing' | 'unavailable'
 export type EmbeddingBackendKind = 'local' | 'ollama' | 'llama_cpp' | 'openai_compatible'
+export type LocalEmbeddingDevice = 'auto' | 'cuda' | 'cpu'
+export type LocalEmbeddingDType = 'auto' | 'f16' | 'f32'
 
 export type RemoteEmbeddingSettings = {
   base_url: string
@@ -20,7 +22,12 @@ export type SemanticSearchSettings = {
   enabled: boolean
   default_mode: SearchMode
   backend: EmbeddingBackendKind
-  local: { model: string; model_path?: string }
+  local: {
+    model: string
+    model_path?: string
+    device?: LocalEmbeddingDevice
+    dtype?: LocalEmbeddingDType
+  }
   ollama: RemoteEmbeddingSettings
   llama_cpp: RemoteEmbeddingSettings
   openai_compatible: RemoteEmbeddingSettings
@@ -55,6 +62,8 @@ export type SemanticRuntimeStatus = {
   message?: string
   local_model_ready: boolean
   local_model_path?: string
+  device?: string
+  dtype?: string
   reindex?: ReindexProgress | null
 }
 
