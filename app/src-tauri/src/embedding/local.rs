@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use candle_core::{DType, Device, Module, Tensor, D};
-use candle_nn::{linear_b as linear, ops::softmax, Activation, Embedding, Linear, VarBuilder};
+use candle_core::{D, DType, Device, Module, Tensor};
+use candle_nn::{Activation, Embedding, Linear, VarBuilder, linear_b as linear, ops::softmax};
 use hf_hub::api::tokio::ApiBuilder;
 use std::path::{Path, PathBuf};
 use tokenizers::Tokenizer;
@@ -12,8 +12,7 @@ use crate::{
     models::{EmbeddingBackendKind, EmbeddingHealth},
 };
 
-const DEFAULT_QUERY_INSTRUCTION: &str =
-    "Instruct: Given a chat history search query, retrieve relevant conversation passages that answer the query\nQuery: ";
+const DEFAULT_QUERY_INSTRUCTION: &str = "Instruct: Given a chat history search query, retrieve relevant conversation passages that answer the query\nQuery: ";
 
 pub struct LocalHarrierBackend {
     model_id: String,
@@ -377,7 +376,11 @@ impl DecoderLayer {
         Ok(Self {
             self_attn: Attention::load(cfg, vb.pp("self_attn"), sliding_window)?,
             mlp: Mlp::load(cfg, vb.pp("mlp"))?,
-            input_layernorm: RmsNorm::new(cfg.hidden_size, cfg.rms_norm_eps, vb.pp("input_layernorm"))?,
+            input_layernorm: RmsNorm::new(
+                cfg.hidden_size,
+                cfg.rms_norm_eps,
+                vb.pp("input_layernorm"),
+            )?,
             post_attention_layernorm: RmsNorm::new(
                 cfg.hidden_size,
                 cfg.rms_norm_eps,
@@ -469,10 +472,10 @@ impl Attention {
         let attn = (q.matmul(&k.transpose(D::Minus1, D::Minus2)?)? * self.scale)?;
         let mask = causal_mask(seq, xs.device())?;
         let attn = softmax(&(attn + mask)?, D::Minus1)?;
-        let out = attn
-            .matmul(&v)?
-            .transpose(1, 2)?
-            .reshape((b, seq, self.num_heads * self.head_dim))?;
+        let out =
+            attn.matmul(&v)?
+                .transpose(1, 2)?
+                .reshape((b, seq, self.num_heads * self.head_dim))?;
         self.o_proj.forward(&out)
     }
 }
@@ -507,9 +510,24 @@ struct Mlp {
 impl Mlp {
     fn load(cfg: &HarrierConfig, vb: VarBuilder) -> candle_core::Result<Self> {
         Ok(Self {
-            gate_proj: linear(cfg.hidden_size, cfg.intermediate_size, false, vb.pp("gate_proj"))?,
-            up_proj: linear(cfg.hidden_size, cfg.intermediate_size, false, vb.pp("up_proj"))?,
-            down_proj: linear(cfg.intermediate_size, cfg.hidden_size, false, vb.pp("down_proj"))?,
+            gate_proj: linear(
+                cfg.hidden_size,
+                cfg.intermediate_size,
+                false,
+                vb.pp("gate_proj"),
+            )?,
+            up_proj: linear(
+                cfg.hidden_size,
+                cfg.intermediate_size,
+                false,
+                vb.pp("up_proj"),
+            )?,
+            down_proj: linear(
+                cfg.intermediate_size,
+                cfg.hidden_size,
+                false,
+                vb.pp("down_proj"),
+            )?,
             act: Activation::GeluPytorchTanh,
         })
     }

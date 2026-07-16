@@ -31,12 +31,11 @@ pub async fn queue_session_chunks(
     };
     let platform: String = session.try_get("platform")?;
     let title: String = session.try_get("title")?;
-    let messages = sqlx::query(
-        "SELECT id, role, content FROM messages WHERE session_id = ? ORDER BY seq ASC",
-    )
-    .bind(session_id)
-    .fetch_all(pool)
-    .await?;
+    let messages =
+        sqlx::query("SELECT id, role, content FROM messages WHERE session_id = ? ORDER BY seq ASC")
+            .bind(session_id)
+            .fetch_all(pool)
+            .await?;
 
     let mut desired = Vec::new();
     for message in messages {
@@ -458,4 +457,3 @@ mod tests {
         assert_eq!(merged[0].0, "b");
     }
 }
-

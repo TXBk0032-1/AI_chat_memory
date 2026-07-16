@@ -4,9 +4,7 @@ use std::sync::Arc;
 
 use crate::{
     error::{AppError, Result},
-    models::{
-        EmbeddingBackendKind, EmbeddingHealth, SemanticSearchSettings, SemanticStatus,
-    },
+    models::{EmbeddingBackendKind, EmbeddingHealth, SemanticSearchSettings, SemanticStatus},
 };
 
 mod http;
@@ -40,7 +38,10 @@ pub struct EmbeddingManager {
 }
 
 impl EmbeddingManager {
-    pub async fn from_settings(data_dir: PathBuf, settings: SemanticSearchSettings) -> Result<Self> {
+    pub async fn from_settings(
+        data_dir: PathBuf,
+        settings: SemanticSearchSettings,
+    ) -> Result<Self> {
         let active = build_backend(&data_dir, &settings).await?;
         Ok(Self {
             data_dir,

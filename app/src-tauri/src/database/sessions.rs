@@ -59,4 +59,3 @@ pub(crate) fn summary_from_row(row: sqlx::sqlite::SqliteRow) -> SessionSummary {
         imported_at: row.get("imported_at"),
     }
 }
-

@@ -43,9 +43,11 @@ impl SemanticEngine {
         self.wake.notify_one();
     }
 
-    pub async fn reload_embeddings(&self, settings: crate::models::SemanticSearchSettings) -> Result<()> {
-        let manager =
-            EmbeddingManager::from_settings(self.data_dir.clone(), settings).await?;
+    pub async fn reload_embeddings(
+        &self,
+        settings: crate::models::SemanticSearchSettings,
+    ) -> Result<()> {
+        let manager = EmbeddingManager::from_settings(self.data_dir.clone(), settings).await?;
         *self.embeddings.write().await = manager;
         self.request_reindex_all().await?;
         self.wake.notify_one();
@@ -113,10 +115,7 @@ impl SemanticEngine {
 
     pub async fn ensure_local_model(&self) -> Result<()> {
         let settings = self.embeddings.read().await.settings().clone();
-        if !matches!(
-            settings.backend,
-            crate::models::EmbeddingBackendKind::Local
-        ) {
+        if !matches!(settings.backend, crate::models::EmbeddingBackendKind::Local) {
             return Ok(());
         }
         let model_dir = crate::embedding::local_model_dir(&self.data_dir, &settings.local.model);
@@ -146,7 +145,10 @@ impl SemanticEngine {
             .unwrap_or_else(|| settings.default_mode.clone());
         let runtime = self.runtime_status().await;
         let semantic_available = settings.enabled
-            && !matches!(runtime.status, SemanticStatus::Disabled | SemanticStatus::Unavailable)
+            && !matches!(
+                runtime.status,
+                SemanticStatus::Disabled | SemanticStatus::Unavailable
+            )
             && runtime.ready_chunks > 0;
 
         let mut effective_mode = match requested {
@@ -321,7 +323,10 @@ impl SemanticEngine {
             if pending.is_empty() {
                 break;
             }
-            let texts = pending.iter().map(|item| item.text.clone()).collect::<Vec<_>>();
+            let texts = pending
+                .iter()
+                .map(|item| item.text.clone())
+                .collect::<Vec<_>>();
             let vectors = match backend.embed_documents(&texts).await {
                 Ok(vectors) => vectors,
                 Err(error) => {

@@ -41,10 +41,7 @@ pub async fn open_session(
     id: String,
     anchor_seq: Option<i64>,
 ) -> Result<SessionOpen, String> {
-    service
-        .open_session(&id, anchor_seq)
-        .await
-        .map_err(message)
+    service.open_session(&id, anchor_seq).await.map_err(message)
 }
 
 #[tauri::command]
@@ -157,9 +154,7 @@ pub async fn reindex_semantic_search(service: State<'_, AppService>) -> Result<u
 }
 
 #[tauri::command]
-pub async fn download_local_embedding_model(
-    service: State<'_, AppService>,
-) -> Result<(), String> {
+pub async fn download_local_embedding_model(service: State<'_, AppService>) -> Result<(), String> {
     service.download_local_model().await.map_err(message)
 }
 

@@ -130,7 +130,10 @@ mod tests {
         assert!(settings.data_directory.is_none());
         assert_eq!(settings.theme, crate::models::ThemePreference::System);
         assert!(settings.semantic_search.enabled);
-        assert_eq!(settings.semantic_search.default_mode, crate::models::SearchMode::Hybrid);
+        assert_eq!(
+            settings.semantic_search.default_mode,
+            crate::models::SearchMode::Hybrid
+        );
     }
 
     #[test]

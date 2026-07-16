@@ -75,7 +75,9 @@ pub fn run() {
                 let database_path = database_dir.join("chat_memory.db");
                 let pool = database::connect(&database_path).await?;
                 tracing::info!(path=%database_path.display(), "application database ready");
-                Ok::<_, crate::error::AppError>(AppService::new(pool, settings, database_dir).await?)
+                Ok::<_, crate::error::AppError>(
+                    AppService::new(pool, settings, database_dir).await?,
+                )
             })?;
             app.manage(service.clone());
             let http_service = service.clone();

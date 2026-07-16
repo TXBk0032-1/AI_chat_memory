@@ -118,7 +118,12 @@ impl HttpEmbeddingBackend {
             "model": self.settings.model,
             "input": texts,
         }));
-        if let Some(api_key) = self.settings.api_key.as_ref().filter(|value| !value.is_empty()) {
+        if let Some(api_key) = self
+            .settings
+            .api_key
+            .as_ref()
+            .filter(|value| !value.is_empty())
+        {
             request = request.bearer_auth(api_key);
         }
         let response = request
@@ -138,7 +143,10 @@ impl HttpEmbeddingBackend {
             .map_err(|error| AppError::Configuration(error.to_string()))?;
         let mut items = payload.data;
         items.sort_by_key(|item| item.index);
-        let vectors = items.into_iter().map(|item| item.embedding).collect::<Vec<_>>();
+        let vectors = items
+            .into_iter()
+            .map(|item| item.embedding)
+            .collect::<Vec<_>>();
         if vectors.len() != texts.len() {
             return Err(AppError::Configuration(
                 "openai-compatible embeddings returned unexpected batch size".into(),
