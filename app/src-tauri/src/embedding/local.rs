@@ -531,29 +531,80 @@ fn load_model(
         HarrierModel::load(&config, vb).map_err(candle_err)
     };
 
-    let (model, device, device_label, dtype_label) = match try_load(&device, dtype) {
-        Ok(model) => (model, device, device_label, dtype_label),
-        Err(error) if !matches!(device, Device::Cpu) && matches!(dtype, DType::F16) => {
-            tracing::warn!(%error, "F16 CUDA load failed; retrying CUDA F32");
-            let model = try_load(&device, DType::F32)?;
-            (model, device, device_label, "F32".into())
-        }
-        Err(error) if !matches!(device, Device::Cpu) => {
-            tracing::warn!(%error, "CUDA model load failed; falling back to CPU F32");
-            let cpu = Device::Cpu;
-            let model = try_load(&cpu, DType::F32)?;
-            (model, cpu, "CPU".into(), "F32".into())
-        }
-        Err(error) => return Err(error),
-    };
+    let mut candidates: Vec<(Device, String, DType, String)> = Vec::new();
+    candidates.push((device.clone(), device_label.clone(), dtype, dtype_label.clone()));
+    if !matches!(device, Device::Cpu) && matches!(dtype, DType::F16) {
+        candidates.push((device.clone(), device_label.clone(), DType::F32, "F32".into()));
+    }
+    if !matches!(device, Device::Cpu) {
+        candidates.push((Device::Cpu, "CPU".into(), DType::F32, "F32".into()));
+    }
 
-    Ok(LoadedModel {
-        tokenizer,
-        model,
-        device,
-        device_label,
-        dtype_label,
-    })
+    let mut last_error: Option<AppError> = None;
+    for (candidate_device, candidate_device_label, candidate_dtype, candidate_dtype_label) in
+        candidates
+    {
+        match try_load(&candidate_device, candidate_dtype) {
+            Ok(model) => {
+                let mut loaded = LoadedModel {
+                    tokenizer: tokenizer.clone(),
+                    model,
+                    device: candidate_device,
+                    device_label: candidate_device_label.clone(),
+                    dtype_label: candidate_dtype_label.clone(),
+                };
+                match warmup_model(&mut loaded) {
+                    Ok(()) => {
+                        if candidate_device_label != device_label || candidate_dtype_label != dtype_label
+                        {
+                            tracing::warn!(
+                                requested_device = %device_label,
+                                requested_dtype = %dtype_label,
+                                actual_device = %candidate_device_label,
+                                actual_dtype = %candidate_dtype_label,
+                                "local embedding fell back after load/warmup"
+                            );
+                        }
+                        return Ok(loaded);
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            device = %candidate_device_label,
+                            dtype = %candidate_dtype_label,
+                            "local embedding warmup failed; trying next device/dtype"
+                        );
+                        last_error = Some(error);
+                    }
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    device = %candidate_device_label,
+                    dtype = %candidate_dtype_label,
+                    "local embedding load failed; trying next device/dtype"
+                );
+                last_error = Some(error);
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        AppError::Configuration("failed to load local embedding model".into())
+    }))
+}
+
+fn warmup_model(loaded: &mut LoadedModel) -> Result<()> {
+    // Force a tiny forward pass so CUDA PTX/runtime mismatches fail during load,
+    // where we can still fall back to CPU instead of breaking the first index batch.
+    let vectors = embed_batch(loaded, &["warmup".into()], false, 640)?;
+    if vectors.len() != 1 || vectors[0].len() != 640 {
+        return Err(AppError::Configuration(
+            "local embedding warmup returned unexpected shape".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn embed_batch(
