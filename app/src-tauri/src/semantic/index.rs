@@ -252,9 +252,15 @@ pub async fn mark_chunks_ready(
     if items.is_empty() {
         return Ok(());
     }
+    let total_started = std::time::Instant::now();
     let mut tx = pool.begin().await?;
     let now = chrono::Utc::now().to_rfc3339();
+    let mut prepare_ms = 0u128;
+    let mut delete_ms = 0u128;
+    let mut insert_ms = 0u128;
+    let mut update_ms = 0u128;
     for (chunk_id, session_id, message_id, platform, embedding) in items {
+        let prepare_started = std::time::Instant::now();
         let mut vector = embedding.clone();
         if vector.len() < 640 {
             vector.resize(640, 0.0);
@@ -262,10 +268,16 @@ pub async fn mark_chunks_ready(
             vector.truncate(640);
         }
         let bytes = f32_slice_as_bytes(&vector);
+        prepare_ms += prepare_started.elapsed().as_millis();
+
+        let delete_started = std::time::Instant::now();
         let _ = sqlx::query("DELETE FROM embedding_vec WHERE chunk_id = ?")
             .bind(chunk_id)
             .execute(&mut *tx)
             .await;
+        delete_ms += delete_started.elapsed().as_millis();
+
+        let insert_started = std::time::Instant::now();
         sqlx::query(
             "INSERT INTO embedding_vec(chunk_id, embedding, session_id, message_id, platform) VALUES (?, ?, ?, ?, ?)",
         )
@@ -276,6 +288,9 @@ pub async fn mark_chunks_ready(
         .bind(platform)
         .execute(&mut *tx)
         .await?;
+        insert_ms += insert_started.elapsed().as_millis();
+
+        let update_started = std::time::Instant::now();
         sqlx::query(
             "UPDATE embedding_chunks SET status = 'ready', error = NULL, dim = ?, updated_at = ? WHERE id = ?",
         )
@@ -284,8 +299,22 @@ pub async fn mark_chunks_ready(
         .bind(chunk_id)
         .execute(&mut *tx)
         .await?;
+        update_ms += update_started.elapsed().as_millis();
     }
+    let commit_started = std::time::Instant::now();
     tx.commit().await?;
+    let commit_ms = commit_started.elapsed().as_millis();
+    let total_ms = total_started.elapsed().as_millis();
+    tracing::info!(
+        batch_size = items.len(),
+        prepare_ms,
+        delete_ms,
+        insert_ms,
+        update_ms,
+        commit_ms,
+        total_ms,
+        "semantic mark_chunks_ready profile"
+    );
     Ok(())
 }
 

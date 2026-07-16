@@ -630,9 +630,12 @@ fn embed_batch(
     is_query: bool,
     dimensions: usize,
 ) -> Result<Vec<Vec<f32>>> {
+    let total_started = std::time::Instant::now();
+    let tokenize_started = std::time::Instant::now();
     let mut token_batches = Vec::with_capacity(texts.len());
     let mut lengths = Vec::with_capacity(texts.len());
     let mut max_len = 1usize;
+    let mut total_tokens = 0usize;
     for text in texts {
         let prepared = if is_query {
             format!("{DEFAULT_QUERY_INSTRUCTION}{text}")
@@ -653,10 +656,13 @@ fn embed_batch(
             ids.truncate(MAX_SEQUENCE_LEN);
         }
         max_len = max_len.max(ids.len());
+        total_tokens += ids.len();
         lengths.push(ids.len());
         token_batches.push(ids);
     }
+    let tokenize_ms = tokenize_started.elapsed().as_millis();
 
+    let pack_started = std::time::Instant::now();
     let mut flat = Vec::with_capacity(token_batches.len() * max_len);
     for ids in &token_batches {
         flat.extend_from_slice(ids);
@@ -666,14 +672,64 @@ fn embed_batch(
     }
     let input = Tensor::from_vec(flat, (token_batches.len(), max_len), &loaded.device)
         .map_err(candle_err)?;
+    let pack_ms = pack_started.elapsed().as_millis();
+
+    let forward_started = std::time::Instant::now();
     let embeddings = loaded
         .model
         .embed_tokens_batch(&input, &lengths)
         .map_err(candle_err)?;
+    // CUDA kernels are async; synchronize so forward_ms reflects real GPU work.
+    loaded.device.synchronize().map_err(candle_err)?;
+    let forward_ms = forward_started.elapsed().as_millis();
+
+    let host_started = std::time::Instant::now();
     let embeddings = embeddings.to_dtype(DType::F32).map_err(candle_err)?;
     let vectors = embeddings.to_vec2::<f32>().map_err(candle_err)?;
     ensure_dimensions(&vectors, dimensions)?;
     ensure_finite_vectors(&vectors)?;
+    let host_ms = host_started.elapsed().as_millis();
+
+    let batch_size = token_batches.len();
+    let avg_tokens = if batch_size == 0 {
+        0.0
+    } else {
+        total_tokens as f64 / batch_size as f64
+    };
+    let pad_ratio = if max_len == 0 || batch_size == 0 {
+        0.0
+    } else {
+        1.0 - (total_tokens as f64 / (batch_size as f64 * max_len as f64))
+    };
+    let total_ms = total_started.elapsed().as_millis();
+    let tokens_per_sec = if total_ms == 0 {
+        total_tokens as f64
+    } else {
+        (total_tokens as f64) * 1000.0 / (total_ms as f64)
+    };
+    let chunks_per_sec = if total_ms == 0 {
+        batch_size as f64
+    } else {
+        (batch_size as f64) * 1000.0 / (total_ms as f64)
+    };
+    tracing::info!(
+        batch_size,
+        max_len,
+        total_tokens,
+        avg_tokens,
+        pad_ratio,
+        tokenize_ms,
+        pack_ms,
+        forward_ms,
+        host_ms,
+        total_ms,
+        tokens_per_sec,
+        chunks_per_sec,
+        device = %loaded.device_label,
+        dtype = %loaded.dtype_label,
+        is_query,
+        "local embedding batch profile"
+    );
     Ok(vectors)
 }
 
