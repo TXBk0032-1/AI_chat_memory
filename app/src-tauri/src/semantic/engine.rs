@@ -244,15 +244,15 @@ impl SemanticEngine {
             Vec::new()
         };
 
-        if matches!(mode, SearchMode::Semantic | SearchMode::Hybrid) {
-            if let Ok(Some(embedding)) = self.embed_query(query).await {
-                let identity = self.embeddings.read().await.identity();
-                if let Ok(semantic_hits) =
-                    index::semantic_session_hits(&self.pool, session_id, &identity, &embedding, 20)
-                        .await
-                {
-                    hits.extend(semantic_hits);
-                }
+        if matches!(mode, SearchMode::Semantic | SearchMode::Hybrid)
+            && let Ok(Some(embedding)) = self.embed_query(query).await
+        {
+            let identity = self.embeddings.read().await.identity();
+            if let Ok(semantic_hits) =
+                index::semantic_session_hits(&self.pool, session_id, &identity, &embedding, 20)
+                    .await
+            {
+                hits.extend(semantic_hits);
             }
         }
         Ok(hits)
@@ -337,7 +337,7 @@ impl SemanticEngine {
                     break;
                 }
             };
-            for (item, vector) in pending.into_iter().zip(vectors.into_iter()) {
+            for (item, vector) in pending.into_iter().zip(vectors) {
                 if let Some((session_id, message_id, platform)) =
                     index::chunk_meta(&self.pool, item.id).await?
                 {

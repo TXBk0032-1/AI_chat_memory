@@ -123,7 +123,7 @@ pub enum SearchMode {
     Hybrid,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SearchQuery {
     pub q: Option<String>,
     pub platform: Option<String>,
@@ -133,20 +133,6 @@ pub struct SearchQuery {
     pub offset: Option<i64>,
     #[serde(default)]
     pub mode: Option<SearchMode>,
-}
-
-impl Default for SearchQuery {
-    fn default() -> Self {
-        Self {
-            q: None,
-            platform: None,
-            date_from: None,
-            date_to: None,
-            limit: None,
-            offset: None,
-            mode: None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

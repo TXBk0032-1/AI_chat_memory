@@ -15,7 +15,15 @@ pub fn register_sqlite_vec() {
     SQLITE_VEC_INIT.call_once(|| {
         unsafe {
             // SAFETY: sqlite-vec is a trusted, statically linked extension compiled into this binary.
-            libsqlite3_sys::sqlite3_auto_extension(Some(std::mem::transmute(
+            type SqliteEntry = unsafe extern "C" fn(
+                *mut libsqlite3_sys::sqlite3,
+                *mut *mut i8,
+                *const libsqlite3_sys::sqlite3_api_routines,
+            ) -> i32;
+            libsqlite3_sys::sqlite3_auto_extension(Some(std::mem::transmute::<
+                *const (),
+                SqliteEntry,
+            >(
                 sqlite_vec::sqlite3_vec_init as *const (),
             )));
         }
