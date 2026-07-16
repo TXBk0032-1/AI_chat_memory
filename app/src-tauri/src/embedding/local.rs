@@ -645,16 +645,16 @@ fn length_band(tokens: usize) -> u8 {
     }
 }
 
-/// Short texts can fill the GPU; long texts must stay restrained because
+/// Short texts should fill the GPU; long texts stay restrained because
 /// attention cost grows roughly with max_len^2.
-fn band_limits(band: u8) -> (usize, usize) {
-    // (token_budget, max_items)
+/// Returns (token_budget, max_items, preferred_min_items).
+fn band_limits(band: u8) -> (usize, usize, usize) {
     match band {
-        0 => (12_288, 64), // short: aggressive
-        1 => (11_264, 40),
-        2 => (9_216, 24),
-        3 => (8_192, 16),
-        _ => (7_168, 10), // long: restrained
+        0 => (12_288, 64, 24), // short: force large packs
+        1 => (11_264, 40, 16),
+        2 => (9_216, 24, 8),
+        3 => (8_192, 16, 4),
+        _ => (7_168, 10, 1), // long: restrained
     }
 }
 
@@ -686,37 +686,68 @@ pub fn plan_local_index_batch(estimated_tokens: &[usize]) -> Vec<usize> {
     }
     band_ranges.push((range_start, n, current_band));
 
-    let mut best_start = 0usize;
-    let mut best_end = 1usize;
+    // Shortest-first scheduling: never let a 1-token short beat a full long batch
+    // in a global score. Process the shortest available band first.
+    let Some(&(band_start, band_end, band)) = band_ranges.first() else {
+        return vec![0];
+    };
+    let (budget, max_items, preferred_min) = band_limits(band);
+    let max_items = max_items.min(LOCAL_INDEX_MAX_BATCH_ITEMS);
+    let band_len = band_end - band_start;
+
+    // Prefer a contiguous packed window inside this band.
+    let mut best_start = band_start;
+    let mut best_end = band_start + 1;
     let mut best_score = f64::NEG_INFINITY;
 
-    for (band_start, band_end, band) in band_ranges {
-        let (budget, max_items) = band_limits(band);
-        let max_items = max_items.min(LOCAL_INDEX_MAX_BATCH_ITEMS);
-        for start in band_start..band_end {
-            let mut max_len = estimated_tokens[order[start]];
-            let mut sum_tokens = 0usize;
-            let max_end = (start + max_items).min(band_end);
-            for end in (start + 1)..=max_end {
-                let tokens = estimated_tokens[order[end - 1]];
-                max_len = max_len.max(tokens);
-                sum_tokens += tokens;
-                let items = end - start;
-                let padded = max_len.saturating_mul(items);
-                if padded > budget && items > 1 {
-                    break;
-                }
-                let pad_ratio = 1.0 - (sum_tokens as f64 / padded.max(1) as f64);
-                // Approximate throughput score: items / cost(max_len), with pad penalty.
-                // Long sequences are heavily penalized (attention ~ seq^2).
-                let score = (items as f64) * (1.0 - pad_ratio).powf(1.15)
-                    / (max_len as f64).max(1.0).powf(1.35);
-                if score > best_score {
-                    best_score = score;
-                    best_start = start;
-                    best_end = end;
-                }
+    for start in band_start..band_end {
+        let mut max_len = estimated_tokens[order[start]];
+        let mut sum_tokens = 0usize;
+        let max_end = (start + max_items).min(band_end);
+        for end in (start + 1)..=max_end {
+            let tokens = estimated_tokens[order[end - 1]];
+            max_len = max_len.max(tokens);
+            sum_tokens += tokens;
+            let items = end - start;
+            let padded = max_len.saturating_mul(items);
+            if padded > budget && items > 1 {
+                break;
             }
+            let pad_ratio = 1.0 - (sum_tokens as f64 / padded.max(1) as f64);
+            // Strongly reward fuller packs; tiny 1-2 item packs lose unless no choice.
+            let fullness = (items as f64 / preferred_min.max(1) as f64).clamp(0.05, 2.0);
+            let score = (items as f64).powf(1.35) * (1.0 - pad_ratio).powf(1.1) * fullness
+                / (max_len as f64).max(1.0).powf(0.85);
+            if score > best_score {
+                best_score = score;
+                best_start = start;
+                best_end = end;
+            }
+        }
+    }
+
+    // If the band still has many leftovers and we under-filled preferred_min,
+    // expand from the start of the chosen window as far as budget allows.
+    let chosen_items = best_end - best_start;
+    if chosen_items < preferred_min && band_len > chosen_items {
+        let mut max_len = 0usize;
+        let mut sum_tokens = 0usize;
+        let mut end = best_start;
+        while end < band_end && (end - best_start) < max_items {
+            let tokens = estimated_tokens[order[end]];
+            let next_max = max_len.max(tokens);
+            let next_items = end - best_start + 1;
+            let padded = next_max.saturating_mul(next_items);
+            if padded > budget && next_items > 1 {
+                break;
+            }
+            max_len = next_max;
+            sum_tokens = sum_tokens.saturating_add(tokens);
+            end += 1;
+            let _ = sum_tokens;
+        }
+        if end > best_end {
+            best_end = end;
         }
     }
 
@@ -1371,9 +1402,13 @@ mod packing_tests {
         let max_len = chosen.iter().map(|&i| estimates[i]).max().unwrap();
         let padded = max_len * chosen.len();
         assert!(padded <= LOCAL_INDEX_TOKEN_BUDGET || chosen.len() == 1);
-        // Should mostly pick the short cluster.
+        // Should pick the short cluster, and pack several of them (not a singleton).
         let avg = chosen.iter().map(|&i| estimates[i]).sum::<usize>() as f64 / chosen.len() as f64;
         assert!(avg < 100.0, "avg={avg}, chosen={chosen:?}");
+        assert!(
+            chosen.len() >= 5,
+            "expected short-cluster packing, chosen={chosen:?}"
+        );
         // Band isolation: no short+long mix.
         assert!(
             chosen.iter().all(|&i| estimates[i] < 100)
@@ -1404,5 +1439,19 @@ mod packing_tests {
         let chosen = plan_local_index_batch(&estimates);
         assert!(chosen.len() >= 48, "chosen={}", chosen.len());
         assert!(chosen.len() <= LOCAL_INDEX_MAX_BATCH_ITEMS);
+    }
+
+    #[test]
+    fn plan_local_index_batch_short_first_avoids_singleton() {
+        // Lots of shorts plus some longs: must pack many shorts, never a singleton short.
+        let mut estimates = vec![35usize; 30];
+        estimates.extend(std::iter::repeat_n(600usize, 20));
+        let chosen = plan_local_index_batch(&estimates);
+        assert!(
+            chosen.len() >= 24,
+            "expected short-first large pack, chosen={}",
+            chosen.len()
+        );
+        assert!(chosen.iter().all(|&i| estimates[i] < 100));
     }
 }
