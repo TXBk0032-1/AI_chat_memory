@@ -19,7 +19,12 @@ use crate::{
 const DEFAULT_QUERY_INSTRUCTION: &str = "Instruct: Given a chat history search query, retrieve relevant conversation passages that answer the query\nQuery: ";
 const MODEL_FILES: [&str; 3] = ["config.json", "tokenizer.json", "model.safetensors"];
 const MAX_SEQUENCE_LEN: usize = 2048;
-pub const LOCAL_INDEX_BATCH_SIZE: i64 = 16;
+/// Pull a wider pending window so we can pack similar-length chunks.
+pub const LOCAL_INDEX_CANDIDATE_LIMIT: i64 = 512;
+/// Absolute hard cap on items in one local embed call.
+pub const LOCAL_INDEX_MAX_BATCH_ITEMS: usize = 64;
+/// Fallback padded-token budget used by tests / generic callers.
+pub const LOCAL_INDEX_TOKEN_BUDGET: usize = 12288;
 
 pub type DownloadProgressCallback = Arc<dyn Fn(ModelDownloadProgress) + Send + Sync>;
 
@@ -624,15 +629,210 @@ fn warmup_model(loaded: &mut LoadedModel) -> Result<()> {
     Ok(())
 }
 
+/// Cheap token estimate for batch packing.
+/// Chat archives are Chinese-heavy, so char count is a stable upper-ish proxy.
+pub fn estimate_token_count(text: &str) -> usize {
+    text.chars().count().clamp(1, MAX_SEQUENCE_LEN)
+}
+
+fn length_band(tokens: usize) -> u8 {
+    match tokens {
+        0..=96 => 0,
+        97..=192 => 1,
+        193..=320 => 2,
+        321..=512 => 3,
+        _ => 4,
+    }
+}
+
+/// Short texts should fill the GPU; long texts stay restrained because
+/// attention cost grows roughly with max_len^2.
+/// Returns (token_budget, max_items, preferred_min_items).
+fn band_limits(band: u8) -> (usize, usize, usize) {
+    // Small V5.1 nudge after V5 win:
+    // - short: slightly easier to trigger preferential packing
+    // - mid/long: a bit more room without returning to V2 over-pack
+    match band {
+        0 => (12_288, 64, 16), // short: prefer min 16 (was 24)
+        1 => (11_776, 40, 12),
+        2 => (10_240, 24, 8),
+        3 => (9_216, 18, 6), // medium-long: allow ~18
+        _ => (8_192, 12, 1), // long: 10 -> 12, budget 7k -> 8k
+    }
+}
+
+fn pack_window_in_band(
+    order: &[usize],
+    estimated_tokens: &[usize],
+    band_start: usize,
+    band_end: usize,
+    budget: usize,
+    max_items: usize,
+    preferred_min: usize,
+) -> (usize, usize, f64) {
+    let mut best_start = band_start;
+    let mut best_end = band_start + 1;
+    let mut best_score = f64::NEG_INFINITY;
+
+    for start in band_start..band_end {
+        let mut max_len = estimated_tokens[order[start]];
+        let mut sum_tokens = 0usize;
+        let max_end = (start + max_items).min(band_end);
+        for end in (start + 1)..=max_end {
+            let tokens = estimated_tokens[order[end - 1]];
+            max_len = max_len.max(tokens);
+            sum_tokens += tokens;
+            let items = end - start;
+            let padded = max_len.saturating_mul(items);
+            if padded > budget && items > 1 {
+                break;
+            }
+            let pad_ratio = 1.0 - (sum_tokens as f64 / padded.max(1) as f64);
+            let fullness = (items as f64 / preferred_min.max(1) as f64).clamp(0.05, 2.0);
+            // Reward more items and lower pad; lightly punish longer sequences.
+            let score = (items as f64).powf(1.4) * (1.0 - pad_ratio).powf(1.15) * fullness
+                / (max_len as f64).max(1.0).powf(0.9);
+            if score > best_score {
+                best_score = score;
+                best_start = start;
+                best_end = end;
+            }
+        }
+    }
+
+    // Expand under-filled windows when the band still has room.
+    let chosen_items = best_end - best_start;
+    let band_len = band_end - band_start;
+    if chosen_items < preferred_min && band_len > chosen_items {
+        let mut max_len = 0usize;
+        let mut end = best_start;
+        while end < band_end && (end - best_start) < max_items {
+            let tokens = estimated_tokens[order[end]];
+            let next_max = max_len.max(tokens);
+            let next_items = end - best_start + 1;
+            let padded = next_max.saturating_mul(next_items);
+            if padded > budget && next_items > 1 {
+                break;
+            }
+            max_len = next_max;
+            end += 1;
+        }
+        if end > best_end {
+            best_end = end;
+            // Recompute a simple score for the expanded window.
+            let mut max_len = 0usize;
+            let mut sum_tokens = 0usize;
+            for idx in &order[best_start..best_end] {
+                let tokens = estimated_tokens[*idx];
+                max_len = max_len.max(tokens);
+                sum_tokens += tokens;
+            }
+            let items = best_end - best_start;
+            let padded = max_len.saturating_mul(items).max(1);
+            let pad_ratio = 1.0 - (sum_tokens as f64 / padded as f64);
+            let fullness = (items as f64 / preferred_min.max(1) as f64).clamp(0.05, 2.0);
+            best_score = (items as f64).powf(1.4) * (1.0 - pad_ratio).powf(1.15) * fullness
+                / (max_len as f64).max(1.0).powf(0.9);
+        }
+    }
+
+    (best_start, best_end, best_score)
+}
+
+/// Pick a dense, similar-length subset under a padded-token budget.
+/// Returns indices into the candidate slice (stable ascending order).
+pub fn plan_local_index_batch(estimated_tokens: &[usize]) -> Vec<usize> {
+    let n = estimated_tokens.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    if n == 1 {
+        return vec![0];
+    }
+
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by_key(|&idx| estimated_tokens[idx]);
+
+    // Restrict packing to one length band at a time so short/long never mix.
+    let mut band_ranges: Vec<(usize, usize, u8)> = Vec::new();
+    let mut range_start = 0usize;
+    let mut current_band = length_band(estimated_tokens[order[0]]);
+    for i in 1..n {
+        let band = length_band(estimated_tokens[order[i]]);
+        if band != current_band {
+            band_ranges.push((range_start, i, current_band));
+            range_start = i;
+            current_band = band;
+        }
+    }
+    band_ranges.push((range_start, n, current_band));
+
+    // Prefer short band only when it can form a real pack; otherwise choose the densest band.
+    let mut selected: Option<(usize, usize, f64)> = None;
+    if let Some(&(band_start, band_end, band)) = band_ranges.iter().find(|(_, _, b)| *b == 0) {
+        let (budget, max_items, preferred_min) = band_limits(band);
+        let band_len = band_end - band_start;
+        if band_len >= preferred_min {
+            let packed = pack_window_in_band(
+                &order,
+                estimated_tokens,
+                band_start,
+                band_end,
+                budget,
+                max_items.min(LOCAL_INDEX_MAX_BATCH_ITEMS),
+                preferred_min,
+            );
+            if packed.1 - packed.0 >= preferred_min {
+                selected = Some(packed);
+            }
+        }
+    }
+
+    if selected.is_none() {
+        let mut best: Option<(usize, usize, f64)> = None;
+        for &(band_start, band_end, band) in &band_ranges {
+            let (budget, max_items, preferred_min) = band_limits(band);
+            let packed = pack_window_in_band(
+                &order,
+                estimated_tokens,
+                band_start,
+                band_end,
+                budget,
+                max_items.min(LOCAL_INDEX_MAX_BATCH_ITEMS),
+                preferred_min,
+            );
+            let items = packed.1 - packed.0;
+            // Skip sparse tiny packs if a denser band exists later, unless this is the only band.
+            if items < 4 && band_ranges.len() > 1 && band <= 1 {
+                // still consider, but with lower score already from pack_window
+            }
+            match best {
+                None => best = Some(packed),
+                Some((_, _, best_score)) if packed.2 > best_score => best = Some(packed),
+                _ => {}
+            }
+        }
+        selected = best;
+    }
+
+    let (best_start, best_end, _) = selected.unwrap_or((0, 1, 0.0));
+    let mut chosen: Vec<usize> = order[best_start..best_end].to_vec();
+    chosen.sort_unstable();
+    chosen
+}
+
 fn embed_batch(
     loaded: &mut LoadedModel,
     texts: &[String],
     is_query: bool,
     dimensions: usize,
 ) -> Result<Vec<Vec<f32>>> {
+    let total_started = std::time::Instant::now();
+    let tokenize_started = std::time::Instant::now();
     let mut token_batches = Vec::with_capacity(texts.len());
     let mut lengths = Vec::with_capacity(texts.len());
     let mut max_len = 1usize;
+    let mut total_tokens = 0usize;
     for text in texts {
         let prepared = if is_query {
             format!("{DEFAULT_QUERY_INSTRUCTION}{text}")
@@ -653,10 +853,13 @@ fn embed_batch(
             ids.truncate(MAX_SEQUENCE_LEN);
         }
         max_len = max_len.max(ids.len());
+        total_tokens += ids.len();
         lengths.push(ids.len());
         token_batches.push(ids);
     }
+    let tokenize_ms = tokenize_started.elapsed().as_millis();
 
+    let pack_started = std::time::Instant::now();
     let mut flat = Vec::with_capacity(token_batches.len() * max_len);
     for ids in &token_batches {
         flat.extend_from_slice(ids);
@@ -666,14 +869,64 @@ fn embed_batch(
     }
     let input = Tensor::from_vec(flat, (token_batches.len(), max_len), &loaded.device)
         .map_err(candle_err)?;
+    let pack_ms = pack_started.elapsed().as_millis();
+
+    let forward_started = std::time::Instant::now();
     let embeddings = loaded
         .model
         .embed_tokens_batch(&input, &lengths)
         .map_err(candle_err)?;
+    // CUDA kernels are async; synchronize so forward_ms reflects real GPU work.
+    loaded.device.synchronize().map_err(candle_err)?;
+    let forward_ms = forward_started.elapsed().as_millis();
+
+    let host_started = std::time::Instant::now();
     let embeddings = embeddings.to_dtype(DType::F32).map_err(candle_err)?;
     let vectors = embeddings.to_vec2::<f32>().map_err(candle_err)?;
     ensure_dimensions(&vectors, dimensions)?;
     ensure_finite_vectors(&vectors)?;
+    let host_ms = host_started.elapsed().as_millis();
+
+    let batch_size = token_batches.len();
+    let avg_tokens = if batch_size == 0 {
+        0.0
+    } else {
+        total_tokens as f64 / batch_size as f64
+    };
+    let pad_ratio = if max_len == 0 || batch_size == 0 {
+        0.0
+    } else {
+        1.0 - (total_tokens as f64 / (batch_size as f64 * max_len as f64))
+    };
+    let total_ms = total_started.elapsed().as_millis();
+    let tokens_per_sec = if total_ms == 0 {
+        total_tokens as f64
+    } else {
+        (total_tokens as f64) * 1000.0 / (total_ms as f64)
+    };
+    let chunks_per_sec = if total_ms == 0 {
+        batch_size as f64
+    } else {
+        (batch_size as f64) * 1000.0 / (total_ms as f64)
+    };
+    tracing::info!(
+        batch_size,
+        max_len,
+        total_tokens,
+        avg_tokens,
+        pad_ratio,
+        tokenize_ms,
+        pack_ms,
+        forward_ms,
+        host_ms,
+        total_ms,
+        tokens_per_sec,
+        chunks_per_sec,
+        device = %loaded.device_label,
+        dtype = %loaded.dtype_label,
+        is_query,
+        "local embedding batch profile"
+    );
     Ok(vectors)
 }
 
@@ -1187,5 +1440,100 @@ mod tests {
                 "expected CUDA runtime after driver upgrade, got {device}/{dtype}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod packing_tests {
+    use super::{
+        LOCAL_INDEX_MAX_BATCH_ITEMS, LOCAL_INDEX_TOKEN_BUDGET, estimate_token_count,
+        plan_local_index_batch,
+    };
+
+    #[test]
+    fn estimate_token_count_clamps() {
+        assert_eq!(estimate_token_count(""), 1);
+        assert_eq!(estimate_token_count("你好世界"), 4);
+        assert!(estimate_token_count(&"a".repeat(10_000)) <= 2048);
+    }
+
+    #[test]
+    fn plan_local_index_batch_prefers_similar_lengths() {
+        // Mix very short and long so packing should avoid the long outliers first.
+        let estimates = vec![20, 22, 21, 500, 18, 19, 23, 510, 17];
+        let chosen = plan_local_index_batch(&estimates);
+        assert!(!chosen.is_empty());
+        assert!(chosen.len() <= LOCAL_INDEX_MAX_BATCH_ITEMS);
+        let max_len = chosen.iter().map(|&i| estimates[i]).max().unwrap();
+        let padded = max_len * chosen.len();
+        assert!(padded <= LOCAL_INDEX_TOKEN_BUDGET || chosen.len() == 1);
+        // Should pick the short cluster, and pack several of them (not a singleton).
+        let avg = chosen.iter().map(|&i| estimates[i]).sum::<usize>() as f64 / chosen.len() as f64;
+        assert!(avg < 100.0, "avg={avg}, chosen={chosen:?}");
+        assert!(
+            chosen.len() >= 5,
+            "expected short-cluster packing, chosen={chosen:?}"
+        );
+        // Band isolation: no short+long mix.
+        assert!(
+            chosen.iter().all(|&i| estimates[i] < 100)
+                || chosen.iter().all(|&i| estimates[i] >= 100),
+            "mixed bands: {chosen:?}"
+        );
+    }
+
+    #[test]
+    fn plan_local_index_batch_restrains_medium_long_items() {
+        let estimates = vec![400usize; 64];
+        let chosen = plan_local_index_batch(&estimates);
+        assert!((12..=18).contains(&chosen.len()), "chosen={}", chosen.len());
+        assert!(400 * chosen.len() <= 9216 || chosen.len() == 1);
+    }
+
+    #[test]
+    fn plan_local_index_batch_restrains_long_items() {
+        let estimates = vec![600usize; 40];
+        let chosen = plan_local_index_batch(&estimates);
+        assert!((8..=12).contains(&chosen.len()), "chosen={}", chosen.len());
+        assert!(600 * chosen.len() <= 8192 || chosen.len() == 1);
+    }
+
+    #[test]
+    fn plan_local_index_batch_packs_many_short_items() {
+        let estimates = vec![40usize; 80];
+        let chosen = plan_local_index_batch(&estimates);
+        assert!(chosen.len() >= 48, "chosen={}", chosen.len());
+        assert!(chosen.len() <= LOCAL_INDEX_MAX_BATCH_ITEMS);
+    }
+
+    #[test]
+    fn plan_local_index_batch_short_first_avoids_singleton() {
+        // Lots of shorts plus some longs: must pack many shorts, never a singleton short.
+        let mut estimates = vec![35usize; 30];
+        estimates.extend(std::iter::repeat_n(600usize, 20));
+        let chosen = plan_local_index_batch(&estimates);
+        assert!(
+            chosen.len() >= 16,
+            "expected short-first large pack, chosen={}",
+            chosen.len()
+        );
+        assert!(chosen.iter().all(|&i| estimates[i] < 100));
+    }
+
+    #[test]
+    fn plan_local_index_batch_skips_sparse_shorts_for_dense_longs() {
+        // Only a couple shorts and many longs: do NOT emit short singletons first.
+        let mut estimates = vec![30usize, 40usize];
+        estimates.extend(std::iter::repeat_n(600usize, 20));
+        let chosen = plan_local_index_batch(&estimates);
+        assert!(
+            chosen.len() >= 8,
+            "expected dense long pack, chosen={}",
+            chosen.len()
+        );
+        assert!(
+            chosen.iter().all(|&i| estimates[i] >= 500),
+            "should skip sparse shorts, chosen={chosen:?}"
+        );
     }
 }

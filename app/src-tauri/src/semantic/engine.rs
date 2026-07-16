@@ -541,14 +541,47 @@ impl SemanticEngine {
             }
             let identity = manager.identity();
             let backend = manager.active();
-            let batch_size =
-                if matches!(identity.backend, crate::models::EmbeddingBackendKind::Local) {
-                    crate::embedding::local::LOCAL_INDEX_BATCH_SIZE
-                } else {
-                    16
-                };
-            let pending = index::fetch_pending_chunks(&self.pool, &identity, batch_size).await?;
+            let is_local = matches!(identity.backend, crate::models::EmbeddingBackendKind::Local);
+            let fetch_limit = if is_local {
+                crate::embedding::local::LOCAL_INDEX_CANDIDATE_LIMIT
+            } else {
+                16
+            };
+            let candidates =
+                index::fetch_pending_chunks(&self.pool, &identity, fetch_limit).await?;
             drop(manager);
+            if candidates.is_empty() {
+                break;
+            }
+            let pending = if is_local {
+                let estimates = candidates
+                    .iter()
+                    .map(|item| crate::embedding::local::estimate_token_count(&item.text))
+                    .collect::<Vec<_>>();
+                let chosen = crate::embedding::local::plan_local_index_batch(&estimates);
+                let est_tokens: usize = chosen.iter().map(|&i| estimates[i]).sum();
+                let est_max = chosen.iter().map(|&i| estimates[i]).max().unwrap_or(0);
+                let est_pad = if chosen.is_empty() || est_max == 0 {
+                    0.0
+                } else {
+                    1.0 - (est_tokens as f64 / (chosen.len() as f64 * est_max as f64))
+                };
+                tracing::info!(
+                    candidates = candidates.len(),
+                    chosen = chosen.len(),
+                    est_tokens,
+                    est_max_len = est_max,
+                    est_pad_ratio = est_pad,
+                    token_budget = crate::embedding::local::LOCAL_INDEX_TOKEN_BUDGET,
+                    "local index batch planned"
+                );
+                chosen
+                    .into_iter()
+                    .map(|idx| candidates[idx].clone())
+                    .collect::<Vec<_>>()
+            } else {
+                candidates
+            };
             if pending.is_empty() {
                 break;
             }
@@ -557,6 +590,7 @@ impl SemanticEngine {
                 .map(|item| item.text.clone())
                 .collect::<Vec<_>>();
             let started = std::time::Instant::now();
+            let embed_started = std::time::Instant::now();
             let vectors = match backend.embed_documents(&texts).await {
                 Ok(vectors) => {
                     *self.last_error.write().await = None;
@@ -571,20 +605,7 @@ impl SemanticEngine {
                     break;
                 }
             };
-            let elapsed_ms = started.elapsed().as_millis();
-            let chunks_per_sec = if elapsed_ms == 0 {
-                pending.len() as f64
-            } else {
-                (pending.len() as f64) * 1000.0 / (elapsed_ms as f64)
-            };
-            tracing::info!(
-                batch_size = pending.len(),
-                device = backend.runtime_device().as_deref().unwrap_or("unknown"),
-                dtype = backend.runtime_dtype().as_deref().unwrap_or("unknown"),
-                elapsed_ms,
-                chunks_per_sec,
-                "semantic embedding batch completed"
-            );
+            let embed_ms = embed_started.elapsed().as_millis();
             let ready_items = pending
                 .iter()
                 .zip(vectors)
@@ -598,7 +619,25 @@ impl SemanticEngine {
                     )
                 })
                 .collect::<Vec<_>>();
+            let write_started = std::time::Instant::now();
             index::mark_chunks_ready(&self.pool, &identity, &ready_items).await?;
+            let write_ms = write_started.elapsed().as_millis();
+            let elapsed_ms = started.elapsed().as_millis();
+            let chunks_per_sec = if elapsed_ms == 0 {
+                pending.len() as f64
+            } else {
+                (pending.len() as f64) * 1000.0 / (elapsed_ms as f64)
+            };
+            tracing::info!(
+                batch_size = pending.len(),
+                device = backend.runtime_device().as_deref().unwrap_or("unknown"),
+                dtype = backend.runtime_dtype().as_deref().unwrap_or("unknown"),
+                embed_ms,
+                write_ms,
+                elapsed_ms,
+                chunks_per_sec,
+                "semantic embedding batch completed"
+            );
             self.note_embedding_progress().await;
         }
         Ok(())

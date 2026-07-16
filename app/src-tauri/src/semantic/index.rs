@@ -252,20 +252,62 @@ pub async fn mark_chunks_ready(
     if items.is_empty() {
         return Ok(());
     }
+    let total_started = std::time::Instant::now();
+
+    let prepare_started = std::time::Instant::now();
+    let prepared = items
+        .iter()
+        .map(|(chunk_id, session_id, message_id, platform, embedding)| {
+            let mut vector = embedding.clone();
+            if vector.len() < 640 {
+                vector.resize(640, 0.0);
+            } else if vector.len() > 640 {
+                vector.truncate(640);
+            }
+            let bytes = f32_slice_as_bytes(&vector);
+            (*chunk_id, *session_id, *message_id, *platform, bytes)
+        })
+        .collect::<Vec<_>>();
+    let prepare_ms = prepare_started.elapsed().as_millis();
+
     let mut tx = pool.begin().await?;
     let now = chrono::Utc::now().to_rfc3339();
-    for (chunk_id, session_id, message_id, platform, embedding) in items {
-        let mut vector = embedding.clone();
-        if vector.len() < 640 {
-            vector.resize(640, 0.0);
-        } else if vector.len() > 640 {
-            vector.truncate(640);
+
+    // Fresh pending chunks usually have no prior vector row. Only delete when
+    // some already exist (reindex/stale rewrite), to avoid expensive no-op vec0 DELETEs.
+    let delete_started = std::time::Instant::now();
+    let mut existing_ids = Vec::new();
+    {
+        let mut exists_sql = String::from("SELECT chunk_id FROM embedding_vec WHERE chunk_id IN (");
+        for (i, (chunk_id, _, _, _, _)) in prepared.iter().enumerate() {
+            if i > 0 {
+                exists_sql.push(',');
+            }
+            exists_sql.push_str(&chunk_id.to_string());
         }
-        let bytes = f32_slice_as_bytes(&vector);
-        let _ = sqlx::query("DELETE FROM embedding_vec WHERE chunk_id = ?")
-            .bind(chunk_id)
-            .execute(&mut *tx)
-            .await;
+        exists_sql.push(')');
+        let rows = sqlx::query(&exists_sql).fetch_all(&mut *tx).await?;
+        for row in rows {
+            existing_ids.push(row.get::<i64, _>("chunk_id"));
+        }
+    }
+    if !existing_ids.is_empty() {
+        let mut delete_sql = String::from("DELETE FROM embedding_vec WHERE chunk_id IN (");
+        for (i, chunk_id) in existing_ids.iter().enumerate() {
+            if i > 0 {
+                delete_sql.push(',');
+            }
+            delete_sql.push_str(&chunk_id.to_string());
+        }
+        delete_sql.push(')');
+        let _ = sqlx::query(&delete_sql).execute(&mut *tx).await;
+    }
+    let delete_ms = delete_started.elapsed().as_millis();
+
+    let mut insert_ms = 0u128;
+    let mut update_ms = 0u128;
+    for (chunk_id, session_id, message_id, platform, bytes) in &prepared {
+        let insert_started = std::time::Instant::now();
         sqlx::query(
             "INSERT INTO embedding_vec(chunk_id, embedding, session_id, message_id, platform) VALUES (?, ?, ?, ?, ?)",
         )
@@ -276,6 +318,9 @@ pub async fn mark_chunks_ready(
         .bind(platform)
         .execute(&mut *tx)
         .await?;
+        insert_ms += insert_started.elapsed().as_millis();
+
+        let update_started = std::time::Instant::now();
         sqlx::query(
             "UPDATE embedding_chunks SET status = 'ready', error = NULL, dim = ?, updated_at = ? WHERE id = ?",
         )
@@ -284,8 +329,23 @@ pub async fn mark_chunks_ready(
         .bind(chunk_id)
         .execute(&mut *tx)
         .await?;
+        update_ms += update_started.elapsed().as_millis();
     }
+    let commit_started = std::time::Instant::now();
     tx.commit().await?;
+    let commit_ms = commit_started.elapsed().as_millis();
+    let total_ms = total_started.elapsed().as_millis();
+    tracing::info!(
+        batch_size = items.len(),
+        existing_vectors = existing_ids.len(),
+        prepare_ms,
+        delete_ms,
+        insert_ms,
+        update_ms,
+        commit_ms,
+        total_ms,
+        "semantic mark_chunks_ready profile"
+    );
     Ok(())
 }
 
