@@ -532,9 +532,19 @@ fn load_model(
     };
 
     let mut candidates: Vec<(Device, String, DType, String)> = Vec::new();
-    candidates.push((device.clone(), device_label.clone(), dtype, dtype_label.clone()));
+    candidates.push((
+        device.clone(),
+        device_label.clone(),
+        dtype,
+        dtype_label.clone(),
+    ));
     if !matches!(device, Device::Cpu) && matches!(dtype, DType::F16) {
-        candidates.push((device.clone(), device_label.clone(), DType::F32, "F32".into()));
+        candidates.push((
+            device.clone(),
+            device_label.clone(),
+            DType::F32,
+            "F32".into(),
+        ));
     }
     if !matches!(device, Device::Cpu) {
         candidates.push((Device::Cpu, "CPU".into(), DType::F32, "F32".into()));
@@ -555,7 +565,8 @@ fn load_model(
                 };
                 match warmup_model(&mut loaded) {
                     Ok(()) => {
-                        if candidate_device_label != device_label || candidate_dtype_label != dtype_label
+                        if candidate_device_label != device_label
+                            || candidate_dtype_label != dtype_label
                         {
                             tracing::warn!(
                                 requested_device = %device_label,
@@ -590,9 +601,8 @@ fn load_model(
         }
     }
 
-    Err(last_error.unwrap_or_else(|| {
-        AppError::Configuration("failed to load local embedding model".into())
-    }))
+    Err(last_error
+        .unwrap_or_else(|| AppError::Configuration("failed to load local embedding model".into())))
 }
 
 fn warmup_model(loaded: &mut LoadedModel) -> Result<()> {
