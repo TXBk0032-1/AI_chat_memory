@@ -55,6 +55,7 @@ export type SemanticRuntimeStatus = {
   message?: string
   local_model_ready: boolean
   local_model_path?: string
+  reindex?: ReindexProgress | null
 }
 
 export type ModelDownloadProgress = {
@@ -64,6 +65,17 @@ export type ModelDownloadProgress = {
   file_count: number
   downloaded_bytes: number
   total_bytes?: number
+  fraction: number
+  message: string
+}
+
+export type ReindexProgress = {
+  stage: string
+  total_sessions: number
+  processed_sessions: number
+  total_chunks: number
+  ready_chunks: number
+  pending_chunks: number
   fraction: number
   message: string
 }

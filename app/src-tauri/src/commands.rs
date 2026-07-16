@@ -149,8 +149,17 @@ pub async fn check_embedding_backend(
 }
 
 #[tauri::command]
-pub async fn reindex_semantic_search(service: State<'_, AppService>) -> Result<usize, String> {
-    service.reindex_semantic().await.map_err(message)
+pub async fn reindex_semantic_search(
+    app: AppHandle,
+    service: State<'_, AppService>,
+) -> Result<usize, String> {
+    let emitter = app.clone();
+    service
+        .reindex_semantic_with_progress(Some(std::sync::Arc::new(move |progress| {
+            let _ = emitter.emit("semantic-reindex-progress", progress);
+        })))
+        .await
+        .map_err(message)
 }
 
 #[tauri::command]

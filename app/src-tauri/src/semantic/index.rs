@@ -22,6 +22,15 @@ pub async fn queue_session_chunks(
     session_id: &str,
     identity: &BackendIdentity,
 ) -> Result<usize> {
+    queue_session_chunks_with_force(pool, session_id, identity, false).await
+}
+
+pub async fn queue_session_chunks_with_force(
+    pool: &SqlitePool,
+    session_id: &str,
+    identity: &BackendIdentity,
+    force: bool,
+) -> Result<usize> {
     let session = sqlx::query("SELECT id, platform, title FROM sessions WHERE id = ?")
         .bind(session_id)
         .fetch_optional(pool)
@@ -78,7 +87,7 @@ pub async fn queue_session_chunks(
             let content_hash: String = row.try_get("content_hash")?;
             let status: String = row.try_get("status")?;
             let id: i64 = row.try_get("id")?;
-            if content_hash == chunk.content_hash && status == "ready" {
+            if !force && content_hash == chunk.content_hash && status == "ready" {
                 continue;
             }
             sqlx::query(
@@ -137,13 +146,30 @@ pub async fn queue_session_chunks(
     Ok(queued)
 }
 
+#[allow(dead_code)]
 pub async fn queue_all_sessions(pool: &SqlitePool, identity: &BackendIdentity) -> Result<usize> {
+    queue_all_sessions_with_progress(pool, identity, false, None::<fn(usize, usize, usize)>).await
+}
+
+pub async fn queue_all_sessions_with_progress<F>(
+    pool: &SqlitePool,
+    identity: &BackendIdentity,
+    force: bool,
+    mut on_progress: Option<F>,
+) -> Result<usize>
+where
+    F: FnMut(usize, usize, usize),
+{
     let ids: Vec<String> = sqlx::query_scalar("SELECT id FROM sessions")
         .fetch_all(pool)
         .await?;
+    let total_sessions = ids.len();
     let mut total = 0usize;
-    for id in ids {
-        total += queue_session_chunks(pool, &id, identity).await?;
+    for (index, id) in ids.into_iter().enumerate() {
+        total += queue_session_chunks_with_force(pool, &id, identity, force).await?;
+        if let Some(callback) = on_progress.as_mut() {
+            callback(index + 1, total_sessions, total);
+        }
     }
     Ok(total)
 }

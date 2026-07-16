@@ -8,8 +8,8 @@ use crate::{
     embedding::EmbeddingManager,
     error::Result,
     models::{
-        EmbeddingHealth, SearchMode, SearchQuery, SemanticRuntimeStatus, SemanticStatus,
-        SessionList, SessionSearchHit,
+        EmbeddingHealth, ReindexProgress, SearchMode, SearchQuery, SemanticRuntimeStatus,
+        SemanticStatus, SessionList, SessionSearchHit,
     },
 };
 
@@ -21,6 +21,7 @@ pub struct SemanticEngine {
     wake: Arc<Notify>,
     worker_running: Arc<Mutex<bool>>,
     last_error: Arc<RwLock<Option<String>>>,
+    reindex_progress: Arc<RwLock<Option<ReindexProgress>>>,
 }
 
 impl SemanticEngine {
@@ -32,6 +33,7 @@ impl SemanticEngine {
             wake: Arc::new(Notify::new()),
             worker_running: Arc::new(Mutex::new(false)),
             last_error: Arc::new(RwLock::new(None)),
+            reindex_progress: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -93,10 +95,162 @@ impl SemanticEngine {
     }
 
     pub async fn request_reindex_all(&self) -> Result<usize> {
+        self.request_reindex_all_with_progress(None).await
+    }
+
+    pub async fn request_reindex_all_with_progress(
+        &self,
+        on_progress: Option<std::sync::Arc<dyn Fn(ReindexProgress) + Send + Sync>>,
+    ) -> Result<usize> {
         let identity = self.embeddings.read().await.identity();
-        let queued = index::queue_all_sessions(&self.pool, &identity).await?;
+        let total_sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
+            .fetch_one(&self.pool)
+            .await
+            .unwrap_or(0);
+        let total_sessions = total_sessions.max(0) as usize;
+        self.publish_reindex_progress(
+            ReindexProgress {
+                stage: "queueing".into(),
+                total_sessions,
+                processed_sessions: 0,
+                total_chunks: 0,
+                ready_chunks: 0,
+                pending_chunks: 0,
+                fraction: 0.0,
+                message: if total_sessions == 0 {
+                    "没有可索引的会话".into()
+                } else {
+                    format!("正在准备重建索引（0/{total_sessions} 会话）")
+                },
+            },
+            on_progress.as_ref(),
+        )
+        .await;
+
+        let progress_state = Arc::clone(&self.reindex_progress);
+        let progress_cb = on_progress.clone();
+        let queued = index::queue_all_sessions_with_progress(
+            &self.pool,
+            &identity,
+            true,
+            Some(move |processed_sessions, total_sessions, queued| {
+                let fraction = if total_sessions == 0 {
+                    1.0
+                } else {
+                    // Queueing is only the first half of reindex work.
+                    (processed_sessions as f32 / total_sessions as f32) * 0.35
+                };
+                let snapshot = ReindexProgress {
+                    stage: "queueing".into(),
+                    total_sessions,
+                    processed_sessions,
+                    total_chunks: queued as i64,
+                    ready_chunks: 0,
+                    pending_chunks: queued as i64,
+                    fraction,
+                    message: format!(
+                        "正在排队重建索引（{processed_sessions}/{total_sessions} 会话，已标记 {queued} 个 chunk）"
+                    ),
+                };
+                if let Ok(mut guard) = progress_state.try_write() {
+                    *guard = Some(snapshot.clone());
+                }
+                if let Some(callback) = progress_cb.as_ref() {
+                    callback(snapshot);
+                }
+            }),
+        )
+        .await?;
+
+        let pending = index::count_chunks(&self.pool, &identity, "pending")
+            .await
+            .unwrap_or(queued as i64);
+        let ready = index::count_chunks(&self.pool, &identity, "ready")
+            .await
+            .unwrap_or(0);
+        let total = pending + ready;
+        let stage = if pending == 0 { "done" } else { "embedding" };
+        let fraction = if pending == 0 {
+            1.0
+        } else if total > 0 {
+            0.35 + (ready as f32 / total as f32) * 0.65
+        } else {
+            0.35
+        };
+        self.publish_reindex_progress(
+            ReindexProgress {
+                stage: stage.into(),
+                total_sessions,
+                processed_sessions: total_sessions,
+                total_chunks: total,
+                ready_chunks: ready,
+                pending_chunks: pending,
+                fraction,
+                message: if pending == 0 {
+                    "索引已是最新".into()
+                } else {
+                    format!("排队完成，开始向量化（就绪 {ready}/{total}）")
+                },
+            },
+            on_progress.as_ref(),
+        )
+        .await;
         self.wake.notify_one();
         Ok(queued)
+    }
+
+    async fn publish_reindex_progress(
+        &self,
+        progress: ReindexProgress,
+        on_progress: Option<&std::sync::Arc<dyn Fn(ReindexProgress) + Send + Sync>>,
+    ) {
+        *self.reindex_progress.write().await = Some(progress.clone());
+        if let Some(callback) = on_progress {
+            callback(progress);
+        }
+    }
+
+    async fn note_embedding_progress(&self) {
+        let previous = self.reindex_progress.read().await.clone();
+        let Some(previous) = previous else {
+            return;
+        };
+        // Only keep updating while a rebuild is in flight.
+        if previous.stage == "done" || previous.stage == "error" {
+            return;
+        }
+        let identity = self.embeddings.read().await.identity();
+        let pending = index::count_chunks(&self.pool, &identity, "pending")
+            .await
+            .unwrap_or(0);
+        let ready = index::count_chunks(&self.pool, &identity, "ready")
+            .await
+            .unwrap_or(0);
+        let total = pending + ready;
+        let fraction = if total == 0 {
+            1.0
+        } else {
+            0.35 + (ready as f32 / total as f32) * 0.65
+        };
+        let progress = ReindexProgress {
+            stage: if pending == 0 {
+                "done".into()
+            } else {
+                "embedding".into()
+            },
+            total_sessions: previous.total_sessions,
+            processed_sessions: previous.processed_sessions,
+            total_chunks: total,
+            ready_chunks: ready,
+            pending_chunks: pending,
+            fraction: fraction.clamp(0.0, 1.0),
+            message: if pending == 0 {
+                format!("重建索引完成（就绪 {ready}）")
+            } else {
+                format!("正在向量化（就绪 {ready}/{total}，剩余 {pending}）")
+            },
+        };
+        *self.reindex_progress.write().await = Some(progress);
     }
 
     pub async fn delete_session(&self, session_id: &str) -> Result<()> {
@@ -120,11 +274,12 @@ impl SemanticEngine {
             pending,
             &health,
         );
-        let message = self
-            .last_error
-            .read()
-            .await
-            .clone()
+        let reindex = self.reindex_progress.read().await.clone();
+        let last_error = self.last_error.read().await.clone();
+        let message = reindex
+            .as_ref()
+            .map(|item| item.message.clone())
+            .or(last_error)
             .or_else(|| (!health.ok).then_some(health.message.clone()));
         SemanticRuntimeStatus {
             enabled: manager.settings().enabled,
@@ -137,6 +292,7 @@ impl SemanticEngine {
             message,
             local_model_ready,
             local_model_path: Some(local_model_path.display().to_string()),
+            reindex,
         }
     }
 
@@ -413,6 +569,7 @@ impl SemanticEngine {
                     .await?;
                 }
             }
+            self.note_embedding_progress().await;
         }
         Ok(())
     }

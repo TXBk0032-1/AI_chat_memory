@@ -215,7 +215,7 @@ const conversationSearch = useConversationSearch(selected, committedQuery, searc
 const { hits: sessionSearchHits, index: searchHitIndex, loop: loopSearch } = conversationSearch
 const loadSearchHits = conversationSearch.load
 const {
-  showSettings, originText, secretCopied, semanticStatus: settingsSemanticStatus, semanticBusy, downloadProgress,
+  showSettings, originText, secretCopied, semanticStatus: settingsSemanticStatus, semanticBusy, downloadProgress, reindexProgress,
   openSettings, closeSettings, saveSettings, rotateSecret, copySecret, changeDataDirectory,
   checkEmbedding, reindexSemantic, downloadLocalModel, importLocalModel,
 } = useSettings(settings, error, {
@@ -937,6 +937,7 @@ onBeforeUnmount(() => {
       :semantic-status="settingsSemanticStatus"
       :semantic-busy="semanticBusy"
       :download-progress="downloadProgress"
+      :reindex-progress="reindexProgress"
       @close="closeSettings"
       @save="saveSettings"
       @preview-theme="previewTheme"

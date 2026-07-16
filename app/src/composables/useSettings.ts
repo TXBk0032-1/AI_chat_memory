@@ -5,6 +5,7 @@ import {
   desktopApi,
   type DesktopApi,
   type ModelDownloadProgress,
+  type ReindexProgress,
   type SemanticRuntimeStatus,
   type SettingsModel,
 } from '../desktop-api'
@@ -23,7 +24,10 @@ export function useSettings(
   const semanticStatus = ref<SemanticRuntimeStatus | null>(null)
   const semanticBusy = ref(false)
   const downloadProgress = ref<ModelDownloadProgress | null>(null)
+  const reindexProgress = ref<ReindexProgress | null>(null)
   let unlistenDownload: UnlistenFn | undefined
+  let unlistenReindex: UnlistenFn | undefined
+  let reindexPollTimer: number | undefined
 
   async function openSettings() {
     settings.value = await api.getSettings()
@@ -32,7 +36,10 @@ export function useSettings(
     secretCopied.value = false
     showSettings.value = true
     try {
-      semanticStatus.value = await api.getSemanticStatus()
+      await refreshSemanticStatus()
+      if (semanticStatus.value?.reindex && semanticStatus.value.reindex.stage !== 'done') {
+        startReindexPolling()
+      }
     } catch {
       semanticStatus.value = null
     }
@@ -77,9 +84,56 @@ export function useSettings(
     }
   }
 
+  function stopReindexPolling() {
+    if (reindexPollTimer !== undefined) {
+      window.clearInterval(reindexPollTimer)
+      reindexPollTimer = undefined
+    }
+  }
+
+  function startReindexPolling() {
+    stopReindexPolling()
+    reindexPollTimer = window.setInterval(() => {
+      void refreshSemanticStatus()
+    }, 1000)
+  }
+
   async function refreshSemanticStatus() {
     try {
-      semanticStatus.value = await api.getSemanticStatus()
+      const status = await api.getSemanticStatus()
+      semanticStatus.value = status
+      if (status.reindex) {
+        reindexProgress.value = status.reindex
+        if (status.reindex.stage === 'done' || status.reindex.stage === 'error') {
+          stopReindexPolling()
+          semanticBusy.value = false
+        }
+      } else if (status.pending_chunks > 0 && reindexProgress.value && reindexProgress.value.stage !== 'done') {
+        // Keep a live bar while the background worker continues embedding.
+        const total = status.ready_chunks + status.pending_chunks
+        reindexProgress.value = {
+          stage: 'embedding',
+          total_sessions: reindexProgress.value.total_sessions,
+          processed_sessions: reindexProgress.value.processed_sessions,
+          total_chunks: total,
+          ready_chunks: status.ready_chunks,
+          pending_chunks: status.pending_chunks,
+          fraction: total > 0 ? 0.35 + (status.ready_chunks / total) * 0.65 : reindexProgress.value.fraction,
+          message: status.message || `正在向量化（就绪 ${status.ready_chunks}/${total}，剩余 ${status.pending_chunks}）`,
+        }
+      } else if (status.pending_chunks === 0 && reindexProgress.value && reindexProgress.value.stage !== 'done') {
+        reindexProgress.value = {
+          ...reindexProgress.value,
+          stage: 'done',
+          ready_chunks: status.ready_chunks,
+          pending_chunks: 0,
+          total_chunks: status.ready_chunks,
+          fraction: 1,
+          message: status.message || `重建索引完成（就绪 ${status.ready_chunks}）`,
+        }
+        stopReindexPolling()
+        semanticBusy.value = false
+      }
     } catch {
       semanticStatus.value = null
     }
@@ -99,13 +153,61 @@ export function useSettings(
 
   async function reindexSemantic() {
     semanticBusy.value = true
+    reindexProgress.value = {
+      stage: 'starting',
+      total_sessions: 0,
+      processed_sessions: 0,
+      total_chunks: 0,
+      ready_chunks: 0,
+      pending_chunks: 0,
+      fraction: 0,
+      message: '正在启动重建索引…',
+    }
     try {
+      unlistenReindex?.()
+      unlistenReindex = await listen<ReindexProgress>('semantic-reindex-progress', (event) => {
+        reindexProgress.value = event.payload
+      })
+      startReindexPolling()
       await api.reindexSemanticSearch()
       await refreshSemanticStatus()
+      // Queueing finished; keep polling while embeddings continue in the worker.
+      if ((semanticStatus.value?.pending_chunks ?? 0) > 0) {
+        semanticBusy.value = true
+        startReindexPolling()
+      } else {
+        stopReindexPolling()
+        semanticBusy.value = false
+        if (reindexProgress.value?.stage !== 'done') {
+          reindexProgress.value = {
+            stage: 'done',
+            total_sessions: reindexProgress.value?.total_sessions ?? 0,
+            processed_sessions: reindexProgress.value?.processed_sessions ?? 0,
+            total_chunks: semanticStatus.value?.ready_chunks ?? 0,
+            ready_chunks: semanticStatus.value?.ready_chunks ?? 0,
+            pending_chunks: 0,
+            fraction: 1,
+            message: '重建索引完成',
+          }
+        }
+      }
     } catch (reason) {
       error.value = String(reason)
-    } finally {
+      reindexProgress.value = {
+        stage: 'error',
+        total_sessions: reindexProgress.value?.total_sessions ?? 0,
+        processed_sessions: reindexProgress.value?.processed_sessions ?? 0,
+        total_chunks: reindexProgress.value?.total_chunks ?? 0,
+        ready_chunks: reindexProgress.value?.ready_chunks ?? 0,
+        pending_chunks: reindexProgress.value?.pending_chunks ?? 0,
+        fraction: reindexProgress.value?.fraction ?? 0,
+        message: String(reason),
+      }
+      stopReindexPolling()
       semanticBusy.value = false
+    } finally {
+      unlistenReindex?.()
+      unlistenReindex = undefined
     }
   }
 
@@ -171,7 +273,7 @@ export function useSettings(
   }
 
   return {
-    showSettings, originText, secretCopied, semanticStatus, semanticBusy, downloadProgress,
+    showSettings, originText, secretCopied, semanticStatus, semanticBusy, downloadProgress, reindexProgress,
     openSettings, closeSettings, saveSettings, rotateSecret, copySecret, changeDataDirectory,
     checkEmbedding, reindexSemantic, downloadLocalModel, importLocalModel,
   }

@@ -363,6 +363,18 @@ impl Default for AppSettings {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct ReindexProgress {
+    pub stage: String,
+    pub total_sessions: usize,
+    pub processed_sessions: usize,
+    pub total_chunks: i64,
+    pub ready_chunks: i64,
+    pub pending_chunks: i64,
+    pub fraction: f32,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct SemanticRuntimeStatus {
     pub enabled: bool,
     pub status: SemanticStatus,
@@ -374,6 +386,8 @@ pub struct SemanticRuntimeStatus {
     pub message: Option<String>,
     pub local_model_ready: bool,
     pub local_model_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reindex: Option<ReindexProgress>,
 }
 
 #[derive(Debug, Clone, Serialize)]

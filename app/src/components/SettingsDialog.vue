@@ -3,6 +3,7 @@ import { Check, Clipboard, FolderOpen, Monitor, Moon, RefreshCw, ShieldCheck, Su
 import type {
   EmbeddingBackendKind,
   ModelDownloadProgress,
+  ReindexProgress,
   SearchMode,
   SemanticRuntimeStatus,
   SettingsModel,
@@ -15,6 +16,7 @@ defineProps<{
   semanticStatus?: SemanticRuntimeStatus | null
   semanticBusy?: boolean
   downloadProgress?: ModelDownloadProgress | null
+  reindexProgress?: ReindexProgress | null
 }>()
 const settings = defineModel<SettingsModel>('settings', { required: true })
 const originText = defineModel<string>('originText', { required: true })
@@ -128,7 +130,24 @@ function setMode(mode: SearchMode) {
               </p>
               <div class="setting-actions">
                 <button class="secondary-button compact" :disabled="semanticBusy" @click="emit('checkEmbedding')">测试后端</button>
-                <button class="secondary-button compact" :disabled="semanticBusy" @click="emit('reindexSemantic')"><RefreshCw :size="14" />重建索引</button>
+                <button class="secondary-button compact" :disabled="semanticBusy" @click="emit('reindexSemantic')">
+                  <RefreshCw :size="14" :class="{ spinning: semanticBusy && reindexProgress && reindexProgress.stage !== 'done' && reindexProgress.stage !== 'error' }" />
+                  {{ semanticBusy && reindexProgress && reindexProgress.stage !== 'done' && reindexProgress.stage !== 'error' ? '重建中…' : '重建索引' }}
+                </button>
+              </div>
+              <div v-if="reindexProgress" class="download-progress" :data-stage="reindexProgress.stage">
+                <div class="download-progress-meta">
+                  <span>{{ reindexProgress.message }}</span>
+                  <strong>{{ Math.round((reindexProgress.fraction || 0) * 100) }}%</strong>
+                </div>
+                <div class="download-progress-track" aria-hidden="true">
+                  <i :style="{ width: `${Math.max(2, Math.round((reindexProgress.fraction || 0) * 100))}%` }"></i>
+                </div>
+                <p class="path-value">
+                  会话 {{ reindexProgress.processed_sessions }}/{{ reindexProgress.total_sessions }}
+                  · 就绪 {{ reindexProgress.ready_chunks }}
+                  · 待处理 {{ reindexProgress.pending_chunks }}
+                </p>
               </div>
             </div>
           </section>

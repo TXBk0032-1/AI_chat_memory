@@ -253,8 +253,13 @@ impl AppService {
         self.semantic.healthcheck().await
     }
 
-    pub async fn reindex_semantic(&self) -> Result<usize> {
-        self.semantic.request_reindex_all().await
+    pub async fn reindex_semantic_with_progress(
+        &self,
+        on_progress: Option<std::sync::Arc<dyn Fn(crate::models::ReindexProgress) + Send + Sync>>,
+    ) -> Result<usize> {
+        self.semantic
+            .request_reindex_all_with_progress(on_progress)
+            .await
     }
 
     pub async fn download_local_model(
