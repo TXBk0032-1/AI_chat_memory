@@ -30,11 +30,11 @@ describe('search toolbar layout', () => {
     expect(resultCount).not.toMatch(/(?:^|;)\s*line-height:\s*36px\s*;/)
   })
 
-  it('lets the search stack shrink while consuming remaining toolbar space', () => {
+  it('keeps the search stack at content width while allowing it to shrink', () => {
     const searchStack = ruleFor('.search-stack')
 
     expect(searchStack).toMatch(/\bmin-width:\s*0\s*;/)
-    expect(searchStack).toMatch(/\bflex:\s*1\s+1\s+auto\s*;/)
+    expect(searchStack).toMatch(/\bflex:\s*0\s+1\s+auto\s*;/)
   })
 
   it('allows the search row to shrink', () => {
