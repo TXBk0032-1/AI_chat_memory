@@ -455,15 +455,23 @@ pub async fn semantic_session_scores(
         .bind(clamped_top_k)
         .fetch_all(pool)
         .await?;
-    Ok(rows
+    let mut distances = rows
         .into_iter()
         .filter_map(|row| {
             let session_id: String = row.try_get("session_id").ok()?;
             let distance: f64 = row.try_get("distance").ok()?;
-            let score = (1.0 - distance as f32).max(0.0);
-            Some((session_id, score))
+            Some((session_id, distance))
         })
+        .collect::<Vec<_>>();
+    sort_semantic_session_distances(&mut distances);
+    Ok(distances
+        .into_iter()
+        .map(|(session_id, distance)| (session_id, (1.0 - distance as f32).max(0.0)))
         .collect())
+}
+
+fn sort_semantic_session_distances(distances: &mut [(String, f64)]) {
+    distances.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
 }
 
 pub async fn semantic_session_hits(
@@ -654,6 +662,95 @@ mod tests {
             .unwrap();
     }
 
+    #[derive(Clone, Copy, Debug)]
+    enum SemanticFilterCase {
+        Platform,
+        Date,
+        Backend,
+        Model,
+        Status,
+    }
+
+    async fn assert_semantic_filter_precedes_knn(case: SemanticFilterCase) {
+        let pool = semantic_scores_pool().await;
+        let invalid_platform = if matches!(case, SemanticFilterCase::Platform) {
+            "claude"
+        } else {
+            "chatgpt"
+        };
+        let invalid_updated_at = if matches!(case, SemanticFilterCase::Date) {
+            "50"
+        } else {
+            "200"
+        };
+        sqlx::query("INSERT INTO sessions VALUES ('eligible', 'chatgpt', '200')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO sessions VALUES ('ineligible', ?, ?)")
+            .bind(invalid_platform)
+            .bind(invalid_updated_at)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let invalid_backend = if matches!(case, SemanticFilterCase::Backend) {
+            "remote"
+        } else {
+            "local"
+        };
+        let invalid_model = if matches!(case, SemanticFilterCase::Model) {
+            "other"
+        } else {
+            "test"
+        };
+        let invalid_status = if matches!(case, SemanticFilterCase::Status) {
+            "pending"
+        } else {
+            "ready"
+        };
+        for chunk_id in 1..=8 {
+            insert_semantic_score_chunk(
+                &pool,
+                chunk_id,
+                "ineligible",
+                invalid_backend,
+                invalid_model,
+                invalid_status,
+                [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            )
+            .await;
+        }
+        insert_semantic_score_chunk(
+            &pool,
+            9,
+            "eligible",
+            "local",
+            "test",
+            "ready",
+            [0.8, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        )
+        .await;
+
+        let scores = semantic_session_scores(
+            &pool,
+            &SearchQuery {
+                platform: Some("chatgpt".into()),
+                date_from: Some("100".into()),
+                date_to: Some("300".into()),
+                ..SearchQuery::default()
+            },
+            &semantic_scores_identity(),
+            &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            1,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(scores.len(), 1, "filter case: {case:?}");
+        assert_eq!(scores[0].0, "eligible", "filter case: {case:?}");
+    }
+
     #[test]
     fn rrf_prefers_overlap() {
         let keyword = vec![("a".into(), 1.0), ("b".into(), 0.5)];
@@ -711,69 +808,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn semantic_scores_filter_before_knn_candidate_limit() {
-        let pool = semantic_scores_pool().await;
-        sqlx::raw_sql(
-            "INSERT INTO sessions VALUES
-                ('eligible', 'chatgpt', '200'),
-                ('wrong-platform', 'claude', '200'),
-                ('too-old', 'chatgpt', '50'),
-                ('wrong-backend', 'chatgpt', '200'),
-                ('wrong-model', 'chatgpt', '200'),
-                ('pending', 'chatgpt', '200');",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        for (chunk_id, session_id, backend_id, model_id, status) in [
-            (1, "wrong-platform", "local", "test", "ready"),
-            (2, "too-old", "local", "test", "ready"),
-            (3, "wrong-backend", "remote", "test", "ready"),
-            (4, "wrong-model", "local", "other", "ready"),
-            (5, "pending", "local", "test", "pending"),
-            (6, "pending", "local", "test", "pending"),
-            (7, "wrong-platform", "local", "test", "ready"),
-            (8, "too-old", "local", "test", "ready"),
-        ] {
-            insert_semantic_score_chunk(
-                &pool,
-                chunk_id,
-                session_id,
-                backend_id,
-                model_id,
-                status,
-                [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            )
-            .await;
-        }
-        insert_semantic_score_chunk(
-            &pool,
-            9,
-            "eligible",
-            "local",
-            "test",
-            "ready",
-            [0.8, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        )
-        .await;
+    async fn semantic_scores_filter_platform_before_knn_candidate_limit() {
+        assert_semantic_filter_precedes_knn(SemanticFilterCase::Platform).await;
+    }
 
-        let scores = semantic_session_scores(
-            &pool,
-            &SearchQuery {
-                platform: Some("chatgpt".into()),
-                date_from: Some("100".into()),
-                date_to: Some("300".into()),
-                ..SearchQuery::default()
-            },
-            &semantic_scores_identity(),
-            &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            1,
-        )
-        .await
-        .unwrap();
+    #[tokio::test]
+    async fn semantic_scores_filter_date_before_knn_candidate_limit() {
+        assert_semantic_filter_precedes_knn(SemanticFilterCase::Date).await;
+    }
 
-        assert_eq!(scores.len(), 1);
-        assert_eq!(scores[0].0, "eligible");
+    #[tokio::test]
+    async fn semantic_scores_filter_backend_before_knn_candidate_limit() {
+        assert_semantic_filter_precedes_knn(SemanticFilterCase::Backend).await;
+    }
+
+    #[tokio::test]
+    async fn semantic_scores_filter_model_before_knn_candidate_limit() {
+        assert_semantic_filter_precedes_knn(SemanticFilterCase::Model).await;
+    }
+
+    #[tokio::test]
+    async fn semantic_scores_filter_status_before_knn_candidate_limit() {
+        assert_semantic_filter_precedes_knn(SemanticFilterCase::Status).await;
     }
 
     #[tokio::test]
@@ -860,6 +916,25 @@ mod tests {
         assert_eq!(
             scores.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
             ["a-session", "z-session"]
+        );
+    }
+
+    #[test]
+    fn semantic_scores_sort_distances_in_rust_with_session_id_tiebreaker() {
+        let mut distances = vec![
+            ("z-session".to_string(), 0.25),
+            ("a-session".to_string(), 0.25),
+            ("closer".to_string(), 0.1),
+        ];
+
+        sort_semantic_session_distances(&mut distances);
+
+        assert_eq!(
+            distances
+                .iter()
+                .map(|(session_id, _)| session_id.as_str())
+                .collect::<Vec<_>>(),
+            ["closer", "a-session", "z-session"]
         );
     }
 
