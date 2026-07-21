@@ -405,6 +405,11 @@ pub async fn semantic_session_scores(
     embedding: &[f32],
     top_k: i64,
 ) -> Result<Vec<(String, f32)>> {
+    if top_k <= 0 {
+        return Ok(Vec::new());
+    }
+    let clamped_top_k = top_k.clamp(1, 4096);
+    let candidate_k = (clamped_top_k * 8).min(4096);
     let mut vector = embedding.to_vec();
     let dim = identity.dimensions.max(1);
     if vector.len() < dim {
@@ -419,23 +424,26 @@ pub async fn semantic_session_scores(
              SELECT session_id, chunk_id, distance
              FROM embedding_vec
              WHERE embedding MATCH ? AND k = ?
+               AND chunk_id IN (
+                   SELECT c.id
+                   FROM embedding_chunks c
+                   INNER JOIN sessions s ON s.id = c.session_id
+                   WHERE c.backend_id = ? AND c.model_id = ? AND c.status = 'ready'
+                     AND (? IS NULL OR s.platform = ?)
+                     AND (? IS NULL OR ({timestamp}) >= CAST(? AS REAL))
+                     AND (? IS NULL OR ({timestamp}) <= CAST(? AS REAL))
+               )
              ORDER BY distance
          )
          SELECT nearest.session_id AS session_id, MIN(nearest.distance) AS distance
          FROM nearest
-         INNER JOIN embedding_chunks c ON c.id = nearest.chunk_id
-         INNER JOIN sessions s ON s.id = nearest.session_id
-         WHERE c.backend_id = ? AND c.model_id = ? AND c.status = 'ready'
-           AND (? IS NULL OR s.platform = ?)
-           AND (? IS NULL OR ({timestamp}) >= CAST(? AS REAL))
-           AND (? IS NULL OR ({timestamp}) <= CAST(? AS REAL))
          GROUP BY nearest.session_id
-         ORDER BY distance ASC
+         ORDER BY distance ASC, session_id ASC
          LIMIT ?"
     );
     let rows = sqlx::query(&sql)
         .bind(bytes)
-        .bind(top_k)
+        .bind(candidate_k)
         .bind(&identity.backend_id)
         .bind(&identity.model_id)
         .bind(&query.platform)
@@ -444,7 +452,7 @@ pub async fn semantic_session_scores(
         .bind(&query.date_from)
         .bind(&query.date_to)
         .bind(&query.date_to)
-        .bind(top_k)
+        .bind(clamped_top_k)
         .fetch_all(pool)
         .await?;
     Ok(rows
@@ -580,16 +588,7 @@ mod tests {
     use crate::{database::connection, models::EmbeddingBackendKind};
     use sqlx::sqlite::SqlitePoolOptions;
 
-    #[test]
-    fn rrf_prefers_overlap() {
-        let keyword = vec![("a".into(), 1.0), ("b".into(), 0.5)];
-        let semantic = vec![("b".into(), 1.0), ("c".into(), 0.5)];
-        let merged = reciprocal_rank_fusion(&keyword, &semantic, 60.0);
-        assert_eq!(merged[0].0, "b");
-    }
-
-    #[tokio::test]
-    async fn semantic_scores_aggregate_vec_knn_results_by_session() {
+    async fn semantic_scores_pool() -> SqlitePool {
         connection::register_sqlite_vec();
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
@@ -601,8 +600,8 @@ mod tests {
                 id TEXT PRIMARY KEY, platform TEXT NOT NULL, updated_at TEXT
             );
              CREATE TABLE embedding_chunks (
-                id INTEGER PRIMARY KEY, backend_id TEXT NOT NULL,
-                model_id TEXT NOT NULL, status TEXT NOT NULL
+                id INTEGER PRIMARY KEY, session_id TEXT NOT NULL,
+                backend_id TEXT NOT NULL, model_id TEXT NOT NULL, status TEXT NOT NULL
              );
              CREATE VIRTUAL TABLE embedding_vec USING vec0(
                 chunk_id INTEGER PRIMARY KEY,
@@ -613,12 +612,65 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+        pool
+    }
+
+    fn semantic_scores_identity() -> BackendIdentity {
+        BackendIdentity {
+            backend: EmbeddingBackendKind::Local,
+            backend_id: "local".into(),
+            model_id: "test".into(),
+            dimensions: 8,
+        }
+    }
+
+    async fn insert_semantic_score_chunk(
+        pool: &SqlitePool,
+        chunk_id: i64,
+        session_id: &str,
+        backend_id: &str,
+        model_id: &str,
+        status: &str,
+        embedding: [f32; 8],
+    ) {
+        sqlx::query(
+            "INSERT INTO embedding_chunks (id, session_id, backend_id, model_id, status)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(chunk_id)
+        .bind(session_id)
+        .bind(backend_id)
+        .bind(model_id)
+        .bind(status)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO embedding_vec(chunk_id, embedding, session_id) VALUES (?, ?, ?)")
+            .bind(chunk_id)
+            .bind(f32_slice_as_bytes(&embedding))
+            .bind(session_id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn rrf_prefers_overlap() {
+        let keyword = vec![("a".into(), 1.0), ("b".into(), 0.5)];
+        let semantic = vec![("b".into(), 1.0), ("c".into(), 0.5)];
+        let merged = reciprocal_rank_fusion(&keyword, &semantic, 60.0);
+        assert_eq!(merged[0].0, "b");
+    }
+
+    #[tokio::test]
+    async fn semantic_scores_aggregate_vec_knn_results_by_session() {
+        let pool = semantic_scores_pool().await;
         sqlx::raw_sql(
             "INSERT INTO sessions VALUES ('s1', 'chatgpt', '2026-01-01'), ('s2', 'claude', '2026-01-02');
              INSERT INTO embedding_chunks VALUES
-                (1, 'local', 'test', 'ready'),
-                (2, 'local', 'test', 'ready'),
-                (3, 'local', 'test', 'ready');",
+                (1, 's1', 'local', 'test', 'ready'),
+                (2, 's1', 'local', 'test', 'ready'),
+                (3, 's2', 'local', 'test', 'ready');",
         )
         .execute(&pool)
         .await
@@ -646,12 +698,7 @@ mod tests {
         let scores = semantic_session_scores(
             &pool,
             &SearchQuery::default(),
-            &BackendIdentity {
-                backend: EmbeddingBackendKind::Local,
-                backend_id: "local".into(),
-                model_id: "test".into(),
-                dimensions: 8,
-            },
+            &semantic_scores_identity(),
             &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             3,
         )
@@ -661,5 +708,176 @@ mod tests {
         assert_eq!(scores.len(), 2);
         assert_eq!(scores[0].0, "s1");
         assert!(scores[0].1 > scores[1].1);
+    }
+
+    #[tokio::test]
+    async fn semantic_scores_filter_before_knn_candidate_limit() {
+        let pool = semantic_scores_pool().await;
+        sqlx::raw_sql(
+            "INSERT INTO sessions VALUES
+                ('eligible', 'chatgpt', '200'),
+                ('wrong-platform', 'claude', '200'),
+                ('too-old', 'chatgpt', '50'),
+                ('wrong-backend', 'chatgpt', '200'),
+                ('wrong-model', 'chatgpt', '200'),
+                ('pending', 'chatgpt', '200');",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for (chunk_id, session_id, backend_id, model_id, status) in [
+            (1, "wrong-platform", "local", "test", "ready"),
+            (2, "too-old", "local", "test", "ready"),
+            (3, "wrong-backend", "remote", "test", "ready"),
+            (4, "wrong-model", "local", "other", "ready"),
+            (5, "pending", "local", "test", "pending"),
+            (6, "pending", "local", "test", "pending"),
+            (7, "wrong-platform", "local", "test", "ready"),
+            (8, "too-old", "local", "test", "ready"),
+        ] {
+            insert_semantic_score_chunk(
+                &pool,
+                chunk_id,
+                session_id,
+                backend_id,
+                model_id,
+                status,
+                [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            )
+            .await;
+        }
+        insert_semantic_score_chunk(
+            &pool,
+            9,
+            "eligible",
+            "local",
+            "test",
+            "ready",
+            [0.8, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        )
+        .await;
+
+        let scores = semantic_session_scores(
+            &pool,
+            &SearchQuery {
+                platform: Some("chatgpt".into()),
+                date_from: Some("100".into()),
+                date_to: Some("300".into()),
+                ..SearchQuery::default()
+            },
+            &semantic_scores_identity(),
+            &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            1,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(scores.len(), 1);
+        assert_eq!(scores[0].0, "eligible");
+    }
+
+    #[tokio::test]
+    async fn semantic_scores_expand_chunk_candidates_before_session_limit() {
+        let pool = semantic_scores_pool().await;
+        sqlx::raw_sql(
+            "INSERT INTO sessions VALUES
+                ('dominant', 'chatgpt', '200'),
+                ('also-relevant', 'chatgpt', '200');",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for (chunk_id, embedding) in [
+            (1, [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            (2, [0.99, 0.01, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        ] {
+            insert_semantic_score_chunk(
+                &pool, chunk_id, "dominant", "local", "test", "ready", embedding,
+            )
+            .await;
+        }
+        insert_semantic_score_chunk(
+            &pool,
+            3,
+            "also-relevant",
+            "local",
+            "test",
+            "ready",
+            [0.8, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        )
+        .await;
+
+        let scores = semantic_session_scores(
+            &pool,
+            &SearchQuery::default(),
+            &semantic_scores_identity(),
+            &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            2,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            scores.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+            ["dominant", "also-relevant"]
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_scores_sort_equal_distances_by_session_id() {
+        let pool = semantic_scores_pool().await;
+        sqlx::raw_sql(
+            "INSERT INTO sessions VALUES
+                ('z-session', 'chatgpt', '200'),
+                ('a-session', 'chatgpt', '200');",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for (chunk_id, session_id) in [(1, "z-session"), (2, "a-session")] {
+            insert_semantic_score_chunk(
+                &pool,
+                chunk_id,
+                session_id,
+                "local",
+                "test",
+                "ready",
+                [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            )
+            .await;
+        }
+
+        let scores = semantic_session_scores(
+            &pool,
+            &SearchQuery::default(),
+            &semantic_scores_identity(),
+            &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            2,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            scores.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+            ["a-session", "z-session"]
+        );
+    }
+
+    #[tokio::test]
+    async fn semantic_scores_return_empty_for_non_positive_top_k() {
+        let pool = semantic_scores_pool().await;
+
+        for top_k in [0, -1] {
+            let scores = semantic_session_scores(
+                &pool,
+                &SearchQuery::default(),
+                &semantic_scores_identity(),
+                &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                top_k,
+            )
+            .await
+            .unwrap();
+            assert!(scores.is_empty());
+        }
     }
 }
