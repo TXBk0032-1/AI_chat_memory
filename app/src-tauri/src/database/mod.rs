@@ -9,7 +9,7 @@ pub use connection::{connect, copy_database};
 pub use details::{get_session_branches, get_session_messages, open_session, search_session_hits};
 pub use imports::import_sessions;
 pub use maintenance::{delete_session, sync_status};
-pub use sessions::{count, search};
+pub use sessions::{search, search_and_count};
 
 #[cfg(test)]
 use crate::models::{SearchHitField, SearchQuery};
@@ -126,7 +126,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("CREATE TABLE sessions (id TEXT PRIMARY KEY, platform TEXT NOT NULL, platform_session_id TEXT NOT NULL, title TEXT, created_at TEXT, updated_at TEXT, imported_at TEXT, raw_data TEXT, UNIQUE(platform, platform_session_id)); CREATE TABLE messages (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, role TEXT NOT NULL, content TEXT, metadata TEXT, created_at TEXT, seq INTEGER);").execute(&pool).await.unwrap();
+        sqlx::query("CREATE TABLE sessions (id TEXT PRIMARY KEY, platform TEXT NOT NULL, platform_session_id TEXT NOT NULL, title TEXT, created_at TEXT, updated_at TEXT, imported_at TEXT, raw_data TEXT, UNIQUE(platform, platform_session_id)); CREATE TABLE messages (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, role TEXT NOT NULL, content TEXT, metadata TEXT, created_at TEXT, seq INTEGER); CREATE TABLE session_fts_ids (fts_rowid INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL UNIQUE REFERENCES sessions(id) ON DELETE CASCADE); CREATE VIRTUAL TABLE session_fts USING fts5(session_id UNINDEXED, title, content, tokenize = 'trigram');").execute(&pool).await.unwrap();
         let first = normalize_session(
             "custom",
             &json!({"id":"a","title":"one","messages":[{"role":"user","content":"old"}]}),
@@ -151,8 +151,20 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
+        let old_hits: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM session_fts WHERE session_fts MATCH 'old'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let new_hits: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM session_fts WHERE session_fts MATCH 'new'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         assert_eq!(original, current);
         assert_eq!(content, "new");
+        assert_eq!(old_hits, 0);
+        assert_eq!(new_hits, 1);
     }
 
     #[tokio::test]
@@ -166,7 +178,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("CREATE TABLE sessions (id TEXT PRIMARY KEY, platform TEXT NOT NULL, platform_session_id TEXT NOT NULL, title TEXT, created_at TEXT, updated_at TEXT, imported_at TEXT, raw_data TEXT, UNIQUE(platform, platform_session_id)); CREATE TABLE messages (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, role TEXT NOT NULL, content TEXT, metadata TEXT, created_at TEXT, seq INTEGER);").execute(&pool).await.unwrap();
+        sqlx::query("CREATE TABLE sessions (id TEXT PRIMARY KEY, platform TEXT NOT NULL, platform_session_id TEXT NOT NULL, title TEXT, created_at TEXT, updated_at TEXT, imported_at TEXT, raw_data TEXT, UNIQUE(platform, platform_session_id)); CREATE TABLE messages (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, role TEXT NOT NULL, content TEXT, metadata TEXT, created_at TEXT, seq INTEGER); CREATE TABLE session_fts_ids (fts_rowid INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL UNIQUE REFERENCES sessions(id) ON DELETE CASCADE); CREATE VIRTUAL TABLE session_fts USING fts5(session_id UNINDEXED, title, content, tokenize = 'trigram');").execute(&pool).await.unwrap();
         let session = normalize_session(
             "custom",
             &json!({"id":"safe","title":"safe","messages":[{"role":"user","content":"hello"}]}),
@@ -187,12 +199,26 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
+        let indexed_before_delete: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM session_fts WHERE session_id = ?")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(indexed_before_delete, 1);
         delete_session(&pool, &id).await.unwrap();
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages")
             .fetch_one(&pool)
             .await
             .unwrap();
         assert_eq!(count, 0);
+        let indexed_after_delete: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM session_fts WHERE session_id = ?")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(indexed_after_delete, 0);
     }
 
     #[tokio::test]

@@ -72,6 +72,7 @@ async fn initialize_schema(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await?;
+    initialize_session_fts(pool).await?;
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS embedding_chunks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -112,6 +113,77 @@ async fn initialize_schema(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
     ensure_embedding_vec_table(pool, None).await?;
+    Ok(())
+}
+
+async fn initialize_session_fts(pool: &SqlitePool) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    let fts_existed: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_fts'
+        )",
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    let ids_existed: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'session_fts_ids'
+        )",
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    let rebuild = !fts_existed || !ids_existed;
+    if rebuild && fts_existed {
+        sqlx::query("DROP TABLE session_fts")
+            .execute(&mut *tx)
+            .await?;
+    }
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS session_fts_ids (
+            fts_rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id TEXT NOT NULL UNIQUE REFERENCES sessions(id) ON DELETE CASCADE
+        );",
+    )
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS session_fts USING fts5(
+            session_id UNINDEXED,
+            title,
+            content,
+            tokenize = 'trigram'
+        );",
+    )
+    .execute(&mut *tx)
+    .await?;
+    if rebuild {
+        sqlx::query("DELETE FROM session_fts_ids")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "INSERT OR IGNORE INTO session_fts_ids(session_id)
+             SELECT id FROM sessions;",
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO session_fts(rowid, session_id, title, content)
+             SELECT ids.fts_rowid, s.id, COALESCE(s.title, ''), COALESCE((
+                 SELECT group_concat(ordered.content, char(10))
+             FROM (
+                 SELECT m.content AS content
+                 FROM messages m
+                 WHERE m.session_id = s.id
+                 ORDER BY m.seq
+             ) ordered
+             ), '')
+             FROM sessions s
+             INNER JOIN session_fts_ids ids ON ids.session_id = s.id;",
+        )
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
     Ok(())
 }
 
@@ -321,6 +393,93 @@ mod tests {
             .await
             .unwrap();
         assert!(version.starts_with('v'), "{version}");
+    }
+
+    #[tokio::test]
+    async fn initializes_and_backfills_session_fts_for_existing_data() {
+        register_sqlite_vec();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE sessions (id TEXT PRIMARY KEY, platform TEXT NOT NULL, platform_session_id TEXT NOT NULL, title TEXT, created_at TEXT, updated_at TEXT, imported_at TEXT, raw_data TEXT, UNIQUE(platform, platform_session_id)); CREATE TABLE messages (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, role TEXT NOT NULL, content TEXT, metadata TEXT, created_at TEXT, seq INTEGER);")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO sessions (id, platform, platform_session_id, title) VALUES ('s1', 'test', 'source-1', '数据库设计')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO messages (id, session_id, role, content, metadata, seq) VALUES ('m1', 's1', 'user', '使用全文检索提升速度', '{}', 0)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        initialize_schema(&pool).await.unwrap();
+
+        let title_id: String = sqlx::query_scalar(
+            "SELECT session_id FROM session_fts WHERE session_fts MATCH '库设计'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let content_id: String = sqlx::query_scalar(
+            "SELECT session_id FROM session_fts WHERE session_fts MATCH '文检索'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let mapped_rowid: i64 =
+            sqlx::query_scalar("SELECT fts_rowid FROM session_fts_ids WHERE session_id = 's1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let fts_rowid: i64 =
+            sqlx::query_scalar("SELECT rowid FROM session_fts WHERE session_id = 's1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(title_id, "s1");
+        assert_eq!(content_id, "s1");
+        assert_eq!(fts_rowid, mapped_rowid);
+    }
+
+    #[tokio::test]
+    async fn rebuilds_session_fts_when_rowid_mapping_is_missing() {
+        register_sqlite_vec();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE sessions (id TEXT PRIMARY KEY, platform TEXT NOT NULL, platform_session_id TEXT NOT NULL, title TEXT, created_at TEXT, updated_at TEXT, imported_at TEXT, raw_data TEXT, UNIQUE(platform, platform_session_id)); CREATE TABLE messages (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, role TEXT NOT NULL, content TEXT, metadata TEXT, created_at TEXT, seq INTEGER); CREATE VIRTUAL TABLE session_fts USING fts5(session_id UNINDEXED, title, content, tokenize = 'trigram');")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO sessions (id, platform, platform_session_id, title) VALUES ('s1', 'test', 'source-1', '旧版索引'); INSERT INTO session_fts(rowid, session_id, title, content) VALUES (7, 's1', '旧版索引', '需要重建映射');")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        initialize_schema(&pool).await.unwrap();
+
+        let mapped_rowid: i64 =
+            sqlx::query_scalar("SELECT fts_rowid FROM session_fts_ids WHERE session_id = 's1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let fts_rowid: i64 =
+            sqlx::query_scalar("SELECT rowid FROM session_fts WHERE session_id = 's1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let fts_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM session_fts")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(mapped_rowid, fts_rowid);
+        assert_eq!(fts_count, 1);
     }
 }
 

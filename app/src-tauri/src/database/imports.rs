@@ -25,6 +25,37 @@ pub async fn import_sessions(pool: &SqlitePool, sessions: &[NormalizedSession]) 
                 .bind(format!("{id}_{seq}")).bind(&id).bind(&message.role).bind(&message.content)
                 .bind(serde_json::to_string(&message.metadata)?).bind(&message.created_at).bind(seq as i64).execute(&mut *tx).await?;
         }
+        sqlx::query(
+            "INSERT INTO session_fts_ids(session_id) VALUES (?)
+             ON CONFLICT(session_id) DO NOTHING",
+        )
+        .bind(&id)
+        .execute(&mut *tx)
+        .await?;
+        let fts_rowid: i64 =
+            sqlx::query_scalar("SELECT fts_rowid FROM session_fts_ids WHERE session_id = ?")
+                .bind(&id)
+                .fetch_one(&mut *tx)
+                .await?;
+        sqlx::query("DELETE FROM session_fts WHERE rowid = ?")
+            .bind(fts_rowid)
+            .execute(&mut *tx)
+            .await?;
+        let content = session
+            .messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        sqlx::query(
+            "INSERT INTO session_fts(rowid, session_id, title, content) VALUES (?, ?, ?, ?)",
+        )
+        .bind(fts_rowid)
+        .bind(&id)
+        .bind(&session.title)
+        .bind(content)
+        .execute(&mut *tx)
+        .await?;
     }
     tx.commit().await?;
     Ok(sessions.len())

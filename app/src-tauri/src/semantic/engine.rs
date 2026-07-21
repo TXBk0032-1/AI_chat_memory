@@ -456,9 +456,9 @@ impl SemanticEngine {
 
         let (sessions, total) = match effective_mode {
             SearchMode::Keyword => {
-                let total = crate::database::count(&self.pool, &query).await? as usize;
-                let sessions = crate::database::search(&self.pool, &query).await?;
-                (sessions, total)
+                let (sessions, total) =
+                    crate::database::search_and_count(&self.pool, &query).await?;
+                (sessions, total as usize)
             }
             SearchMode::Semantic => {
                 let ranked = self.semantic_rank(&query, 500).await?;
