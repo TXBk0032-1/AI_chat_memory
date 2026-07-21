@@ -415,25 +415,29 @@ pub async fn semantic_session_scores(
     let bytes = f32_slice_as_bytes(&vector);
     let timestamp = timestamp::expression("s.updated_at");
     let sql = format!(
-        "SELECT v.session_id AS session_id, MIN(v.distance) AS distance
-         FROM embedding_vec v
-         INNER JOIN embedding_chunks c ON c.id = v.chunk_id
-         INNER JOIN sessions s ON s.id = v.session_id
+        "WITH nearest AS MATERIALIZED (
+             SELECT session_id, chunk_id, distance
+             FROM embedding_vec
+             WHERE embedding MATCH ? AND k = ?
+             ORDER BY distance
+         )
+         SELECT nearest.session_id AS session_id, MIN(nearest.distance) AS distance
+         FROM nearest
+         INNER JOIN embedding_chunks c ON c.id = nearest.chunk_id
+         INNER JOIN sessions s ON s.id = nearest.session_id
          WHERE c.backend_id = ? AND c.model_id = ? AND c.status = 'ready'
-           AND v.embedding MATCH ?
-           AND k = ?
            AND (? IS NULL OR s.platform = ?)
            AND (? IS NULL OR ({timestamp}) >= CAST(? AS REAL))
            AND (? IS NULL OR ({timestamp}) <= CAST(? AS REAL))
-         GROUP BY v.session_id
+         GROUP BY nearest.session_id
          ORDER BY distance ASC
          LIMIT ?"
     );
     let rows = sqlx::query(&sql)
-        .bind(&identity.backend_id)
-        .bind(&identity.model_id)
         .bind(bytes)
         .bind(top_k)
+        .bind(&identity.backend_id)
+        .bind(&identity.model_id)
         .bind(&query.platform)
         .bind(&query.platform)
         .bind(&query.date_from)
@@ -573,6 +577,8 @@ fn truncate_snippet(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{database::connection, models::EmbeddingBackendKind};
+    use sqlx::sqlite::SqlitePoolOptions;
 
     #[test]
     fn rrf_prefers_overlap() {
@@ -580,5 +586,80 @@ mod tests {
         let semantic = vec![("b".into(), 1.0), ("c".into(), 0.5)];
         let merged = reciprocal_rank_fusion(&keyword, &semantic, 60.0);
         assert_eq!(merged[0].0, "b");
+    }
+
+    #[tokio::test]
+    async fn semantic_scores_aggregate_vec_knn_results_by_session() {
+        connection::register_sqlite_vec();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE sessions (
+                id TEXT PRIMARY KEY, platform TEXT NOT NULL, updated_at TEXT
+            );
+             CREATE TABLE embedding_chunks (
+                id INTEGER PRIMARY KEY, backend_id TEXT NOT NULL,
+                model_id TEXT NOT NULL, status TEXT NOT NULL
+             );
+             CREATE VIRTUAL TABLE embedding_vec USING vec0(
+                chunk_id INTEGER PRIMARY KEY,
+                embedding float[8] distance_metric=cosine,
+                +session_id TEXT
+             );",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::raw_sql(
+            "INSERT INTO sessions VALUES ('s1', 'chatgpt', '2026-01-01'), ('s2', 'claude', '2026-01-02');
+             INSERT INTO embedding_chunks VALUES
+                (1, 'local', 'test', 'ready'),
+                (2, 'local', 'test', 'ready'),
+                (3, 'local', 'test', 'ready');",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for (chunk_id, session_id, embedding) in [
+            (
+                1_i64,
+                "s1",
+                vec![1.0_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            ),
+            (2, "s1", vec![0.8_f32, 0.2, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            (3, "s2", vec![0.0_f32, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+        ] {
+            sqlx::query(
+                "INSERT INTO embedding_vec(chunk_id, embedding, session_id) VALUES (?, ?, ?)",
+            )
+            .bind(chunk_id)
+            .bind(f32_slice_as_bytes(&embedding))
+            .bind(session_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let scores = semantic_session_scores(
+            &pool,
+            &SearchQuery::default(),
+            &BackendIdentity {
+                backend: EmbeddingBackendKind::Local,
+                backend_id: "local".into(),
+                model_id: "test".into(),
+                dimensions: 8,
+            },
+            &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            3,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(scores.len(), 2);
+        assert_eq!(scores[0].0, "s1");
+        assert!(scores[0].1 > scores[1].1);
     }
 }
