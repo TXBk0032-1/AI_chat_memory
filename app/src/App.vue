@@ -443,6 +443,7 @@ async function exportSelectedConversation() {
 }
 
 async function selectSession(id: string) {
+  if (!detail.shouldOpen(id)) return
   persistReadingPosition()
   cancelExportSelection()
   error.value = ''

@@ -41,6 +41,65 @@ describe('useSessionDetail', () => {
     expect(detail.selected.value?.id).toBe('second')
   })
 
+  it('does not reopen the selected or currently opening session', async () => {
+    let resolveOpen!: (value: SessionOpen) => void
+    const api = {
+      openSession: vi.fn(() => new Promise<SessionOpen>((resolve) => { resolveOpen = resolve })),
+    } as unknown as DesktopApi
+    const detail = useSessionDetail(api)
+
+    const first = detail.open('session')
+    expect(detail.shouldOpen('session')).toBe(false)
+    expect(detail.shouldOpen('other')).toBe(true)
+    expect(await detail.open('session')).toBeNull()
+    expect(api.openSession).toHaveBeenCalledTimes(1)
+
+    resolveOpen(opened('session'))
+    await first
+    expect(detail.shouldOpen('session')).toBe(false)
+    expect(detail.shouldOpen('other')).toBe(true)
+  })
+
+  it('allows restoring the selected session after another session fails to open', async () => {
+    let rejectOpen!: (reason: unknown) => void
+    const api = {
+      openSession: vi.fn((id: string) => id === 'second'
+        ? new Promise<SessionOpen>((_resolve, reject) => { rejectOpen = reject })
+        : Promise.resolve(opened(id))),
+    } as unknown as DesktopApi
+    const detail = useSessionDetail(api)
+
+    await detail.open('first')
+    const second = detail.open('second')
+    expect(detail.shouldOpen('second')).toBe(false)
+    expect(detail.shouldOpen('first')).toBe(true)
+
+    rejectOpen(new Error('open failed'))
+    await second
+    expect(detail.selected.value?.id).toBe('first')
+    expect(detail.shouldOpen('first')).toBe(true)
+  })
+
+  it('does not reopen the selected session after a background batch fails', async () => {
+    vi.useFakeTimers()
+    try {
+      const api = {
+        openSession: vi.fn().mockResolvedValue(opened('session', [message(0)])),
+        getSessionMessages: vi.fn().mockRejectedValue(new Error('batch failed')),
+      } as unknown as DesktopApi
+      const detail = useSessionDetail(api)
+
+      const result = await detail.open('session')
+      detail.scheduleBackgroundLoad(result!.generation)
+      await vi.runOnlyPendingTimersAsync()
+
+      expect(detail.backgroundLoadFailed.value).toBe(true)
+      expect(detail.shouldOpen('session')).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('merges a requested batch and deduplicates concurrent requests', async () => {
     const api = {
       openSession: vi.fn().mockResolvedValue(opened('session', [message(0)])),

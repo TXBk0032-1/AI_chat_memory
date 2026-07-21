@@ -16,6 +16,8 @@ export function useSessionDetail(api: DesktopApi = desktopApi) {
   const loading = ref(false)
   const backgroundLoadFailed = ref(false)
   const error = ref('')
+  const openingId = ref<string | null>(null)
+  const openFailed = ref(false)
   const pendingBatches = new Map<string, Promise<boolean>>()
   let generation = 0
   let backgroundTimer: ReturnType<typeof setTimeout> | undefined
@@ -32,6 +34,8 @@ export function useSessionDetail(api: DesktopApi = desktopApi) {
 
   function clear() {
     cancelPendingWork()
+    openingId.value = null
+    openFailed.value = false
     selected.value = null
     messageSlots.value = []
     loading.value = false
@@ -39,10 +43,19 @@ export function useSessionDetail(api: DesktopApi = desktopApi) {
     error.value = ''
   }
 
+  function shouldOpen(id: string) {
+    if (openingId.value === id) return false
+    if (openingId.value !== null) return true
+    return selected.value?.id !== id || openFailed.value
+  }
+
   async function open(id: string): Promise<{ readingPosition: ReadingPosition | null; generation: number } | null> {
+    if (!shouldOpen(id)) return null
     cancelPendingWork()
     const requestGeneration = generation
     const readingPosition = loadReadingPosition(id)
+    openingId.value = id
+    openFailed.value = false
     loading.value = true
     backgroundLoadFailed.value = false
     error.value = ''
@@ -53,10 +66,16 @@ export function useSessionDetail(api: DesktopApi = desktopApi) {
       messageSlots.value = mergeMessageBatch(Array.from({ length: opened.message_count }), opened.messages)
       return { readingPosition, generation: requestGeneration }
     } catch (reason) {
-      if (requestGeneration === generation) error.value = String(reason)
+      if (requestGeneration === generation) {
+        openFailed.value = true
+        error.value = String(reason)
+      }
       return null
     } finally {
-      if (requestGeneration === generation) loading.value = false
+      if (requestGeneration === generation) {
+        openingId.value = null
+        loading.value = false
+      }
     }
   }
 
@@ -132,6 +151,7 @@ export function useSessionDetail(api: DesktopApi = desktopApi) {
     error,
     loadedMessageCount,
     open,
+    shouldOpen,
     clear,
     scheduleBackgroundLoad,
     retryBackgroundLoad,
