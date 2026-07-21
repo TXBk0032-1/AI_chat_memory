@@ -438,8 +438,7 @@ pub async fn semantic_session_scores(
          SELECT nearest.session_id AS session_id, MIN(nearest.distance) AS distance
          FROM nearest
          GROUP BY nearest.session_id
-         ORDER BY distance ASC, session_id ASC
-         LIMIT ?"
+         ORDER BY distance ASC, session_id ASC"
     );
     let rows = sqlx::query(&sql)
         .bind(bytes)
@@ -452,7 +451,6 @@ pub async fn semantic_session_scores(
         .bind(&query.date_from)
         .bind(&query.date_to)
         .bind(&query.date_to)
-        .bind(clamped_top_k)
         .fetch_all(pool)
         .await?;
     let mut distances = rows
@@ -463,15 +461,16 @@ pub async fn semantic_session_scores(
             Some((session_id, distance))
         })
         .collect::<Vec<_>>();
-    sort_semantic_session_distances(&mut distances);
+    sort_and_truncate_semantic_session_distances(&mut distances, clamped_top_k as usize);
     Ok(distances
         .into_iter()
         .map(|(session_id, distance)| (session_id, (1.0 - distance as f32).max(0.0)))
         .collect())
 }
 
-fn sort_semantic_session_distances(distances: &mut [(String, f64)]) {
+fn sort_and_truncate_semantic_session_distances(distances: &mut Vec<(String, f64)>, limit: usize) {
     distances.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    distances.truncate(limit);
 }
 
 pub async fn semantic_session_hits(
@@ -665,7 +664,8 @@ mod tests {
     #[derive(Clone, Copy, Debug)]
     enum SemanticFilterCase {
         Platform,
-        Date,
+        DateFrom,
+        DateTo,
         Backend,
         Model,
         Status,
@@ -678,10 +678,10 @@ mod tests {
         } else {
             "chatgpt"
         };
-        let invalid_updated_at = if matches!(case, SemanticFilterCase::Date) {
-            "50"
-        } else {
-            "200"
+        let invalid_updated_at = match case {
+            SemanticFilterCase::DateFrom => "50",
+            SemanticFilterCase::DateTo => "350",
+            _ => "200",
         };
         sqlx::query("INSERT INTO sessions VALUES ('eligible', 'chatgpt', '200')")
             .execute(&pool)
@@ -813,8 +813,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn semantic_scores_filter_date_before_knn_candidate_limit() {
-        assert_semantic_filter_precedes_knn(SemanticFilterCase::Date).await;
+    async fn semantic_scores_filter_date_from_before_knn_candidate_limit() {
+        assert_semantic_filter_precedes_knn(SemanticFilterCase::DateFrom).await;
+    }
+
+    #[tokio::test]
+    async fn semantic_scores_filter_date_to_before_knn_candidate_limit() {
+        assert_semantic_filter_precedes_knn(SemanticFilterCase::DateTo).await;
     }
 
     #[tokio::test]
@@ -885,12 +890,13 @@ mod tests {
         sqlx::raw_sql(
             "INSERT INTO sessions VALUES
                 ('z-session', 'chatgpt', '200'),
+                ('m-session', 'chatgpt', '200'),
                 ('a-session', 'chatgpt', '200');",
         )
         .execute(&pool)
         .await
         .unwrap();
-        for (chunk_id, session_id) in [(1, "z-session"), (2, "a-session")] {
+        for (chunk_id, session_id) in [(1, "z-session"), (2, "m-session"), (3, "a-session")] {
             insert_semantic_score_chunk(
                 &pool,
                 chunk_id,
@@ -915,7 +921,7 @@ mod tests {
 
         assert_eq!(
             scores.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
-            ["a-session", "z-session"]
+            ["a-session", "m-session"]
         );
     }
 
@@ -923,18 +929,18 @@ mod tests {
     fn semantic_scores_sort_distances_in_rust_with_session_id_tiebreaker() {
         let mut distances = vec![
             ("z-session".to_string(), 0.25),
+            ("m-session".to_string(), 0.25),
             ("a-session".to_string(), 0.25),
-            ("closer".to_string(), 0.1),
         ];
 
-        sort_semantic_session_distances(&mut distances);
+        sort_and_truncate_semantic_session_distances(&mut distances, 2);
 
         assert_eq!(
             distances
                 .iter()
                 .map(|(session_id, _)| session_id.as_str())
                 .collect::<Vec<_>>(),
-            ["closer", "a-session", "z-session"]
+            ["a-session", "m-session"]
         );
     }
 
