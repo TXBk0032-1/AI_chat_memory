@@ -30,4 +30,45 @@ describe('markdown rendering', () => {
     expect(html).toContain('class="mermaid-diagram"')
     expect(html).toContain('data-mermaid-source=')
   })
+
+  it('escapes HTML special characters in search highlights', () => {
+    const html = renderMarkdown('test content with <tags>', message, new Map(), 'content')
+    // 确保 <tags> 被转义不会被当作真实 HTML 标签
+    expect(html).toContain('&lt;tags&gt;')
+    expect(html).not.toContain('<tags>')
+    // 确保搜索词被高亮
+    expect(html).toContain('<mark class="search-hit">content</mark>')
+  })
+
+  it('validates reference URLs and rejects invalid protocols', () => {
+    const maliciousReference: Reference = {
+      cite_index: 1,
+      url: 'javascript:alert("xss")',
+      title: 'Malicious',
+      summary: 'This is malicious',
+    }
+    const html = renderMarkdown('[reference:1]', message, new Map([[1, maliciousReference]]), '')
+    // 应该显示缺失引用而不是生成危险的链接
+    expect(html).toContain('reference-missing')
+    expect(html).not.toContain('javascript:')
+  })
+
+  it('allows valid http and https URLs in references', () => {
+    const validHttpRef: Reference = {
+      cite_index: 1,
+      url: 'http://example.com',
+      title: 'HTTP Example',
+      summary: 'Summary',
+    }
+    const validHttpsRef: Reference = {
+      cite_index: 2,
+      url: 'https://example.com',
+      title: 'HTTPS Example',
+      summary: 'Summary',
+    }
+    const html = renderMarkdown('[reference:1] [reference:2]', message, new Map([[1, validHttpRef], [2, validHttpsRef]]), '')
+    expect(html).toContain('reference-link')
+    expect(html).toContain('http://example.com')
+    expect(html).toContain('https://example.com')
+  })
 })
