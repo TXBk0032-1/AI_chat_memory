@@ -11,4 +11,10 @@ describe('App setup initialization order', () => {
     expect(branchState).toBeLessThan(displayedMessages)
     expect(displayedMessages).toBeLessThan(virtualizer)
   })
+
+  it('delegates Mermaid rendering to its composable', () => {
+    expect(appSource).toContain("import { useMermaidRenderer } from './composables/useMermaidRenderer'")
+    expect(appSource).toContain('useMermaidRenderer(effectiveTheme)')
+    expect(appSource).not.toContain("let mermaidInstance: typeof import('mermaid')['default'] | null = null")
+  })
 })

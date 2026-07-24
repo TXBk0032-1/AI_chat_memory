@@ -68,20 +68,9 @@ import { useToastQueue } from './composables/useToastQueue'
 import { useBranchNavigation } from './composables/useBranchNavigation'
 import { useConversationSearch } from './composables/useConversationSearch'
 import { useSessionDetail } from './composables/useSessionDetail'
+import { useMermaidRenderer } from './composables/useMermaidRenderer'
 import './style.css'
 
-let mermaidInstance: typeof import('mermaid')['default'] | null = null
-async function loadMermaid() {
-  if (!mermaidInstance) {
-    mermaidInstance = (await import('mermaid')).default
-    mermaidInstance.initialize({ startOnLoad: false, securityLevel: 'strict', theme: effectiveTheme() === 'dark' ? 'dark' : 'neutral', fontFamily: 'Inter, Segoe UI, Microsoft YaHei, sans-serif' })
-  }
-  return mermaidInstance
-}
-
-function normalizeMermaidSource(source: string) {
-  return source.replace(/[“”]/g, '"')
-}
 const messageListRef = ref<HTMLElement | null>(null)
 const showClosePrompt = ref(false)
 const showDeletePrompt = ref(false)
@@ -112,7 +101,6 @@ const sidebarCollapsed = ref(loadSidebarCollapsed())
 const clickDebounceMs = 250
 let statusTimer: number | undefined
 let unlistenCloseRequest: UnlistenFn | undefined
-let mermaidRenderVersion = 0
 let readingPositionTimer: number | undefined
 let exportPreviewGeneration = 0
 const lastControlClicks = new WeakMap<Element, number>()
@@ -128,13 +116,18 @@ const {
 } = detail
 const { sessionPaneWidth, resizingPanes, startPaneResize, resizePanes, stopPaneResize } = usePaneResize()
 const theme = useTheme(settings, (animate) => {
-  mermaidInstance = null
+  resetMermaid()
   window.setTimeout(() => {
     document.querySelectorAll<HTMLElement>('.mermaid-diagram').forEach((element) => element.removeAttribute('data-rendered'))
     void renderMermaidDiagrams()
   }, animate ? 180 : 0)
 })
 const { effectiveTheme, commitTheme, previewTheme } = theme
+const {
+  renderMermaidDiagrams,
+  renderExportMermaidDiagrams,
+  reset: resetMermaid,
+} = useMermaidRenderer(effectiveTheme)
 const { toasts, showToast, disposeToasts } = useToastQueue()
 const branches = useBranchNavigation(selected, desktopApi)
 const {
@@ -206,6 +199,7 @@ const {
   showFilters, total, searchElapsed, filtered, searchMode, semanticStatus, loadSessions, loadMore, resetFilters,
   selectPlatform, setSearchMode,
 } = useSessionCatalog(desktopApi, (visibleIds) => {
+  if (exportBusy.value) return
   if (selected.value && !visibleIds.has(selected.value.id)) {
     persistReadingPosition()
     clearSelectedSession()
@@ -410,15 +404,15 @@ async function exportSelectedConversation() {
   const format = exportFormat.value
   const date = exportDate(selected.value.created_at || selected.value.updated_at)
   const filename = sanitizeExportFilename(selected.value.title, date, format)
-  const path = await save({
-    defaultPath: filename,
-    filters: [{ name: format === 'md' ? 'Markdown' : format.toUpperCase(), extensions: [format] }],
-  })
-  if (typeof path !== 'string') return
   exportBusy.value = true
   error.value = ''
   let succeeded = false
   try {
+    const path = await save({
+      defaultPath: filename,
+      filters: [{ name: format === 'md' ? 'Markdown' : format.toUpperCase(), extensions: [format] }],
+    })
+    if (typeof path !== 'string') return
     await ensureMessagesLoaded(selectedExportSeqs.value)
     const messages = selectedMessages()
     if (messages.length !== selectedExportSeqs.value.length) throw new Error('所选消息未完整加载')
@@ -443,6 +437,7 @@ async function exportSelectedConversation() {
 }
 
 async function selectSession(id: string) {
+  if (exportBusy.value) return
   if (!detail.shouldOpen(id)) return
   persistReadingPosition()
   cancelExportSelection()
@@ -487,7 +482,7 @@ function retryBackgroundLoad() {
 }
 
 async function selectBranch(branch: BranchNode) {
-  if (exportSelecting.value) return
+  if (exportSelecting.value || exportBusy.value) return
   searchHitIndex.value = -1
   await branches.select(branch, ensureMessageLoaded, async (seq) => {
     await nextTick()
@@ -531,49 +526,6 @@ function toggleThinking(messageId: string) {
   if (next.has(messageId)) next.delete(messageId)
   else next.add(messageId)
   expandedThinking.value = next
-}
-
-async function renderMermaidDiagrams() {
-  const version = ++mermaidRenderVersion
-  await nextTick()
-  const diagrams = [...document.querySelectorAll<HTMLElement>('.mermaid-diagram:not([data-rendered])')]
-  if (!diagrams.length) return
-  const mermaid = await loadMermaid()
-  for (const [index, element] of diagrams.entries()) {
-    if (version !== mermaidRenderVersion) return
-    const source = normalizeMermaidSource(decodeURIComponent(element.dataset.mermaidSource || ''))
-    if (!source) continue
-    try {
-      const { svg, bindFunctions } = await mermaid.render(`mermaid-${version}-${index}`, source)
-      element.innerHTML = svg
-      element.dataset.rendered = 'true'
-      bindFunctions?.(element)
-    } catch (reason) {
-      element.classList.add('mermaid-error')
-      element.dataset.rendered = 'error'
-      element.title = String(reason)
-    }
-  }
-}
-
-async function renderExportMermaidDiagrams(root: HTMLElement) {
-  const mermaid = (await import('mermaid')).default
-  mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: 'neutral', fontFamily: 'Inter, Segoe UI, Microsoft YaHei, sans-serif' })
-  const diagrams = [...root.querySelectorAll<HTMLElement>('.mermaid-diagram:not([data-rendered])')]
-  for (const [index, element] of diagrams.entries()) {
-    const source = normalizeMermaidSource(decodeURIComponent(element.dataset.mermaidSource || ''))
-    if (!source) continue
-    try {
-      const { svg } = await mermaid.render(`export-mermaid-${Date.now()}-${index}`, source)
-      element.innerHTML = svg
-      element.dataset.rendered = 'true'
-    } catch (reason) {
-      element.classList.add('mermaid-error')
-      element.dataset.rendered = 'error'
-      element.title = String(reason)
-    }
-  }
-  mermaidInstance = null
 }
 
 async function removeSession() {
