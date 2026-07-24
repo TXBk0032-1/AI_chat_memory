@@ -36,37 +36,11 @@ function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
-function escapeHtmlForHighlight(text: string) {
-  return text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;')
-}
-
 function highlightRenderedHtml(html: string, query: string) {
   const needle = query.trim()
   if (!needle) return html
   const pattern = new RegExp(escapeRegExp(needle), 'gi')
-  return html.split(/(<[^>]+>)/g).map((part) => {
-    if (part.startsWith('<')) return part
-    return part.replace(pattern, (match) => {
-      const escaped = escapeHtmlForHighlight(match)
-      return `<mark class="search-hit">${escaped}</mark>`
-    })
-  }).join('')
-}
-
-function validateReferenceUrl(url: string): boolean {
-  if (!url || typeof url !== 'string') return false
-  try {
-    const parsed = new URL(url)
-    // 只允许 http 和 https 协议
-    return ['http:', 'https:'].includes(parsed.protocol)
-  } catch {
-    return false
-  }
+  return html.split(/(<[^>]+>)/g).map((part) => part.startsWith('<') ? part : part.replace(pattern, (match) => `<mark class="search-hit">${match}</mark>`)).join('')
 }
 
 export function renderMarkdown(value: string, message: Message, references: Map<number, Reference>, query: string) {
@@ -77,12 +51,7 @@ export function renderMarkdown(value: string, message: Message, references: Map<
     const index = Number(rawIndex)
     const reference = resolveReference(index, message, references)
     const url = referenceValue(reference, ['url', 'link', 'href'])
-    
-    // 验证 URL 的有效性和安全性
-    if (!validateReferenceUrl(url)) {
-      return `<span class="reference-marker reference-missing" title="该引用来源未随历史记录保存">${index}</span>`
-    }
-    
+    if (!/^https?:\/\//i.test(url)) return `<span class="reference-marker reference-missing" title="该引用来源未随历史记录保存">${index}</span>`
     const title = referenceValue(reference, ['title', 'name']) || `引用 ${index}`
     const summary = referenceValue(reference, ['snippet', 'summary', 'description', 'content']).replace(/\s+/g, ' ').slice(0, 280)
     const safeTitle = markdown.utils.escapeHtml(title)
