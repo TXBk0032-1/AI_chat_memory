@@ -1,4 +1,4 @@
-use chrono::{Local, NaiveDate, TimeZone};
+use chrono::{Local, LocalResult, NaiveDate, NaiveDateTime, TimeDelta, TimeZone};
 
 /// Clamp MCP tool limit: None -> default, then bound to [1, max].
 #[allow(dead_code)] // wired by later MCP tool handlers
@@ -23,10 +23,98 @@ pub fn normalize_required_query(q: &str) -> Result<String, String> {
     }
 }
 
+/// Normalize a MCP date filter to Unix seconds using the local timezone.
+pub fn normalize_optional_search_date(
+    value: Option<&str>,
+    end_of_day: bool,
+) -> Result<Option<String>, String> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+
+    if value.len() == 10 && value.as_bytes()[4] == b'-' && value.as_bytes()[7] == b'-' {
+        let date = NaiveDate::parse_from_str(value, "%Y-%m-%d")
+            .map_err(|_| invalid_date_parameter(value))?;
+        if date.format("%Y-%m-%d").to_string() != value {
+            return Err(invalid_date_parameter(value));
+        }
+        let timestamp = resolve_local_date_boundary_with(date, end_of_day, |local| {
+            Local.from_local_datetime(&local)
+        })
+        .ok_or_else(|| invalid_date_parameter(value))?
+        .timestamp();
+        return Ok(Some(timestamp.to_string()));
+    }
+
+    match value.parse::<f64>() {
+        Ok(timestamp) if timestamp.is_finite() => Ok(Some(value.to_string())),
+        _ => Err(invalid_date_parameter(value)),
+    }
+}
+
+fn resolve_local_date_boundary_with<T, F>(
+    date: NaiveDate,
+    end_of_day: bool,
+    mut resolve: F,
+) -> Option<T>
+where
+    F: FnMut(NaiveDateTime) -> LocalResult<T>,
+{
+    const LAST_SECOND: i64 = 86_399;
+
+    let midnight = date
+        .and_hms_opt(0, 0, 0)
+        .expect("valid date has a midnight");
+    let boundary_second = if end_of_day { LAST_SECOND } else { 0 };
+    let boundary = midnight + TimeDelta::seconds(boundary_second);
+    if let Some(value) = select_local_boundary(resolve(boundary), end_of_day) {
+        return Some(value);
+    }
+
+    if end_of_day {
+        for second in (0..LAST_SECOND).rev() {
+            if let Some(value) =
+                select_local_boundary(resolve(midnight + TimeDelta::seconds(second)), true)
+            {
+                return Some(value);
+            }
+        }
+    } else {
+        for second in 1..=LAST_SECOND {
+            if let Some(value) =
+                select_local_boundary(resolve(midnight + TimeDelta::seconds(second)), false)
+            {
+                return Some(value);
+            }
+        }
+    }
+
+    None
+}
+
+fn select_local_boundary<T>(result: LocalResult<T>, end_of_day: bool) -> Option<T> {
+    match result {
+        LocalResult::Single(value) => Some(value),
+        LocalResult::Ambiguous(earliest, latest) => {
+            Some(if end_of_day { latest } else { earliest })
+        }
+        LocalResult::None => None,
+    }
+}
+
+fn invalid_date_parameter(value: &str) -> String {
+    format!("日期参数无效「{value}」，请使用 YYYY-MM-DD 或有限 Unix 秒")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{Local, TimeZone};
+    use chrono::{Local, LocalResult, TimeZone};
+    use std::cell::Cell;
 
     #[test]
     fn clamps_search_limit() {
@@ -98,47 +186,49 @@ mod tests {
             assert!(err.contains("日期"), "{err}");
         }
     }
-}
 
-/// Normalize a MCP date filter to Unix seconds using the local timezone.
-pub fn normalize_optional_search_date(
-    value: Option<&str>,
-    end_of_day: bool,
-) -> Result<Option<String>, String> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    let value = value.trim();
-    if value.is_empty() {
-        return Ok(None);
+    #[test]
+    fn ambiguous_boundary_chooses_earliest_for_start_and_latest_for_end() {
+        let date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+
+        assert_eq!(
+            resolve_local_date_boundary_with(date, false, |_| LocalResult::Ambiguous(10, 20)),
+            Some(10)
+        );
+        assert_eq!(
+            resolve_local_date_boundary_with(date, true, |_| LocalResult::Ambiguous(10, 20)),
+            Some(20)
+        );
     }
 
-    if value.len() == 10 && value.as_bytes()[4] == b'-' && value.as_bytes()[7] == b'-' {
-        let date = NaiveDate::parse_from_str(value, "%Y-%m-%d")
-            .map_err(|_| invalid_date_parameter(value))?;
-        if date.format("%Y-%m-%d").to_string() != value {
-            return Err(invalid_date_parameter(value));
-        }
-        let time = if end_of_day {
-            date.and_hms_opt(23, 59, 59)
-        } else {
-            date.and_hms_opt(0, 0, 0)
-        }
-        .expect("valid date and fixed time");
-        let timestamp = Local
-            .from_local_datetime(&time)
-            .single()
-            .ok_or_else(|| invalid_date_parameter(value))?
-            .timestamp();
-        return Ok(Some(timestamp.to_string()));
-    }
+    #[test]
+    fn nonexistent_boundary_scans_inward_to_first_valid_second() {
+        let date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let midnight = date.and_hms_opt(0, 0, 0).unwrap();
+        let start_calls = Cell::new(0);
+        let start = resolve_local_date_boundary_with(date, false, |local| {
+            start_calls.set(start_calls.get() + 1);
+            let second = local.signed_duration_since(midnight).num_seconds();
+            if second < 2 {
+                LocalResult::None
+            } else {
+                LocalResult::Single(second)
+            }
+        });
+        assert_eq!(start, Some(2));
+        assert_eq!(start_calls.get(), 3);
 
-    match value.parse::<f64>() {
-        Ok(timestamp) if timestamp.is_finite() => Ok(Some(value.to_string())),
-        _ => Err(invalid_date_parameter(value)),
+        let end_calls = Cell::new(0);
+        let end = resolve_local_date_boundary_with(date, true, |local| {
+            end_calls.set(end_calls.get() + 1);
+            let second = local.signed_duration_since(midnight).num_seconds();
+            if second > 86_397 {
+                LocalResult::None
+            } else {
+                LocalResult::Single(second)
+            }
+        });
+        assert_eq!(end, Some(86_397));
+        assert_eq!(end_calls.get(), 3);
     }
-}
-
-fn invalid_date_parameter(value: &str) -> String {
-    format!("日期参数无效「{value}」，请使用 YYYY-MM-DD 或有限 Unix 秒")
 }

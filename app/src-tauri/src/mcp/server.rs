@@ -102,14 +102,11 @@ impl ChatMemoryMcp {
     ) -> Result<CallToolResult, McpError> {
         let limit = clamp_limit(args.limit, 20, 100);
         let offset = clamp_offset(args.offset);
-        let date_from = match normalize_optional_search_date(args.date_from.as_deref(), false) {
-            Ok(value) => value,
-            Err(msg) => return Ok(tool_error(msg)),
-        };
-        let date_to = match normalize_optional_search_date(args.date_to.as_deref(), true) {
-            Ok(value) => value,
-            Err(msg) => return Ok(tool_error(msg)),
-        };
+        let (date_from, date_to) =
+            match normalize_search_dates(args.date_from.as_deref(), args.date_to.as_deref()) {
+                Ok(value) => value,
+                Err(msg) => return Ok(tool_error(msg)),
+            };
         let mode = match parse_search_mode(args.mode.as_deref()) {
             Ok(m) => m,
             Err(msg) => return Ok(tool_error(msg)),
@@ -422,10 +419,21 @@ pub(crate) fn parse_search_mode(raw: Option<&str>) -> Result<Option<SearchMode>,
     }
 }
 
+fn normalize_search_dates(
+    date_from: Option<&str>,
+    date_to: Option<&str>,
+) -> Result<(Option<String>, Option<String>), String> {
+    Ok((
+        normalize_optional_search_date(date_from, false)?,
+        normalize_optional_search_date(date_to, true)?,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::SearchMode;
+    use chrono::{Local, TimeZone, Timelike};
 
     #[test]
     fn parse_resource_uri_recent_default_and_limit() {
@@ -503,5 +511,34 @@ mod tests {
         let err = parse_search_mode(Some("fuzzy")).unwrap_err();
         assert!(err.contains("fuzzy"), "{err}");
         assert!(err.contains("keyword"), "{err}");
+    }
+
+    #[test]
+    fn normalize_search_dates_wires_start_and_end_boundaries() {
+        let (date_from, date_to) =
+            normalize_search_dates(Some("2024-02-29"), Some("2024-02-29")).unwrap();
+        let date_from = Local
+            .timestamp_opt(date_from.unwrap().parse().unwrap(), 0)
+            .single()
+            .unwrap();
+        let date_to = Local
+            .timestamp_opt(date_to.unwrap().parse().unwrap(), 0)
+            .single()
+            .unwrap();
+
+        assert_eq!(
+            (date_from.hour(), date_from.minute(), date_from.second()),
+            (0, 0, 0)
+        );
+        assert_eq!(
+            (date_to.hour(), date_to.minute(), date_to.second()),
+            (23, 59, 59)
+        );
+    }
+
+    #[test]
+    fn normalize_search_dates_rejects_invalid_date_to() {
+        let err = normalize_search_dates(Some("2024-02-29"), Some("2024-02-30")).unwrap_err();
+        assert!(err.contains("2024-02-30"), "{err}");
     }
 }
