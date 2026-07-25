@@ -296,7 +296,8 @@ impl ServerHandler for ChatMemoryMcp {
     }
 }
 
-enum ResourceTarget {
+#[derive(Debug, PartialEq)]
+pub(crate) enum ResourceTarget {
     Recent { limit: i64 },
     Session { id: String },
     Messages {
@@ -307,7 +308,7 @@ enum ResourceTarget {
     Unknown,
 }
 
-fn parse_resource_uri(uri: &str) -> ResourceTarget {
+pub(crate) fn parse_resource_uri(uri: &str) -> ResourceTarget {
     let (path, query) = match uri.split_once('?') {
         Some((p, q)) => (p, Some(q)),
         None => (uri, None),
@@ -394,7 +395,7 @@ fn resource_mcp_error(err: &AppError) -> McpError {
     }
 }
 
-fn parse_search_mode(raw: Option<&str>) -> Result<Option<SearchMode>, String> {
+pub(crate) fn parse_search_mode(raw: Option<&str>) -> Result<Option<SearchMode>, String> {
     let Some(raw) = raw.map(str::trim).filter(|s| !s.is_empty()) else {
         return Ok(None);
     };
@@ -408,3 +409,86 @@ fn parse_search_mode(raw: Option<&str>) -> Result<Option<SearchMode>, String> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::SearchMode;
+
+    #[test]
+    fn parse_resource_uri_recent_default_and_limit() {
+        assert_eq!(
+            parse_resource_uri("sessions://recent"),
+            ResourceTarget::Recent { limit: 20 }
+        );
+        assert_eq!(
+            parse_resource_uri("sessions://recent?limit=5"),
+            ResourceTarget::Recent { limit: 5 }
+        );
+        assert_eq!(
+            parse_resource_uri("sessions://recent?limit=999"),
+            ResourceTarget::Recent { limit: 50 }
+        );
+    }
+
+    #[test]
+    fn parse_resource_uri_session_and_messages() {
+        assert_eq!(
+            parse_resource_uri("session://abc-123"),
+            ResourceTarget::Session {
+                id: "abc-123".into()
+            }
+        );
+        assert_eq!(
+            parse_resource_uri("session://abc-123/messages?start_seq=10&limit=3"),
+            ResourceTarget::Messages {
+                id: "abc-123".into(),
+                start_seq: 10,
+                limit: 3,
+            }
+        );
+        assert_eq!(
+            parse_resource_uri("session://abc-123/messages"),
+            ResourceTarget::Messages {
+                id: "abc-123".into(),
+                start_seq: 0,
+                limit: 50,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_resource_uri_unknown() {
+        assert_eq!(parse_resource_uri("foo://bar"), ResourceTarget::Unknown);
+        assert_eq!(
+            parse_resource_uri("session://a/b/messages"),
+            ResourceTarget::Unknown
+        );
+        assert_eq!(parse_resource_uri("session://"), ResourceTarget::Unknown);
+    }
+
+    #[test]
+    fn parse_search_mode_accepts_known_and_none() {
+        assert_eq!(parse_search_mode(None).unwrap(), None);
+        assert_eq!(parse_search_mode(Some("")).unwrap(), None);
+        assert_eq!(parse_search_mode(Some("  ")).unwrap(), None);
+        assert_eq!(
+            parse_search_mode(Some("Keyword")).unwrap(),
+            Some(SearchMode::Keyword)
+        );
+        assert_eq!(
+            parse_search_mode(Some("semantic")).unwrap(),
+            Some(SearchMode::Semantic)
+        );
+        assert_eq!(
+            parse_search_mode(Some("HYBRID")).unwrap(),
+            Some(SearchMode::Hybrid)
+        );
+    }
+
+    #[test]
+    fn parse_search_mode_rejects_unknown() {
+        let err = parse_search_mode(Some("fuzzy")).unwrap_err();
+        assert!(err.contains("fuzzy"), "{err}");
+        assert!(err.contains("keyword"), "{err}");
+    }
+}
