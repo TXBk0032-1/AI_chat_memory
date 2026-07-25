@@ -7,6 +7,7 @@ mod error;
 mod http_api;
 mod local_services;
 mod logging;
+mod mcp;
 mod models;
 mod normalizer;
 mod semantic;
