@@ -9,7 +9,8 @@
 - 查看 DeepSeek 对话分支，并在不同分支间切换；
 - 按“一问一答”选择当前分支中的部分内容；
 - 导出 PNG、JPEG、Markdown 或 JSON，可选择是否包含思考过程；
-- 本地保存数据，支持更改数据目录、同步密钥、主题和托盘行为。
+- 本地保存数据，支持更改数据目录、同步密钥、主题和托盘行为；
+- 支持 MCP 只读检索本机对话（`http://127.0.0.1:19821/mcp`）。
 
 ## 安装与使用
 
@@ -30,7 +31,7 @@
 
 - 桌面端：Tauri 2 + Rust 1.97.0（Edition 2024）
 - 前端：Vue 3 + TypeScript + Vite
-- 本地服务：Axum，固定监听 `127.0.0.1:19820`
+- 本地服务：Axum（userscript API `127.0.0.1:19820`；MCP `127.0.0.1:19821`）
 - 数据库：SQLx + SQLite
 - 采集端：`userscript/dist/ai-chat-memory.user.js`
 

@@ -40,3 +40,5 @@ Thumbs.db
 .claude/settings.local.json
 hatch-runs/
 artifacts/
+.omo/
+.superpowers/
