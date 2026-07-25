@@ -5,6 +5,7 @@ mod database;
 mod embedding;
 mod error;
 mod http_api;
+mod local_services;
 mod logging;
 mod models;
 mod normalizer;
