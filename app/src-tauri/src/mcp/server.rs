@@ -2,7 +2,9 @@
 #![allow(dead_code)]
 
 use crate::error::AppError;
-use crate::mcp::params::{clamp_limit, clamp_offset, normalize_required_query};
+use crate::mcp::params::{
+    clamp_limit, clamp_offset, normalize_optional_search_date, normalize_required_query,
+};
 use crate::models::{SearchMode, SearchQuery};
 use crate::service::AppService;
 use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
@@ -33,10 +35,10 @@ struct SearchSessionsArgs {
     /// 平台过滤，如 deepseek / doubao / kimi
     #[serde(default)]
     platform: Option<String>,
-    /// 起始日期 YYYY-MM-DD
+    /// 起始日期 YYYY-MM-DD（兼容 Unix 秒）
     #[serde(default)]
     date_from: Option<String>,
-    /// 结束日期 YYYY-MM-DD
+    /// 结束日期 YYYY-MM-DD（兼容 Unix 秒）
     #[serde(default)]
     date_to: Option<String>,
     /// 搜索模式：keyword | semantic | hybrid
@@ -100,6 +102,14 @@ impl ChatMemoryMcp {
     ) -> Result<CallToolResult, McpError> {
         let limit = clamp_limit(args.limit, 20, 100);
         let offset = clamp_offset(args.offset);
+        let date_from = match normalize_optional_search_date(args.date_from.as_deref(), false) {
+            Ok(value) => value,
+            Err(msg) => return Ok(tool_error(msg)),
+        };
+        let date_to = match normalize_optional_search_date(args.date_to.as_deref(), true) {
+            Ok(value) => value,
+            Err(msg) => return Ok(tool_error(msg)),
+        };
         let mode = match parse_search_mode(args.mode.as_deref()) {
             Ok(m) => m,
             Err(msg) => return Ok(tool_error(msg)),
@@ -107,8 +117,8 @@ impl ChatMemoryMcp {
         let query = SearchQuery {
             q: args.q,
             platform: args.platform,
-            date_from: args.date_from,
-            date_to: args.date_to,
+            date_from,
+            date_to,
             limit: Some(limit),
             offset: Some(offset),
             mode,
