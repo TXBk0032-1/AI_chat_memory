@@ -153,10 +153,7 @@ mod tests {
         assert!(matches!(status, LocalServiceStatus::Stopped), "{status:?}");
 
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(
-            !port_open(19899).await,
-            "port must be released after stop"
-        );
+        assert!(!port_open(19899).await, "port must be released after stop");
     }
 
     #[tokio::test]

@@ -298,8 +298,12 @@ impl ServerHandler for ChatMemoryMcp {
 
 #[derive(Debug, PartialEq)]
 pub(crate) enum ResourceTarget {
-    Recent { limit: i64 },
-    Session { id: String },
+    Recent {
+        limit: i64,
+    },
+    Session {
+        id: String,
+    },
     Messages {
         id: String,
         start_seq: i64,
@@ -367,9 +371,8 @@ fn tool_error(message: impl Into<String>) -> CallToolResult {
 }
 
 fn json_resource<T: serde::Serialize>(uri: &str, value: &T) -> ReadResourceResult {
-    let text = serde_json::to_string(value).unwrap_or_else(|err| {
-        json!({ "error": format!("序列化失败：{err}") }).to_string()
-    });
+    let text = serde_json::to_string(value)
+        .unwrap_or_else(|err| json!({ "error": format!("序列化失败：{err}") }).to_string());
     ReadResourceResult::new(vec![
         ResourceContents::text(text, uri.to_string()).with_mime_type(JSON_MIME),
     ])

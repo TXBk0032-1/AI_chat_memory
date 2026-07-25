@@ -98,9 +98,7 @@ pub fn run() {
                     .register(local_services::LocalServiceSpec {
                         id: local_services::LocalServiceId::Mcp,
                         bind: std::net::SocketAddr::from(([127, 0, 0, 1], mcp::server::MCP_PORT)),
-                        build: Arc::new(move || {
-                            mcp::http::build_mcp_router(mcp_service.clone())
-                        }),
+                        build: Arc::new(move || mcp::http::build_mcp_router(mcp_service.clone())),
                     })
                     .await;
                 let enabled = service.settings().await.mcp_enabled;
