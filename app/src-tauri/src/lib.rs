@@ -90,6 +90,26 @@ pub fn run() {
                 Ok::<_, crate::error::AppError>(service)
             })?;
             app.manage(service.clone());
+
+            let manager = local_services::LocalServiceManager::new();
+            let mcp_service = service.clone();
+            tauri::async_runtime::block_on(async {
+                manager
+                    .register(local_services::LocalServiceSpec {
+                        id: local_services::LocalServiceId::Mcp,
+                        bind: std::net::SocketAddr::from(([127, 0, 0, 1], mcp::server::MCP_PORT)),
+                        build: Arc::new(move || {
+                            mcp::http::build_mcp_router(mcp_service.clone())
+                        }),
+                    })
+                    .await;
+                let enabled = service.settings().await.mcp_enabled;
+                manager
+                    .apply_desired(local_services::LocalServiceId::Mcp, enabled)
+                    .await;
+            });
+            app.manage(manager);
+
             let http_service = service.clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(error) = http_api::serve(http_service.clone()).await {

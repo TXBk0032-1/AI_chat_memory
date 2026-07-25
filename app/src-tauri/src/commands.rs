@@ -111,9 +111,19 @@ pub async fn get_settings(service: State<'_, AppService>) -> Result<AppSettings,
 pub async fn save_settings(
     app: AppHandle,
     service: State<'_, AppService>,
+    manager: State<'_, std::sync::Arc<crate::local_services::LocalServiceManager>>,
     settings: AppSettings,
 ) -> Result<AppSettings, String> {
+    let previous = service.settings().await;
     let settings = service.update_settings(settings).await.map_err(message)?;
+    if previous.mcp_enabled != settings.mcp_enabled {
+        manager
+            .apply_desired(
+                crate::local_services::LocalServiceId::Mcp,
+                settings.mcp_enabled,
+            )
+            .await;
+    }
     if let Some(tray) = app.tray_by_id("main-tray") {
         tray.set_show_menu_on_left_click(matches!(
             settings.tray_click_behavior,
@@ -130,8 +140,16 @@ pub async fn rotate_secret(service: State<'_, AppService>) -> Result<AppSettings
 }
 
 #[tauri::command]
-pub async fn get_api_status(service: State<'_, AppService>) -> Result<DesktopApiStatus, String> {
-    Ok(service.desktop_api_status().await)
+pub async fn get_api_status(
+    service: State<'_, AppService>,
+    manager: State<'_, std::sync::Arc<crate::local_services::LocalServiceManager>>,
+) -> Result<DesktopApiStatus, String> {
+    let mut status = service.desktop_api_status().await;
+    status.mcp = manager
+        .status(crate::local_services::LocalServiceId::Mcp)
+        .await;
+    status.mcp_url = crate::mcp::server::MCP_URL.to_string();
+    Ok(status)
 }
 
 #[tauri::command]

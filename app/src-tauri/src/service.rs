@@ -254,6 +254,8 @@ impl AppService {
                 .zip(now)
                 .is_some_and(|(last, now)| now.saturating_sub(last) <= 15),
             last_userscript_request_at: last,
+            mcp: crate::local_services::LocalServiceStatus::Stopped,
+            mcp_url: crate::mcp::server::MCP_URL.to_string(),
         }
     }
 

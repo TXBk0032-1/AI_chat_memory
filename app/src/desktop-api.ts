@@ -43,12 +43,21 @@ export type SettingsModel = {
   tray_click_behavior: TrayClickBehavior
   theme: ThemePreference
   semantic_search: SemanticSearchSettings
+  mcp_enabled: boolean
 }
+
+export type LocalServiceStatus =
+  | { state: 'starting' }
+  | { state: 'running' }
+  | { state: 'stopped' }
+  | { state: 'failed'; message?: string }
 
 export type ApiStatus = {
   service: { state: string; message?: string }
   userscript_connected: boolean
   last_userscript_request_at?: number
+  mcp: LocalServiceStatus
+  mcp_url: string
 }
 
 export type SemanticRuntimeStatus = {

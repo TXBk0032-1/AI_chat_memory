@@ -165,6 +165,8 @@ pub struct DesktopApiStatus {
     pub service: ApiStatus,
     pub userscript_connected: bool,
     pub last_userscript_request_at: Option<u64>,
+    pub mcp: crate::local_services::LocalServiceStatus,
+    pub mcp_url: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -336,6 +338,8 @@ pub struct AppSettings {
     pub theme: ThemePreference,
     #[serde(default)]
     pub semantic_search: SemanticSearchSettings,
+    #[serde(default = "default_true")]
+    pub mcp_enabled: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -382,6 +386,7 @@ impl Default for AppSettings {
             tray_click_behavior: TrayClickBehavior::ShowMenu,
             theme: ThemePreference::System,
             semantic_search: SemanticSearchSettings::default(),
+            mcp_enabled: true,
         }
     }
 }
