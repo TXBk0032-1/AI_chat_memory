@@ -68,9 +68,15 @@ impl LocalServiceManager {
         };
 
         if enabled {
-            if service.running.is_some() {
+            // Alive serve: already up. Finished handle (e.g. serve error -> Failed)
+            // must be cleared or re-enable becomes a no-op.
+            if let Some(running) = service.running.as_ref()
+                && running.is_alive()
+            {
                 return;
             }
+            let _ = service.running.take();
+
             let app = (service.build)();
             let status = Arc::clone(&service.status);
             match runtime::start(service.bind, app, status).await {
@@ -167,6 +173,50 @@ mod tests {
             manager.apply_desired(LocalServiceId::Mcp, true).await;
             manager.apply_desired(LocalServiceId::Mcp, false).await;
         }
+        assert!(matches!(
+            manager.status(LocalServiceId::Mcp).await,
+            LocalServiceStatus::Stopped
+        ));
+    }
+
+    /// After serve dies (status Failed, running holds a finished handle),
+    /// apply_desired(true) must start again — not early-return as already running.
+    #[tokio::test]
+    async fn apply_desired_true_recovers_after_failed_finished_handle() {
+        let manager = LocalServiceManager::new();
+        manager
+            .register(LocalServiceSpec {
+                id: LocalServiceId::Mcp,
+                bind: SocketAddr::from(([127, 0, 0, 1], 19897)),
+                build: Arc::new(test_router),
+            })
+            .await;
+
+        {
+            let mut services = manager.services.lock().await;
+            let service = services.get_mut(&LocalServiceId::Mcp).expect("registered");
+            *service.status.lock().await =
+                LocalServiceStatus::Failed("simulated serve error".into());
+            service.running = Some(runtime::RunningService::finished_for_test().await);
+        }
+
+        assert!(matches!(
+            manager.status(LocalServiceId::Mcp).await,
+            LocalServiceStatus::Failed(_)
+        ));
+
+        manager.apply_desired(LocalServiceId::Mcp, true).await;
+        let status = manager.status(LocalServiceId::Mcp).await;
+        assert!(
+            matches!(status, LocalServiceStatus::Running),
+            "expected Running after recover, got {status:?}"
+        );
+        assert!(
+            port_open(19897).await,
+            "listener must accept after re-enable"
+        );
+
+        manager.apply_desired(LocalServiceId::Mcp, false).await;
         assert!(matches!(
             manager.status(LocalServiceId::Mcp).await,
             LocalServiceStatus::Stopped

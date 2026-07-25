@@ -15,6 +15,25 @@ pub(crate) struct RunningService {
     handle: JoinHandle<()>,
 }
 
+impl RunningService {
+    /// True while the serve task has not finished (Ok or Err).
+    pub(crate) fn is_alive(&self) -> bool {
+        !self.handle.is_finished()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn finished_for_test() -> Self {
+        let handle = tokio::spawn(async {});
+        while !handle.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        Self {
+            cancel: CancellationToken::new(),
+            handle,
+        }
+    }
+}
+
 /// Bind, mark Running, then serve with graceful shutdown on `cancel`.
 pub(crate) async fn start(
     bind: SocketAddr,
