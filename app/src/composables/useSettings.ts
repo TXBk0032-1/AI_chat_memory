@@ -3,12 +3,14 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { ref, type Ref } from 'vue'
 import {
   desktopApi,
+  type ApiStatus,
   type DesktopApi,
   type ModelDownloadProgress,
   type ReindexProgress,
   type SemanticRuntimeStatus,
   type SettingsModel,
 } from '../desktop-api'
+import { buildMcpClientConfig } from '../mcp-config'
 
 type ThemePreview = { begin(): void; accept(): void; cancel(): void }
 
@@ -21,6 +23,8 @@ export function useSettings(
   const showSettings = ref(false)
   const originText = ref('')
   const secretCopied = ref(false)
+  const mcpConfigCopied = ref(false)
+  const settingsApiStatus = ref<ApiStatus | null>(null)
   const semanticStatus = ref<SemanticRuntimeStatus | null>(null)
   const semanticBusy = ref(false)
   const downloadProgress = ref<ModelDownloadProgress | null>(null)
@@ -34,8 +38,10 @@ export function useSettings(
     theme.begin()
     originText.value = settings.value.allowed_origins.join('\n')
     secretCopied.value = false
+    mcpConfigCopied.value = false
     showSettings.value = true
     try {
+      settingsApiStatus.value = await api.getApiStatus()
       await refreshSemanticStatus()
       if (semanticStatus.value?.reindex && !['done', 'error', 'cancelled'].includes(semanticStatus.value.reindex.stage)) {
         startReindexPolling()
@@ -322,9 +328,16 @@ export function useSettings(
     }
   }
 
+
+  async function copyMcpConfig() {
+    const url = settingsApiStatus.value?.mcp_url
+    await navigator.clipboard.writeText(url ? buildMcpClientConfig(url) : buildMcpClientConfig())
+    mcpConfigCopied.value = true
+  }
+
   return {
-    showSettings, originText, secretCopied, semanticStatus, semanticBusy, downloadProgress, reindexProgress,
-    openSettings, closeSettings, saveSettings, rotateSecret, copySecret, changeDataDirectory,
+    showSettings, originText, secretCopied, mcpConfigCopied, settingsApiStatus, semanticStatus, semanticBusy, downloadProgress, reindexProgress,
+    openSettings, closeSettings, saveSettings, rotateSecret, copySecret, copyMcpConfig, changeDataDirectory,
     checkEmbedding, reindexSemantic, downloadLocalModel, importLocalModel, cancelSemanticWork,
   }
 }

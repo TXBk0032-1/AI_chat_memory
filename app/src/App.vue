@@ -209,8 +209,8 @@ const conversationSearch = useConversationSearch(selected, committedQuery, searc
 const { hits: sessionSearchHits, index: searchHitIndex, loop: loopSearch } = conversationSearch
 const loadSearchHits = conversationSearch.load
 const {
-  showSettings, originText, secretCopied, semanticStatus: settingsSemanticStatus, semanticBusy, downloadProgress, reindexProgress,
-  openSettings, closeSettings, saveSettings, rotateSecret, copySecret, changeDataDirectory,
+  showSettings, originText, secretCopied, mcpConfigCopied, settingsApiStatus, semanticStatus: settingsSemanticStatus, semanticBusy, downloadProgress, reindexProgress,
+  openSettings, closeSettings, saveSettings, rotateSecret, copySecret, copyMcpConfig, changeDataDirectory,
   checkEmbedding, reindexSemantic, downloadLocalModel, importLocalModel, cancelSemanticWork,
 } = useSettings(settings, error, {
   begin: theme.beginPreview,
@@ -887,6 +887,8 @@ onBeforeUnmount(() => {
       v-model:origin-text="originText"
       :visible="showSettings"
       :secret-copied="secretCopied"
+      :mcp-config-copied="mcpConfigCopied"
+      :api-status="settingsApiStatus ?? apiStatus"
       :semantic-status="settingsSemanticStatus"
       :semantic-busy="semanticBusy"
       :download-progress="downloadProgress"
@@ -897,6 +899,7 @@ onBeforeUnmount(() => {
       @change-data-directory="changeDataDirectory"
       @copy-secret="copySecret"
       @rotate-secret="rotateSecret"
+      @copy-mcp-config="copyMcpConfig"
       @check-embedding="checkEmbedding"
       @reindex-semantic="reindexSemantic"
       @download-local-model="downloadLocalModel"

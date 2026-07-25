@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { Check, Clipboard, FolderOpen, Monitor, Moon, RefreshCw, ShieldCheck, Sun } from 'lucide-vue-next'
 import type {
+  ApiStatus,
   EmbeddingBackendKind,
   LocalEmbeddingDevice,
   LocalEmbeddingDType,
@@ -15,6 +16,8 @@ import type {
 defineProps<{
   visible: boolean
   secretCopied: boolean
+  mcpConfigCopied?: boolean
+  apiStatus?: ApiStatus | null
   semanticStatus?: SemanticRuntimeStatus | null
   semanticBusy?: boolean
   downloadProgress?: ModelDownloadProgress | null
@@ -29,12 +32,24 @@ const emit = defineEmits<{
   changeDataDirectory: []
   copySecret: []
   rotateSecret: []
+  copyMcpConfig: []
   checkEmbedding: []
   reindexSemantic: []
   downloadLocalModel: []
   importLocalModel: []
   cancelSemanticWork: []
 }>()
+
+function mcpStateLabel(status: ApiStatus | null | undefined): string {
+  const state = status?.mcp?.state
+  if (state === 'running') return '运行中'
+  if (state === 'starting') return '启动中'
+  if (state === 'failed') {
+    const message = status?.mcp && 'message' in status.mcp ? status.mcp.message : undefined
+    return message ? `异常：${message}` : '异常'
+  }
+  return '已停止'
+}
 
 function setBackend(backend: EmbeddingBackendKind) {
   settings.value.semantic_search.backend = backend
@@ -190,6 +205,24 @@ if (!settings.value.semantic_search.local.dtype) {
           <section class="setting-group">
             <div class="setting-row"><div><h3>同步密钥</h3><p>要求 userscript 携带额外密钥访问本地服务。</p></div><label class="switch"><input v-model="settings.secret_enabled" type="checkbox" /><span></span></label></div>
             <div v-if="settings.secret_enabled" class="secret-field"><code>{{ settings.secret || '保存设置后自动生成' }}</code><button class="icon-button" :title="secretCopied ? '已复制' : '复制密钥'" :disabled="!settings.secret" @click="emit('copySecret')"><Check v-if="secretCopied" :size="17" /><Clipboard v-else :size="17" /></button><button class="secondary-button compact" @click="emit('rotateSecret')">重新生成</button></div>
+          </section>
+          <section class="setting-group">
+            <div class="setting-row">
+              <div>
+                <h3>MCP</h3>
+                <p>本机 Streamable HTTP；无密钥；同机进程可读对话；关闭立即停服。</p>
+              </div>
+              <label class="switch"><input v-model="settings.mcp_enabled" type="checkbox" /><span></span></label>
+            </div>
+            <p class="path-value">地址：{{ apiStatus?.mcp_url || 'http://127.0.0.1:19821/mcp' }}</p>
+            <p class="path-value">状态：{{ mcpStateLabel(apiStatus) }}</p>
+            <div class="setting-actions">
+              <button class="secondary-button compact" type="button" @click="emit('copyMcpConfig')">
+                <Check v-if="mcpConfigCopied" :size="14" />
+                <Clipboard v-else :size="14" />
+                {{ mcpConfigCopied ? '已复制客户端配置' : '复制客户端配置' }}
+              </button>
+            </div>
           </section>
         </div>
         <footer><button class="secondary-button" @click="emit('close')">取消</button><button class="primary-button" @click="emit('save')">保存设置</button></footer>
