@@ -53,6 +53,15 @@ pub async fn get_session_messages(
 ) -> Result<Vec<Message>> {
     let rows = sqlx::query("SELECT id, session_id, role, content, metadata, created_at, seq FROM messages WHERE session_id = ? AND seq >= ? ORDER BY seq LIMIT ?")
         .bind(id).bind(start_seq.max(0)).bind(limit.clamp(1, 100)).fetch_all(pool).await?;
+    if rows.is_empty() {
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM sessions WHERE id = ?)")
+            .bind(id)
+            .fetch_one(pool)
+            .await?;
+        if !exists {
+            return Err(AppError::NotFound("session".into()));
+        }
+    }
     rows.into_iter().map(message_from_row).collect()
 }
 

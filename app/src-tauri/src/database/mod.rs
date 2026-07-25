@@ -41,6 +41,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_session_messages_returns_not_found() {
+        let pool = create_detail_pool().await;
+
+        let result = get_session_messages(&pool, "missing", 0, 50).await;
+
+        assert!(matches!(
+            result,
+            Err(crate::error::AppError::NotFound(resource)) if resource == "session"
+        ));
+    }
+
+    #[tokio::test]
+    async fn empty_session_messages_returns_empty_list() {
+        let pool = create_detail_pool().await;
+        sqlx::query("INSERT INTO sessions (id, platform, platform_session_id) VALUES ('empty', 'deepseek', 'empty')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let messages = get_session_messages(&pool, "empty", 0, 50).await.unwrap();
+
+        assert!(messages.is_empty());
+    }
+
+    #[tokio::test]
     async fn opens_bounded_window_around_anchor_without_raw_data() {
         let pool = create_detail_pool().await;
         let raw = json!({
