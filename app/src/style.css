@@ -357,8 +357,8 @@ i.deepseek { background: #5273e6; } i.doubao { background: #e36f53; } i.kimi { b
 .theme-options button.active { color: #176b58; background: #fff; box-shadow: 0 2px 7px #17231f17; transform: translateY(-1px); }
 .switch { position: relative; width: 44px; height: 24px; flex: 0 0 auto; cursor: pointer; }
 .switch input { position: absolute; z-index: 1; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
-.switch span { position: absolute; inset: 0; border-radius: 999px; background: #bbc2c5; pointer-events: none; transition: background .18s ease, box-shadow .18s ease; box-shadow: inset 0 0 0 1px #00000010; }
-.switch span::after { content: ""; position: absolute; width: 20px; height: 20px; left: 2px; top: 2px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px #18201e33; transition: transform .18s cubic-bezier(.2,.9,.25,1.1); }
+.switch span { position: absolute; inset: 0; border-radius: 18px; background: #bbc2c5; pointer-events: none; transition: background .18s ease, box-shadow .18s ease; box-shadow: inset 0 0 0 1px #00000010; }
+.switch span::after { content: ""; position: absolute; width: 22px; height: 22px; left: 1px; top: 1px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px #18201e33; transition: transform .18s cubic-bezier(.2,.9,.25,1.1); }
 .switch input:checked + span { background: #198169; }
 .switch input:checked + span::after { transform: translateX(20px); }
 .secret-field { display: flex; align-items: center; gap: 7px; margin-top: 14px; }
@@ -582,7 +582,7 @@ html[data-theme="dark"] .export-document .mermaid-diagram { border-color: #d7ddd
 @keyframes spin { to { transform: rotate(360deg); } }
 
 @media (prefers-reduced-motion: reduce) {
-  .app-frame, .sidebar, .identity-content, .sidebar-toggle, .nav-item-expanded, .nav-item-count, .service-state, .settings-modal-enter-active, .settings-modal-leave-active, .settings-modal-enter-active .settings-dialog, .settings-modal-leave-active .settings-dialog, .source-highlight, .source-item, .source-item > span, .source-item i, .segmented-highlight, .segmented-control button, .filter-chevron, .filter-panel-enter-active, .filter-panel-leave-active, .detail-camera-enter-active, .detail-camera-leave-active, .thinking, .thinking-reveal, .thinking-toggle::before { transition-duration: .01ms; transition-delay: 0s; }
+  .app-frame, .sidebar, .identity-content, .sidebar-toggle, .nav-item-expanded, .nav-item-count, .service-state, .settings-modal-enter-active, .settings-modal-leave-active, .settings-modal-enter-active .settings-dialog, .settings-modal-leave-active .settings-dialog, .source-highlight, .source-item, .source-item > span, .source-item i, .segmented-highlight, .segmented-control button, .filter-chevron, .filter-panel-enter-active, .filter-panel-leave-active, .detail-camera-enter-active, .detail-camera-leave-active, .thinking, .thinking-reveal, .thinking-toggle::before, .mcp-copy-button, .mcp-copy-button__clipboard, .mcp-copy-button__check, .mcp-copy-button__check polyline, .mcp-copy-button__label > span { transition-duration: .01ms; transition-delay: 0s; }
   .sidebar-collapsed .settings-button.connected { animation: none; }
   .branch-overview .vue-flow__edge.animated path { animation: none; }
   .branch-overview .vue-flow__node, .branch-card, .branch-overview .vue-flow__edge-path { transition-duration: .01ms; }
@@ -605,6 +605,21 @@ html[data-theme="dark"] .export-document .mermaid-diagram { border-color: #d7ddd
 .semantic-settings label { display: grid; gap: 6px; color: #5c666b; font-size: 11px; }
 .semantic-settings input, .semantic-settings select { height: 34px; border: 1px solid #cbd1d4; border-radius: 12px; padding: 0 10px; color: #31373a; background: #fff; }
 .setting-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.mcp-copy-button { position: relative; width: 136px; max-width: 136px; padding-right: 10px; overflow: hidden; gap: 8px; transition: width .28s cubic-bezier(.2, .9, .25, 1), max-width .28s cubic-bezier(.2, .9, .25, 1), padding .28s cubic-bezier(.2, .9, .25, 1), border-color .18s ease, background-color .18s ease, color .18s ease; }
+.mcp-copy-button.copied { width: 152px; max-width: 152px; padding-right: 12px; }
+.mcp-copy-button__icon { position: relative; width: 14px; height: 14px; flex: 0 0 14px; }
+.mcp-copy-button__icon > svg { position: absolute; inset: 0; }
+.mcp-copy-button__clipboard { transition: opacity .18s ease, transform .24s cubic-bezier(.2, .9, .25, 1); }
+.mcp-copy-button__check { opacity: 0; transform: scale(.82); transition: opacity .2s ease .06s, transform .26s cubic-bezier(.2, .9, .25, 1) .06s; }
+.mcp-copy-button__check polyline { stroke-dasharray: 20; stroke-dashoffset: 20; transition: stroke-dashoffset .34s cubic-bezier(.2, .9, .25, 1) .08s; }
+.mcp-copy-button__label { position: relative; display: inline-grid; align-items: center; min-width: 92px; }
+.mcp-copy-button__label > span { grid-area: 1 / 1; white-space: nowrap; transition: opacity .18s ease, transform .24s cubic-bezier(.2, .9, .25, 1); }
+.mcp-copy-button__label-success { opacity: 0; transform: translateX(-8px); }
+.mcp-copy-button.copied .mcp-copy-button__clipboard { opacity: 0; transform: scale(.82); }
+.mcp-copy-button.copied .mcp-copy-button__check { opacity: 1; transform: scale(1); }
+.mcp-copy-button.copied .mcp-copy-button__check polyline { stroke-dashoffset: 0; }
+.mcp-copy-button.copied .mcp-copy-button__label-default { opacity: 0; transform: translateX(10px); }
+.mcp-copy-button.copied .mcp-copy-button__label-success { opacity: 1; transform: translateX(0); }
 html[data-theme="dark"] .search-mode,
 html[data-theme="dark"] .semantic-settings input,
 html[data-theme="dark"] .semantic-settings select { border-color: #4a5358; background: #20272c; color: #e7ecef; }

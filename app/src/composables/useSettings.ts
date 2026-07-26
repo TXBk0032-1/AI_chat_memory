@@ -32,6 +32,14 @@ export function useSettings(
   let unlistenDownload: UnlistenFn | undefined
   let unlistenReindex: UnlistenFn | undefined
   let reindexPollTimer: number | undefined
+  let mcpConfigCopiedTimer: number | undefined
+
+  function clearMcpConfigCopiedTimer() {
+    if (mcpConfigCopiedTimer !== undefined) {
+      window.clearTimeout(mcpConfigCopiedTimer)
+      mcpConfigCopiedTimer = undefined
+    }
+  }
 
   async function openSettings() {
     settings.value = await api.getSettings()
@@ -39,6 +47,7 @@ export function useSettings(
     originText.value = settings.value.allowed_origins.join('\n')
     secretCopied.value = false
     mcpConfigCopied.value = false
+    clearMcpConfigCopiedTimer()
     showSettings.value = true
     try {
       settingsApiStatus.value = await api.getApiStatus()
@@ -53,6 +62,7 @@ export function useSettings(
 
   function closeSettings(save = false) {
     if (!save) theme.cancel()
+    clearMcpConfigCopiedTimer()
     showSettings.value = false
   }
 
@@ -330,9 +340,14 @@ export function useSettings(
 
 
   async function copyMcpConfig() {
+    clearMcpConfigCopiedTimer()
     const url = settingsApiStatus.value?.mcp_url
     await navigator.clipboard.writeText(url ? buildMcpClientConfig(url) : buildMcpClientConfig())
     mcpConfigCopied.value = true
+    mcpConfigCopiedTimer = window.setTimeout(() => {
+      mcpConfigCopied.value = false
+      mcpConfigCopiedTimer = undefined
+    }, 2200)
   }
 
   return {

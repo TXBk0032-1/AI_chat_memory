@@ -217,10 +217,15 @@ if (!settings.value.semantic_search.local.dtype) {
             <p class="path-value">地址：{{ apiStatus?.mcp_url || 'http://127.0.0.1:19821/mcp' }}</p>
             <p class="path-value">状态：{{ mcpStateLabel(apiStatus) }}</p>
             <div class="setting-actions">
-              <button class="secondary-button compact" type="button" @click="emit('copyMcpConfig')">
-                <Check v-if="mcpConfigCopied" :size="14" />
-                <Clipboard v-else :size="14" />
-                {{ mcpConfigCopied ? '已复制客户端配置' : '复制客户端配置' }}
+              <button class="secondary-button compact mcp-copy-button" :class="{ copied: mcpConfigCopied }" type="button" @click="emit('copyMcpConfig')">
+                <span class="mcp-copy-button__icon" aria-hidden="true">
+                  <Clipboard class="mcp-copy-button__clipboard" :size="14" />
+                  <Check class="mcp-copy-button__check" :size="14" />
+                </span>
+                <span class="mcp-copy-button__label">
+                  <span class="mcp-copy-button__label-default">复制客户端配置</span>
+                  <span class="mcp-copy-button__label-success">已复制客户端配置</span>
+                </span>
               </button>
             </div>
           </section>
