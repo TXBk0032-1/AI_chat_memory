@@ -42,3 +42,4 @@ hatch-runs/
 artifacts/
 .omo/
 .superpowers/
+/.worktrees/
