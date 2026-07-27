@@ -45,6 +45,12 @@ $installers = @($installerDefinitions | ForEach-Object {
         name = "AI-Chat-Memory_${version}_x64_$($_.output_suffix).exe"
     }
 })
+$portable = [ordered]@{
+    variant = "portable"
+    webview_install_mode = "skip"
+    name = "AI-Chat-Memory_${version}_x64_portable.zip"
+    entry_name = "AI-Chat-Memory_${version}_x64_portable.exe"
+}
 
 function Clear-Directory {
     param([Parameter(Mandatory)][string]$LiteralPath)
@@ -119,6 +125,7 @@ if ($PlanOnly) {
         languages = $languages
         display_language_selector = $true
         installers = $installers
+        portable = $portable
     } | ConvertTo-Json -Depth 5
     exit 0
 }
