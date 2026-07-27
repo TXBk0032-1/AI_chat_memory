@@ -31,10 +31,6 @@ impl TryFrom<EntityVersionWire> for EntityVersion {
         if value.counter < 0 {
             return Err("counter must be non-negative");
         }
-        if value.wall_ms == i64::MAX && value.counter == i64::MAX {
-            return Err("wall_ms and counter cannot both equal i64::MAX");
-        }
-
         Ok(Self::new(value.wall_ms, value.counter, value.device_id))
     }
 }
@@ -86,7 +82,10 @@ pub enum SyncTrigger {
 
 #[cfg(test)]
 mod tests {
-    use super::{EntityVersion, MutationOperation, NormalizedSessionSnapshot, SyncTrigger};
+    use super::{
+        EntityKey, EntityVersion, MutationOperation, NormalizedSessionSnapshot,
+        SyncMessageSnapshot, SyncTrigger,
+    };
     use serde_json::json;
 
     #[test]
@@ -114,18 +113,18 @@ mod tests {
     }
 
     #[test]
-    fn entity_version_rejects_exhausted_protocol_value() {
-        let error = serde_json::from_value::<EntityVersion>(json!({
+    fn exhausted_entity_version_has_exact_wire_shape_and_round_trips() {
+        let version = EntityVersion::new(i64::MAX, i64::MAX, "device-a");
+        let expected = json!({
             "wall_ms": i64::MAX,
             "counter": i64::MAX,
             "device_id": "device-a"
-        }))
-        .unwrap_err();
+        });
 
-        assert!(
-            error
-                .to_string()
-                .contains("wall_ms and counter cannot both equal i64::MAX")
+        assert_eq!(serde_json::to_value(&version).unwrap(), expected);
+        assert_eq!(
+            serde_json::from_value::<EntityVersion>(expected).unwrap(),
+            version
         );
     }
 
@@ -194,6 +193,46 @@ mod tests {
             snapshot.messages[0].created_at.as_deref(),
             Some("2026-07-27T09:01:00Z")
         );
+    }
+
+    #[test]
+    fn normalized_session_snapshot_serializes_exact_wire_shape() {
+        let snapshot = NormalizedSessionSnapshot {
+            key: EntityKey {
+                platform: "chat".into(),
+                platform_session_id: "session-1".into(),
+            },
+            title: "Fixture title".into(),
+            created_at: Some("2026-07-27T09:00:00Z".into()),
+            updated_at: None,
+            imported_at: "2026-07-27T10:01:00Z".into(),
+            raw_data: json!({"source": "fixture", "revision": 3}),
+            messages: vec![SyncMessageSnapshot {
+                role: "assistant".into(),
+                content: "fixture content".into(),
+                metadata: json!({"model": "fixture-model"}),
+                created_at: Some("2026-07-27T09:01:00Z".into()),
+            }],
+        };
+        let expected = json!({
+            "key": {
+                "platform": "chat",
+                "platform_session_id": "session-1"
+            },
+            "title": "Fixture title",
+            "created_at": "2026-07-27T09:00:00Z",
+            "updated_at": null,
+            "imported_at": "2026-07-27T10:01:00Z",
+            "raw_data": {"source": "fixture", "revision": 3},
+            "messages": [{
+                "role": "assistant",
+                "content": "fixture content",
+                "metadata": {"model": "fixture-model"},
+                "created_at": "2026-07-27T09:01:00Z"
+            }]
+        });
+
+        assert_eq!(serde_json::to_value(snapshot).unwrap(), expected);
     }
 
     #[test]
