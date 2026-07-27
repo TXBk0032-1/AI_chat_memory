@@ -115,6 +115,8 @@ try {
     foreach ($installer in $installers) {
         [IO.File]::WriteAllBytes((Join-Path $sourceDirectory $installer.name), [byte[]](1, 2, 3, 4))
     }
+    $portableSourceArchive = Join-Path $sourceDirectory $portable.name
+    Copy-Item -LiteralPath $portableArchive -Destination $portableSourceArchive
 
     & $Builder -ManifestOnly -SourceDirectory $sourceDirectory -ArtifactsDirectory $artifactsDirectory
     if ($LASTEXITCODE -ne 0) {
@@ -126,14 +128,19 @@ try {
         throw "Manifest was not created: $manifestPath"
     }
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-    Assert-Equal 3 @($manifest.artifacts).Count "manifest artifact count"
-    Assert-Equal "webview2-offline,webview2-online,webview2-system" (($manifest.artifacts.variant) -join ",") "manifest variants"
+    Assert-Equal 4 @($manifest.artifacts).Count "manifest artifact count"
+    Assert-Equal "webview2-offline,webview2-online,webview2-system,portable" (($manifest.artifacts.variant) -join ",") "manifest variants"
+    $portableRecord = @($manifest.artifacts | Where-Object variant -eq "portable")
+    Assert-Equal 1 $portableRecord.Count "portable manifest record count"
+    Assert-Equal "skip" $portableRecord[0].webview_install_mode "portable manifest WebView2 mode"
+    Assert-Equal $portable.entry_name $portableRecord[0].archive_entry "portable manifest entry"
+    Assert-Equal 4 $portableRecord[0].archive_entry_bytes "portable manifest entry bytes"
     foreach ($artifact in $manifest.artifacts) {
         $path = Join-Path $artifactsDirectory $artifact.name
         if (-not (Test-Path -LiteralPath $path)) {
             throw "Manifest artifact missing: $path"
         }
-        Assert-Equal 4 $artifact.bytes "$($artifact.name) byte count"
+        Assert-Equal (Get-Item -LiteralPath $path).Length $artifact.bytes "$($artifact.name) byte count"
         Assert-Equal ((Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()) $artifact.sha256 "$($artifact.name) hash"
     }
 
@@ -142,6 +149,31 @@ try {
     try { & $Builder -ManifestOnly -SourceDirectory $sourceDirectory -ArtifactsDirectory $artifactsDirectory } catch { $extraFailed = $true }
     if (-not $extraFailed) { throw "Manifest-only build accepted an extra installer" }
     Remove-Item -LiteralPath (Join-Path $sourceDirectory "unexpected.exe") -Force
+
+    Remove-Item -LiteralPath $portableSourceArchive -Force
+    $missingPortableFailed = $false
+    try { & $Builder -ManifestOnly -SourceDirectory $sourceDirectory -ArtifactsDirectory $artifactsDirectory } catch { $missingPortableFailed = $true }
+    if (-not $missingPortableFailed) { throw "Manifest-only build accepted a missing portable archive" }
+    Copy-Item -LiteralPath $portableArchive -Destination $portableSourceArchive
+
+    $unexpectedArchive = Join-Path $sourceDirectory "unexpected.zip"
+    Copy-Item -LiteralPath $portableArchive -Destination $unexpectedArchive
+    $extraPortableFailed = $false
+    try { & $Builder -ManifestOnly -SourceDirectory $sourceDirectory -ArtifactsDirectory $artifactsDirectory } catch { $extraPortableFailed = $true }
+    if (-not $extraPortableFailed) { throw "Manifest-only build accepted an extra archive" }
+    Remove-Item -LiteralPath $unexpectedArchive -Force
+
+    Copy-Item -LiteralPath $damagedArchive -Destination $portableSourceArchive -Force
+    $damagedPortableFailed = $false
+    try { & $Builder -ManifestOnly -SourceDirectory $sourceDirectory -ArtifactsDirectory $artifactsDirectory } catch { $damagedPortableFailed = $true }
+    if (-not $damagedPortableFailed) { throw "Manifest-only build accepted a damaged portable archive" }
+    Copy-Item -LiteralPath $portableArchive -Destination $portableSourceArchive -Force
+
+    Copy-Item -LiteralPath $multipleEntriesArchive -Destination $portableSourceArchive -Force
+    $multiplePortableEntriesFailed = $false
+    try { & $Builder -ManifestOnly -SourceDirectory $sourceDirectory -ArtifactsDirectory $artifactsDirectory } catch { $multiplePortableEntriesFailed = $true }
+    if (-not $multiplePortableEntriesFailed) { throw "Manifest-only build accepted a portable archive with multiple entries" }
+    Copy-Item -LiteralPath $portableArchive -Destination $portableSourceArchive -Force
 
     Remove-Item -LiteralPath (Join-Path $sourceDirectory $installers[0].name) -Force
     $missingFailed = $false

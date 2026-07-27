@@ -15,6 +15,7 @@ $ProgressPreference = "SilentlyContinue"
 $Root = Split-Path -Parent $PSScriptRoot
 $App = Join-Path $Root "app"
 $Rust = Join-Path $App "src-tauri"
+$PortableVerifier = Join-Path $PSScriptRoot "verify-portable-archive.ps1"
 if (-not $ArtifactsDirectory) {
     $ArtifactsDirectory = Join-Path $Root "artifacts"
 }
@@ -76,15 +77,23 @@ function Write-ReleaseManifest {
         [Parameter(Mandatory)][string]$OutputDirectory
     )
 
-    $sourceFiles = @(Get-ChildItem -LiteralPath $InputDirectory -File -Filter *.exe)
-    $expectedNames = @($installers.name | Sort-Object)
-    $actualNames = @($sourceFiles.Name | Sort-Object)
-    if ($sourceFiles.Count -ne $installers.Count -or ($expectedNames -join "`n") -cne ($actualNames -join "`n")) {
-        throw "Expected exactly these installers: $($expectedNames -join ', '); found: $($actualNames -join ', ')"
+    $sourceInstallers = @(Get-ChildItem -LiteralPath $InputDirectory -File -Filter *.exe)
+    $expectedInstallerNames = @($installers.name | Sort-Object)
+    $actualInstallerNames = @($sourceInstallers.Name | Sort-Object)
+    if ($sourceInstallers.Count -ne $installers.Count -or ($expectedInstallerNames -join "`n") -cne ($actualInstallerNames -join "`n")) {
+        throw "Expected exactly these installers: $($expectedInstallerNames -join ', '); found: $($actualInstallerNames -join ', ')"
     }
-    if (@($sourceFiles | Where-Object Length -le 0).Count -gt 0) {
+    if (@($sourceInstallers | Where-Object Length -le 0).Count -gt 0) {
         throw "Installer output contains an empty file"
     }
+
+    $sourceArchives = @(Get-ChildItem -LiteralPath $InputDirectory -File -Filter *.zip)
+    $actualArchiveNames = @($sourceArchives.Name | Sort-Object)
+    if ($sourceArchives.Count -ne 1 -or $actualArchiveNames[0] -cne $portable.name) {
+        throw "Expected exactly this portable archive: $($portable.name); found: $($actualArchiveNames -join ', ')"
+    }
+    $portableSource = Get-Item -LiteralPath (Join-Path $InputDirectory $portable.name)
+    $archiveInfo = & $PortableVerifier -ArchivePath $portableSource.FullName -ExpectedEntryName $portable.entry_name
 
     Clear-Directory -LiteralPath $OutputDirectory
     $artifactRecords = @()
@@ -98,6 +107,16 @@ function Write-ReleaseManifest {
             bytes = $artifact.Length
             sha256 = Get-Sha256 -LiteralPath $artifact.FullName
         }
+    }
+    $portableArtifact = Copy-Item -LiteralPath $portableSource.FullName -Destination $OutputDirectory -Force -PassThru
+    $artifactRecords += [ordered]@{
+        name = $portableArtifact.Name
+        variant = $portable.variant
+        webview_install_mode = $portable.webview_install_mode
+        bytes = $portableArtifact.Length
+        sha256 = Get-Sha256 -LiteralPath $portableArtifact.FullName
+        archive_entry = $archiveInfo.entry_name
+        archive_entry_bytes = $archiveInfo.entry_bytes
     }
 
     if (-not $RustVersion) {
@@ -177,6 +196,17 @@ try {
         }
         Copy-Item -LiteralPath $bundleFiles[0].FullName -Destination (Join-Path $stagingDirectory $installer.name) -Force
     }
+
+    $portableSource = Join-Path $Rust "target\release\ai-chat-memory-desktop.exe"
+    if (-not (Test-Path -LiteralPath $portableSource) -or (Get-Item -LiteralPath $portableSource).Length -le 0) {
+        throw "Portable source executable is missing or empty: $portableSource"
+    }
+    $portableEntryPath = Join-Path $stagingDirectory $portable.entry_name
+    $portableArchivePath = Join-Path $stagingDirectory $portable.name
+    Copy-Item -LiteralPath $portableSource -Destination $portableEntryPath -Force
+    Compress-Archive -LiteralPath $portableEntryPath -DestinationPath $portableArchivePath -CompressionLevel Optimal -Force
+    Remove-Item -LiteralPath $portableEntryPath -Force
+    & $PortableVerifier -ArchivePath $portableArchivePath -ExpectedEntryName $portable.entry_name | Out-Null
 
     Write-ReleaseManifest -InputDirectory $stagingDirectory -OutputDirectory $ArtifactsDirectory
 } finally {
