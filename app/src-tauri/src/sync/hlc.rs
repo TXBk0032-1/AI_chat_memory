@@ -120,4 +120,11 @@ mod tests {
 
         clock.tick(i64::MAX);
     }
+
+    #[test]
+    fn entity_version_ordering_uses_wall_counter_then_device_id() {
+        assert!(EntityVersion::new(2, 0, "device-a") > EntityVersion::new(1, i64::MAX, "device-z"));
+        assert!(EntityVersion::new(1, 2, "device-a") > EntityVersion::new(1, 1, "device-z"));
+        assert!(EntityVersion::new(1, 1, "device-b") > EntityVersion::new(1, 1, "device-a"));
+    }
 }
