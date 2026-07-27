@@ -30,6 +30,13 @@ jobs:
           targets: x86_64-pc-windows-msvc
           components: clippy, rustfmt
 
+      - name: Setup CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.35
+        with:
+          cuda: "13.2.0"
+          method: network
+          sub-packages: '["nvcc", "cudart", "cublas", "curand", "nvrtc", "visual_studio_integration"]'
+
       - name: Build and test release
         shell: pwsh
         run: ./scripts/ci.ps1 release
@@ -37,6 +44,6 @@ jobs:
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ai-chat-memory-windows
+          name: ai-chat-memory-windows-nsis-installers
           path: artifacts/*
           if-no-files-found: error
