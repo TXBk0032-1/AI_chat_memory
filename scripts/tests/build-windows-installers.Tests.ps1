@@ -143,6 +143,30 @@ try {
         Assert-Equal (Get-Item -LiteralPath $path).Length $artifact.bytes "$($artifact.name) byte count"
         Assert-Equal ((Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()) $artifact.sha256 "$($artifact.name) hash"
     }
+    $expectedArtifactNames = @(($installers.name + $portable.name + "manifest.json") | Sort-Object)
+    $actualArtifactNames = @((Get-ChildItem -LiteralPath $artifactsDirectory -File).Name | Sort-Object)
+    Assert-Equal ($expectedArtifactNames -join ",") ($actualArtifactNames -join ",") "release artifact names"
+
+    $sentinelPath = Join-Path $artifactsDirectory "existing-release.txt"
+    [IO.File]::WriteAllText($sentinelPath, "existing release", [Text.UTF8Encoding]::new($false))
+    $originalGitDirectory = $env:GIT_DIR
+    $publishFailed = $false
+    try {
+        $env:GIT_DIR = Join-Path $testRoot "missing-git-directory"
+        & $Builder -ManifestOnly -SourceDirectory $sourceDirectory -ArtifactsDirectory $artifactsDirectory -RustVersion "rustc test"
+    } catch {
+        $publishFailed = $true
+    } finally {
+        if ($null -eq $originalGitDirectory) {
+            Remove-Item Env:GIT_DIR -ErrorAction SilentlyContinue
+        } else {
+            $env:GIT_DIR = $originalGitDirectory
+        }
+    }
+    if (-not $publishFailed) { throw "Manifest-only build did not fail with invalid Git metadata" }
+    if (-not (Test-Path -LiteralPath $sentinelPath)) { throw "Failed publish removed the existing release" }
+    Assert-Equal "existing release" ([IO.File]::ReadAllText($sentinelPath)) "existing release contents"
+    Remove-Item -LiteralPath $sentinelPath -Force
 
     [IO.File]::WriteAllBytes((Join-Path $sourceDirectory "unexpected.exe"), [byte[]](9))
     $extraFailed = $false

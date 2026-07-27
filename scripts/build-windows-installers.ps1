@@ -95,47 +95,104 @@ function Write-ReleaseManifest {
     $portableSource = Get-Item -LiteralPath (Join-Path $InputDirectory $portable.name)
     $archiveInfo = & $PortableVerifier -ArchivePath $portableSource.FullName -ExpectedEntryName $portable.entry_name
 
-    Clear-Directory -LiteralPath $OutputDirectory
-    $artifactRecords = @()
-    foreach ($installer in $installers) {
-        $source = Get-Item -LiteralPath (Join-Path $InputDirectory $installer.name)
-        $artifact = Copy-Item -LiteralPath $source.FullName -Destination $OutputDirectory -Force -PassThru
-        $artifactRecords += [ordered]@{
-            name = $artifact.Name
-            variant = $installer.variant
-            webview_install_mode = $installer.webview_install_mode
-            bytes = $artifact.Length
-            sha256 = Get-Sha256 -LiteralPath $artifact.FullName
-        }
-    }
-    $portableArtifact = Copy-Item -LiteralPath $portableSource.FullName -Destination $OutputDirectory -Force -PassThru
-    $artifactRecords += [ordered]@{
-        name = $portableArtifact.Name
-        variant = $portable.variant
-        webview_install_mode = $portable.webview_install_mode
-        bytes = $portableArtifact.Length
-        sha256 = Get-Sha256 -LiteralPath $portableArtifact.FullName
-        archive_entry = $archiveInfo.entry_name
-        archive_entry_bytes = $archiveInfo.entry_bytes
-    }
-
+    $resolvedRustVersion = $RustVersion
     if (-not $RustVersion) {
-        $RustVersion = ((& rustc --version 2>&1) -join " ").Trim()
+        $rustOutput = ((& rustc --version 2>&1) -join " ").Trim()
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to resolve the Rust version: $rustOutput"
+        }
+        $resolvedRustVersion = $rustOutput
     }
     $commit = ((& git -C $Root rev-parse HEAD 2>&1) -join " ").Trim()
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to resolve the Git commit: $commit"
     }
-    $manifest = [ordered]@{
-        version = $version
-        commit = $commit
-        built_at_utc = [DateTime]::UtcNow.ToString("o")
-        rust = $RustVersion
-        artifacts = $artifactRecords
+
+    $outputFullPath = [IO.Path]::GetFullPath($OutputDirectory).TrimEnd('\', '/')
+    $outputRootPath = [IO.Path]::GetPathRoot($outputFullPath).TrimEnd('\', '/')
+    if (-not $outputFullPath -or $outputFullPath -eq $outputRootPath) {
+        throw "Refusing to publish to a filesystem root: $OutputDirectory"
     }
-    $manifestJson = $manifest | ConvertTo-Json -Depth 5
-    $manifestPath = Join-Path $OutputDirectory "manifest.json"
-    [IO.File]::WriteAllText($manifestPath, $manifestJson, [Text.UTF8Encoding]::new($false))
+    if (Test-Path -LiteralPath $outputFullPath -PathType Leaf) {
+        throw "Release output path is not a directory: $outputFullPath"
+    }
+
+    $outputParent = Split-Path -Parent $outputFullPath
+    $outputName = Split-Path -Leaf $outputFullPath
+    New-Item -ItemType Directory -Force -Path $outputParent | Out-Null
+    $publishId = [Guid]::NewGuid().ToString('N')
+    $publishDirectory = Join-Path $outputParent ".$outputName.publish-$publishId"
+    $backupDirectory = Join-Path $outputParent ".$outputName.backup-$publishId"
+    $backupCreated = $false
+    New-Item -ItemType Directory -Path $publishDirectory | Out-Null
+    try {
+        $artifactRecords = @()
+        foreach ($installer in $installers) {
+            $source = Get-Item -LiteralPath (Join-Path $InputDirectory $installer.name)
+            $artifact = Copy-Item -LiteralPath $source.FullName -Destination $publishDirectory -PassThru
+            $artifactRecords += [ordered]@{
+                name = $artifact.Name
+                variant = $installer.variant
+                webview_install_mode = $installer.webview_install_mode
+                bytes = $artifact.Length
+                sha256 = Get-Sha256 -LiteralPath $artifact.FullName
+            }
+        }
+        $portableArtifact = Copy-Item -LiteralPath $portableSource.FullName -Destination $publishDirectory -PassThru
+        $artifactRecords += [ordered]@{
+            name = $portableArtifact.Name
+            variant = $portable.variant
+            webview_install_mode = $portable.webview_install_mode
+            bytes = $portableArtifact.Length
+            sha256 = Get-Sha256 -LiteralPath $portableArtifact.FullName
+            archive_entry = $archiveInfo.entry_name
+            archive_entry_bytes = $archiveInfo.entry_bytes
+        }
+
+        $manifest = [ordered]@{
+            version = $version
+            commit = $commit
+            built_at_utc = [DateTime]::UtcNow.ToString("o")
+            rust = $resolvedRustVersion
+            artifacts = $artifactRecords
+        }
+        $manifestJson = $manifest | ConvertTo-Json -Depth 5
+        $manifestPath = Join-Path $publishDirectory "manifest.json"
+        [IO.File]::WriteAllText($manifestPath, $manifestJson, [Text.UTF8Encoding]::new($false))
+
+        $expectedPublishNames = @($installers.name + $portable.name + "manifest.json" | Sort-Object)
+        $actualPublishNames = @((Get-ChildItem -LiteralPath $publishDirectory -File).Name | Sort-Object)
+        if (($expectedPublishNames -join "`n") -cne ($actualPublishNames -join "`n")) {
+            throw "Release staging contains unexpected files: $($actualPublishNames -join ', ')"
+        }
+
+        if (Test-Path -LiteralPath $outputFullPath) {
+            Move-Item -LiteralPath $outputFullPath -Destination $backupDirectory
+            $backupCreated = $true
+        }
+        try {
+            Move-Item -LiteralPath $publishDirectory -Destination $outputFullPath
+        } catch {
+            if ($backupCreated -and -not (Test-Path -LiteralPath $outputFullPath)) {
+                Move-Item -LiteralPath $backupDirectory -Destination $outputFullPath
+                $backupCreated = $false
+            }
+            throw
+        }
+        if ($backupCreated) {
+            Remove-Item -LiteralPath $backupDirectory -Recurse -Force
+            $backupCreated = $false
+        }
+    } finally {
+        Remove-Item -LiteralPath $publishDirectory -Recurse -Force -ErrorAction SilentlyContinue
+        if ($backupCreated -and (Test-Path -LiteralPath $backupDirectory)) {
+            if (-not (Test-Path -LiteralPath $outputFullPath)) {
+                Move-Item -LiteralPath $backupDirectory -Destination $outputFullPath
+            } else {
+                Remove-Item -LiteralPath $backupDirectory -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
 }
 
 if ($PlanOnly) {
