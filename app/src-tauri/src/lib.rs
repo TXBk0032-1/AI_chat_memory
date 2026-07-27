@@ -13,6 +13,7 @@ mod normalizer;
 mod semantic;
 mod service;
 mod settings;
+pub mod sync;
 mod tray;
 mod window_lifecycle;
 
