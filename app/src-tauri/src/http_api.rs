@@ -119,7 +119,16 @@ fn authorization_error(
         return Err("invalid_client");
     }
     let secret_ok = !settings.secret_enabled
-        || headers.get(SECRET_HEADER).and_then(|v| v.to_str().ok()) == settings.secret.as_deref();
+        || settings
+            .secret
+            .as_deref()
+            .filter(|secret| !secret.is_empty())
+            .is_some_and(|secret| {
+                headers
+                    .get(SECRET_HEADER)
+                    .and_then(|value| value.to_str().ok())
+                    == Some(secret)
+            });
     if !secret_ok {
         return Err("invalid_secret");
     }
@@ -229,5 +238,38 @@ mod tests {
             &headers,
             &settings
         ));
+    }
+
+    #[test]
+    fn rejects_requests_when_secret_is_enabled_but_unset() {
+        let settings = AppSettings {
+            secret_enabled: true,
+            ..Default::default()
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(CLIENT_HEADER, HeaderValue::from_static(CLIENT_VALUE));
+
+        assert_eq!(
+            authorization_error(
+                &Method::POST,
+                Some("https://chat.deepseek.com"),
+                &headers,
+                &settings
+            ),
+            Err("invalid_secret"),
+            "缺少密钥头的请求不得在 secret_enabled 且 secret 为空时通过"
+        );
+
+        headers.insert(SECRET_HEADER, HeaderValue::from_static(""));
+        assert_eq!(
+            authorization_error(
+                &Method::POST,
+                Some("https://chat.deepseek.com"),
+                &headers,
+                &settings
+            ),
+            Err("invalid_secret"),
+            "空密钥头同样不得通过"
+        );
     }
 }
