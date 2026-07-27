@@ -11,41 +11,63 @@ $Root = Split-Path -Parent $PSScriptRoot
 $App = Join-Path $Root "app"
 $Rust = Join-Path $App "src-tauri"
 $Artifacts = Join-Path $Root "artifacts"
+$InstallerBuilder = Join-Path $PSScriptRoot "build-windows-installers.ps1"
 $env:RUSTUP_TOOLCHAIN = "1.97.0"
 $env:CARGO_TERM_COLOR = "always"
 
 function Initialize-CudaBuildEnvironment {
-    $cudaRoot = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3"
-    $msvcBin = "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207\bin\Hostx64\x64"
-    $vcvars = "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
-    $nvcc = Join-Path $cudaRoot "bin\nvcc.exe"
-    $cl = Join-Path $msvcBin "cl.exe"
-
-    if (-not (Test-Path -LiteralPath $nvcc)) {
-        throw "CUDA Toolkit not found at $cudaRoot. Install CUDA Toolkit and ensure nvcc is available."
+    $vcvars = $null
+    if ($env:VSINSTALLDIR) {
+        $candidate = Join-Path $env:VSINSTALLDIR "VC\Auxiliary\Build\vcvars64.bat"
+        if (Test-Path -LiteralPath $candidate) { $vcvars = $candidate }
     }
-    if (-not (Test-Path -LiteralPath $cl)) {
-        throw "MSVC cl.exe not found at $msvcBin. Install Visual Studio C++ build tools."
-    }
-    if (-not (Test-Path -LiteralPath $vcvars)) {
-        throw "vcvars64.bat not found at $vcvars."
-    }
-
-    $probe = cmd.exe /c "`"$vcvars`" >nul && echo INCLUDE=%INCLUDE%&& echo LIB=%LIB%&& echo LIBPATH=%LIBPATH%&& echo PATH=%PATH%"
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to initialize MSVC environment via vcvars64.bat"
-    }
-    foreach ($line in $probe) {
-        if ($line -like "INCLUDE=*") {
-            $env:INCLUDE = $line.Substring(8)
-        } elseif ($line -like "LIB=*") {
-            $env:LIB = $line.Substring(4)
-        } elseif ($line -like "LIBPATH=*") {
-            $env:LIBPATH = $line.Substring(8)
-        } elseif ($line -like "PATH=*") {
-            $env:PATH = $line.Substring(5)
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+    if (-not $vcvars -and (Test-Path -LiteralPath $vswhere)) {
+        $vsRoot = (& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
+        if ($vsRoot) {
+            $candidate = Join-Path $vsRoot "VC\Auxiliary\Build\vcvars64.bat"
+            if (Test-Path -LiteralPath $candidate) { $vcvars = $candidate }
         }
     }
+    if (-not $vcvars) {
+        throw "Visual Studio C++ build environment was not found"
+    }
+
+    $environment = cmd.exe /d /s /c "`"$vcvars`" >nul && set"
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to initialize MSVC environment via $vcvars"
+    }
+    foreach ($line in $environment) {
+        $separator = $line.IndexOf('=')
+        if ($separator -gt 0) {
+            [Environment]::SetEnvironmentVariable($line.Substring(0, $separator), $line.Substring($separator + 1), "Process")
+        }
+    }
+
+    $cudaRoot = $env:CUDA_PATH
+    if (-not $cudaRoot -or -not (Test-Path -LiteralPath (Join-Path $cudaRoot "bin\nvcc.exe"))) {
+        $nvccCommand = Get-Command nvcc -ErrorAction SilentlyContinue
+        if ($nvccCommand) {
+            $cudaRoot = Split-Path -Parent (Split-Path -Parent $nvccCommand.Source)
+        }
+    }
+    if (-not $cudaRoot) {
+        $cudaBase = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA"
+        $cudaRoot = Get-ChildItem -LiteralPath $cudaBase -Directory -ErrorAction SilentlyContinue |
+            Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "bin\nvcc.exe") } |
+            Sort-Object Name -Descending |
+            Select-Object -First 1 -ExpandProperty FullName
+    }
+    if (-not $cudaRoot) {
+        throw "CUDA Toolkit with nvcc was not found"
+    }
+    $nvcc = Join-Path $cudaRoot "bin\nvcc.exe"
+    if (-not (Test-Path -LiteralPath $nvcc)) {
+        throw "CUDA Toolkit with nvcc was not found"
+    }
+    $clCommand = Get-Command cl -ErrorAction SilentlyContinue
+    if (-not $clCommand) { throw "cl.exe is not available after MSVC environment setup" }
+    $msvcBin = Split-Path -Parent $clCommand.Source
 
     $env:CUDA_PATH = $cudaRoot
     $env:CUDA_HOME = $cudaRoot
@@ -73,19 +95,6 @@ function Invoke-Step {
     if ($LASTEXITCODE -ne 0) { throw "$Name failed with exit code $LASTEXITCODE" }
     $watch.Stop()
     Write-Host ("OK  {0} ({1:n1}s)" -f $Name, $watch.Elapsed.TotalSeconds) -ForegroundColor Green
-}
-
-function Get-Sha256 {
-    param([Parameter(Mandatory)][string]$LiteralPath)
-
-    $stream = [System.IO.File]::OpenRead($LiteralPath)
-    $hasher = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        return ([System.BitConverter]::ToString($hasher.ComputeHash($stream)) -replace "-", "").ToLowerInvariant()
-    } finally {
-        $hasher.Dispose()
-        $stream.Dispose()
-    }
 }
 
 foreach ($command in "git", "node", "npm", "rustc", "cargo") {
@@ -128,6 +137,10 @@ Invoke-Step "Run userscript tests" {
     node --test (Join-Path $Root "userscript/tests/capture.test.mjs")
 }
 
+Invoke-Step "Test Windows installer contract" {
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "tests\build-windows-installers.Tests.ps1")
+}
+
 Invoke-Step "Check Rust formatting" {
     Push-Location $Rust
     try { cargo fmt --check } finally { Pop-Location }
@@ -160,35 +173,9 @@ if ($Stage -eq "release") {
         $ids = ($runningApp.ProcessId -join ", ")
         throw "Close AI Chat Memory before release build (running process IDs: $ids)"
     }
-    Invoke-Step "Build Windows MSI" {
-        Push-Location $App
-        try { npm run tauri build -- --bundles msi } finally { Pop-Location }
+    Invoke-Step "Build Windows NSIS installers" {
+        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $InstallerBuilder -ArtifactsDirectory $Artifacts -RustVersion $rustVersion
     }
-
-    New-Item -ItemType Directory -Force $Artifacts | Out-Null
-    $msi = Get-ChildItem (Join-Path $Rust "target/release/bundle/msi") -Filter *.msi |
-        Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    $exe = Get-Item (Join-Path $Rust "target/release/ai-chat-memory-desktop.exe")
-    if (-not $msi -or -not $exe) { throw "Release build completed without expected artifacts" }
-
-    $artifactMsi = Copy-Item $msi.FullName $Artifacts -Force -PassThru
-    $artifactExe = Copy-Item $exe.FullName $Artifacts -Force -PassThru
-    $commit = (git -C $Root rev-parse HEAD).Trim()
-    $version = (Get-Content (Join-Path $App "package.json") -Raw | ConvertFrom-Json).version
-    $manifest = [ordered]@{
-        version = $version
-        commit = $commit
-        built_at_utc = [DateTime]::UtcNow.ToString("o")
-        rust = $rustVersion
-        artifacts = @($artifactMsi, $artifactExe | ForEach-Object {
-            [ordered]@{ name = $_.Name; bytes = $_.Length; sha256 = Get-Sha256 -LiteralPath $_.FullName }
-        })
-    }
-    $manifestJson = $manifest | ConvertTo-Json -Depth 5
-    $manifestPath = Join-Path $Artifacts "manifest.json"
-    [System.IO.File]::WriteAllText($manifestPath, $manifestJson, [System.Text.UTF8Encoding]::new($false))
-    Write-Host "`nRelease artifacts: $Artifacts" -ForegroundColor Green
-    Get-ChildItem $Artifacts | Select-Object Name, Length, LastWriteTime | Format-Table -AutoSize
 }
 
 Write-Host "`nLocal CI stage '$Stage' passed." -ForegroundColor Green
