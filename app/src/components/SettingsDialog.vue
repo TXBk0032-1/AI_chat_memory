@@ -1,5 +1,18 @@
 <script setup lang="ts">
-import { Check, Clipboard, FolderOpen, Monitor, Moon, RefreshCw, ShieldCheck, Sun } from 'lucide-vue-next'
+import { ref, watch } from 'vue'
+import {
+  Cable,
+  Check,
+  Clipboard,
+  FolderOpen,
+  Monitor,
+  Moon,
+  RefreshCw,
+  Search,
+  ShieldCheck,
+  SlidersHorizontal,
+  Sun,
+} from 'lucide-vue-next'
 import type {
   ApiStatus,
   EmbeddingBackendKind,
@@ -13,7 +26,7 @@ import type {
   ThemePreference,
 } from '../desktop-api'
 
-defineProps<{
+const props = defineProps<{
   visible: boolean
   secretCopied: boolean
   mcpConfigCopied?: boolean
@@ -25,6 +38,14 @@ defineProps<{
 }>()
 const settings = defineModel<SettingsModel>('settings', { required: true })
 const originText = defineModel<string>('originText', { required: true })
+type SettingsPage = 'general' | 'semantic' | 'connections'
+
+const activePage = ref<SettingsPage>('general')
+
+watch(() => props.visible, (visible) => {
+  if (visible) activePage.value = 'general'
+})
+
 const emit = defineEmits<{
   close: []
   save: []
@@ -69,10 +90,56 @@ if (!settings.value.semantic_search.local.dtype) {
 
 <template>
   <Transition name="settings-modal">
-    <div v-if="visible" class="dialog-backdrop" @click.self="emit('close')">
+    <div v-if="visible" class="dialog-backdrop settings-dialog-backdrop" @click.self="emit('close')">
       <section class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
         <header><div><h2 id="settings-title">应用设置</h2><p>配置界面、桌面行为和本地同步服务</p></div></header>
-        <div class="settings-content">
+        <div class="settings-layout">
+          <nav class="settings-navigation" aria-label="设置分类">
+            <button
+              id="settings-navigation-general"
+              type="button"
+              class="settings-navigation__button"
+              :class="{ active: activePage === 'general' }"
+              :aria-current="activePage === 'general' ? 'page' : undefined"
+              aria-controls="settings-page-general"
+              @click="activePage = 'general'"
+            >
+              <SlidersHorizontal :size="16" aria-hidden="true" />
+              <span>常规</span>
+            </button>
+            <button
+              id="settings-navigation-semantic"
+              type="button"
+              class="settings-navigation__button"
+              :class="{ active: activePage === 'semantic' }"
+              :aria-current="activePage === 'semantic' ? 'page' : undefined"
+              aria-controls="settings-page-semantic"
+              @click="activePage = 'semantic'"
+            >
+              <Search :size="16" aria-hidden="true" />
+              <span>语义搜索</span>
+            </button>
+            <button
+              id="settings-navigation-connections"
+              type="button"
+              class="settings-navigation__button"
+              :class="{ active: activePage === 'connections' }"
+              :aria-current="activePage === 'connections' ? 'page' : undefined"
+              aria-controls="settings-page-connections"
+              @click="activePage = 'connections'"
+            >
+              <Cable :size="16" aria-hidden="true" />
+              <span>连接服务</span>
+            </button>
+          </nav>
+          <div class="settings-pages">
+            <section
+              v-show="activePage === 'general'"
+              id="settings-page-general"
+              class="settings-content settings-page"
+              role="region"
+              aria-labelledby="settings-navigation-general"
+            >
           <section class="setting-group theme-setting">
             <div><h3>外观</h3><p>选择应用配色，跟随系统会随 Windows 主题自动切换。</p></div>
             <div class="theme-options" role="radiogroup" aria-label="应用主题">
@@ -88,6 +155,14 @@ if (!settings.value.semantic_search.local.dtype) {
             <label><span>关闭窗口后</span><select v-model="settings.close_behavior"><option value="ask">下次关闭时询问</option><option value="hide_to_tray">隐藏到系统托盘</option><option value="exit">退出应用</option></select></label>
             <label><span>点击托盘图标</span><select v-model="settings.tray_click_behavior"><option value="show_menu">弹出托盘菜单</option><option value="open_window">打开主界面</option><option value="no_action">不执行操作</option></select></label>
           </section>
+            </section>
+            <section
+              v-show="activePage === 'semantic'"
+              id="settings-page-semantic"
+              class="settings-content settings-page"
+              role="region"
+              aria-labelledby="settings-navigation-semantic"
+            >
           <section class="setting-group">
             <div class="setting-row">
               <div>
@@ -198,6 +273,14 @@ if (!settings.value.semantic_search.local.dtype) {
               </div>
             </div>
           </section>
+            </section>
+            <section
+              v-show="activePage === 'connections'"
+              id="settings-page-connections"
+              class="settings-content settings-page"
+              role="region"
+              aria-labelledby="settings-navigation-connections"
+            >
           <section class="setting-group">
             <div class="setting-heading"><ShieldCheck :size="18" /><div><h3>允许的网页来源</h3><p>每行填写一个完整的 HTTP 或 HTTPS Origin，不支持通配符。</p></div></div>
             <textarea v-model="originText" spellcheck="false" aria-label="Origin 白名单"></textarea>
@@ -229,6 +312,8 @@ if (!settings.value.semantic_search.local.dtype) {
               </button>
             </div>
           </section>
+            </section>
+          </div>
         </div>
         <footer><button class="secondary-button" @click="emit('close')">取消</button><button class="primary-button" @click="emit('save')">保存设置</button></footer>
       </section>
