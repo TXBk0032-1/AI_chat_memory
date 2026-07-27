@@ -41,9 +41,17 @@ jobs:
         shell: pwsh
         run: ./scripts/ci.ps1 release
 
+      - name: Verify portable ZIP
+        shell: pwsh
+        run: |
+          $plan = ./scripts/build-windows-installers.ps1 -PlanOnly | ConvertFrom-Json
+          ./scripts/verify-portable-archive.ps1 `
+            -ArchivePath (Join-Path "artifacts" $plan.portable.name) `
+            -ExpectedEntryName $plan.portable.entry_name
+
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ai-chat-memory-windows-nsis-installers
+          name: ai-chat-memory-windows-release
           path: artifacts/*
           if-no-files-found: error

@@ -6,6 +6,7 @@ $Root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $Builder = Join-Path $Root "scripts\build-windows-installers.ps1"
 $PortableVerifier = Join-Path $Root "scripts\verify-portable-archive.ps1"
 $TauriConfig = Join-Path $Root "app\src-tauri\tauri.conf.json"
+$Workflow = Join-Path $Root ".github\workflows\build.yml"
 
 function Assert-Equal {
     param(
@@ -21,6 +22,17 @@ function Assert-Equal {
 
 if (-not (Test-Path -LiteralPath $Builder)) {
     throw "Installer builder missing: $Builder"
+}
+
+$workflowSource = Get-Content -LiteralPath $Workflow -Raw
+if ($workflowSource -notmatch 'name:\s+Verify portable ZIP') {
+    throw "Workflow does not verify portable ZIP"
+}
+if ($workflowSource -notmatch 'verify-portable-archive\.ps1') {
+    throw "Workflow does not use shared portable verifier"
+}
+if ($workflowSource -notmatch 'name:\s+ai-chat-memory-windows-release') {
+    throw "Workflow artifact name is stale"
 }
 
 $planJson = & $Builder -PlanOnly
