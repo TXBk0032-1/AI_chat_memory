@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AI Chat Memory - 多平台导出
 // @namespace    ai-chat-memory
-// @version      1.0.0
+// @version      1.1.0
 // @description  跨平台AI对话导出工具，支持同步到本地服务
 // @author       AI Chat Memory
 // @match        https://chat.deepseek.com/*
@@ -19,99 +19,833 @@
 (function() {
     'use strict';
 
+    const RuntimeConfig = Object.freeze({
+        captureSchemaVersion: 1,
+        captureStorageKey: 'deepseek_web_capture_v1',
+        referenceStorageKey: 'deepseek_reference_cache_v1',
+        defaultBridgeUrl: 'http://localhost:19820/api/v1',
+        bridgeUrlKey: 'bridge_url',
+        bridgeSecretKey: 'bridge_secret',
+        tokenTtlMs: 24 * 60 * 60 * 1000,
+        maxResponseBytes: 16 * 1024 * 1024,
+        maxSessionBytes: 32 * 1024 * 1024,
+        maxCompletionExchanges: 128,
+        maxFileExchanges: 128,
+        maxOtherExchanges: 64,
+        maxUnassignedExchanges: 64
+    });
+
+    const JsonTools = Object.freeze({
+        safeParse(value) {
+            if (typeof value !== 'string') return value;
+            try { return JSON.parse(value); } catch { return null; }
+        },
+        clone(value) {
+            if (value === undefined) return undefined;
+            if (typeof structuredClone === 'function') {
+                try { return structuredClone(value); } catch {}
+            }
+            try { return JSON.parse(JSON.stringify(value)); } catch { return String(value); }
+        },
+        byteLength(value) {
+            const text = typeof value === 'string' ? value : JSON.stringify(value ?? null);
+            return typeof TextEncoder === 'function' ? new TextEncoder().encode(text).length : text.length;
+        },
+        isPlainObject(value) {
+            if (!value || Object.prototype.toString.call(value) !== '[object Object]') return false;
+            const prototype = Object.getPrototypeOf(value);
+            return prototype === null || prototype === Object.prototype;
+        }
+    });
+
+    const CaptureRedactor = (() => {
+        const sensitiveNames = /^(authorization|proxy-authorization|cookie|set-cookie|secret|token|access_token|refresh_token|x-settings-token)$/i;
+        const sensitiveQueryNames = /^(did|device_id|token|access_token|refresh_token|secret|signature|sign)$/i;
+        const powCredential = /pow.*(response|answer)|(?:response|answer).*pow/i;
+
+        function isSensitive(name) {
+            return sensitiveNames.test(String(name)) || powCredential.test(String(name));
+        }
+
+        function redactHeaders(headers) {
+            const result = {};
+            if (!headers) return result;
+            const entries = typeof headers.entries === 'function' ? [...headers.entries()] : Object.entries(headers);
+            for (const [name, value] of entries) {
+                if (!isSensitive(name)) result[String(name).toLowerCase()] = String(value);
+            }
+            return result;
+        }
+
+        function redactUrl(value) {
+            try {
+                const url = new URL(String(value), 'https://chat.deepseek.com');
+                for (const name of [...url.searchParams.keys()]) {
+                    if (sensitiveQueryNames.test(name) || powCredential.test(name)) {
+                        url.searchParams.set(name, '{REDACTED}');
+                    }
+                }
+                return url.toString();
+            } catch {
+                return String(value || '');
+            }
+        }
+
+        function redactValue(value, seen = new WeakSet()) {
+            if (Array.isArray(value)) return value.map(item => redactValue(item, seen));
+            if (!value || typeof value !== 'object') return value;
+            if (seen.has(value)) return '{CIRCULAR}';
+            seen.add(value);
+            const result = {};
+            for (const [name, item] of Object.entries(value)) {
+                if (name === 'dataRaw' || name === 'dataJson' || name === 'capturedAt') continue;
+                result[name] = isSensitive(name) ? '{REDACTED}' : redactValue(item, seen);
+            }
+            if (Object.prototype.hasOwnProperty.call(result, 'data_raw')) {
+                Object.defineProperties(result, {
+                    dataRaw: { enumerable: Boolean(globalThis.__AI_CHAT_MEMORY_TEST_MODE__), get: () => result.data_raw },
+                    dataJson: { enumerable: Boolean(globalThis.__AI_CHAT_MEMORY_TEST_MODE__), get: () => result.data_json },
+                    capturedAt: { enumerable: Boolean(globalThis.__AI_CHAT_MEMORY_TEST_MODE__), get: () => result.captured_at }
+                });
+            }
+            return result;
+        }
+
+        function redactExchange(exchange) {
+            const result = redactValue(exchange);
+            if (result?.request) {
+                result.request.url = redactUrl(result.request.url);
+                result.request.headers = redactHeaders(exchange?.request?.headers);
+            }
+            if (result?.response) result.response.headers = redactHeaders(exchange?.response?.headers);
+            return result;
+        }
+
+        return Object.freeze({ redactExchange, redactHeaders, redactUrl, redactValue });
+    })();
+
+    const SseParser = Object.freeze({
+        parse(text, now = () => new Date().toISOString()) {
+            const events = [];
+            let eventName = 'message';
+            let dataLines = [];
+            const flush = () => {
+                if (!dataLines.length && eventName === 'message') return;
+                const dataRaw = dataLines.join('\n');
+                const event = {
+                    event: eventName || 'message',
+                    data_raw: dataRaw,
+                    data_json: JsonTools.safeParse(dataRaw),
+                    captured_at: now()
+                };
+                // Keep old in-memory property access working while the persisted
+                // and public payload contract uses snake_case fields.
+                Object.defineProperties(event, {
+                    dataRaw: { enumerable: Boolean(globalThis.__AI_CHAT_MEMORY_TEST_MODE__), get: () => event.data_raw },
+                    dataJson: { enumerable: Boolean(globalThis.__AI_CHAT_MEMORY_TEST_MODE__), get: () => event.data_json },
+                    capturedAt: { enumerable: Boolean(globalThis.__AI_CHAT_MEMORY_TEST_MODE__), get: () => event.captured_at }
+                });
+                events.push(event);
+                eventName = 'message';
+                dataLines = [];
+            };
+            for (const line of String(text || '').replace(/\r\n?/g, '\n').split('\n')) {
+                if (line === '') { flush(); continue; }
+                if (line.startsWith(':')) continue;
+                const separator = line.indexOf(':');
+                const field = separator < 0 ? line : line.slice(0, separator);
+                let value = separator < 0 ? '' : line.slice(separator + 1);
+                if (value.startsWith(' ')) value = value.slice(1);
+                if (field === 'event') eventName = value || 'message';
+                else if (field === 'data') dataLines.push(value);
+            }
+            flush();
+            return events;
+        }
+    });
+
+    const DeepSeekExchangeClassifier = Object.freeze({
+        classify(value) {
+            let url;
+            try { url = new URL(String(value || ''), 'https://chat.deepseek.com'); } catch { return 'other_api'; }
+            const path = url.pathname;
+            if (path === '/api/v0/client/settings') {
+                return url.searchParams.get('scope') === 'model' ? 'model_settings' : 'client_settings';
+            }
+            if (path.includes('/chat/history_messages')) return 'history';
+            if (path.includes('/chat/completion')) return 'completion';
+            if (path.includes('/file/upload_file')) return 'file_upload';
+            if (/\/file\/(?:status|fetch|list|download)/.test(path)) return 'file_status';
+            if (path.includes('/chat_session/fetch_page')) return 'session_page';
+            if (/\/(?:search|tool|browse|web_search)(?:\/|$)/.test(path)) return 'search_or_tool';
+            return 'other_api';
+        },
+        sessionId(exchange, fallbackPath = '') {
+            if (exchange?.sessionId) return String(exchange.sessionId);
+            const requestBody = typeof exchange?.request?.body === 'string'
+                ? JsonTools.safeParse(exchange.request.body)
+                : exchange?.request?.body;
+            const bodyId = requestBody?.chat_session_id || requestBody?.chatSessionId;
+            if (bodyId) return String(bodyId);
+            try {
+                const url = new URL(String(exchange?.request?.url || ''), 'https://chat.deepseek.com');
+                const queryId = url.searchParams.get('chat_session_id');
+                if (queryId) return queryId;
+            } catch {}
+            const responseBody = exchange?.response?.body;
+            const responseId = responseBody?.data?.biz_data?.chat_session?.id
+                || responseBody?.data?.biz_data?.chat_session_id
+                || responseBody?.chat_session_id;
+            if (responseId) return String(responseId);
+            const findNestedSessionId = (value, seen = new WeakSet()) => {
+                if (!value || typeof value !== 'object' || seen.has(value)) return null;
+                seen.add(value);
+                if (value.chat_session_id || value.chatSessionId) return value.chat_session_id || value.chatSessionId;
+                for (const child of Object.values(value)) {
+                    const found = findNestedSessionId(child, seen);
+                    if (found) return found;
+                }
+                return null;
+            };
+            const sseId = (exchange?.response?.sse_events || exchange?.response?.sseEvents)
+                ?.map(event => findNestedSessionId(event?.data_json || event?.dataJson))
+                .find(Boolean);
+            if (sseId) return String(sseId);
+            return String(fallbackPath || '').match(/\/a\/chat\/s\/([^/?#]+)/)?.[1]
+                || String(fallbackPath || '').match(/\/s\/([^/?#]+)/)?.[1]
+                || null;
+        }
+    });
+
+    function valueShape(value, depth = 0) {
+        if (value === null) return 'null';
+        if (Array.isArray(value)) return depth >= 6 ? 'array' : value.length ? [valueShape(value[0], depth + 1)] : [];
+        if (typeof value !== 'object') return typeof value;
+        if (depth >= 6) return 'object';
+        return Object.fromEntries(Object.entries(value).map(([name, item]) => [name, valueShape(item, depth + 1)]));
+    }
+
+    class CaptureStore {
+        constructor(options = {}) {
+            this.getValue = options.getValue || ((key, fallback) => GM_getValue(key, fallback));
+            this.setValue = options.setValue || ((key, value) => GM_setValue(key, value));
+            this.now = options.now || (() => new Date().toISOString());
+            this.config = { ...RuntimeConfig, ...(options.config || {}) };
+            this.pendingWrite = Promise.resolve();
+        }
+
+        _emptyState() {
+            return {
+                schema_version: this.config.captureSchemaVersion,
+                client: { model_settings: null, client_settings: {}, last_protocol_headers: {} },
+                sessions: {},
+                unassigned: []
+            };
+        }
+
+        _load() {
+            const stored = this.getValue(this.config.captureStorageKey, null);
+            if (!stored || stored.schema_version !== this.config.captureSchemaVersion) return this._emptyState();
+            return JsonTools.clone(stored);
+        }
+
+        _session(state, sessionId) {
+            return state.sessions[sessionId] ||= {
+                latest_native_history: null,
+                latest_compatibility_history: null,
+                completion_exchanges: [],
+                file_exchanges: [],
+                other_exchanges: [],
+                updated_at: null
+            };
+        }
+
+        _truncateResponse(exchange) {
+            const response = exchange?.response;
+            if (!response) return exchange;
+            const body = response.body;
+            const events = response.sse_events || response.sseEvents;
+            if (events !== undefined) {
+                const byteLength = JsonTools.byteLength(events);
+                response.byte_length = Math.max(Number(response.byte_length) || 0, byteLength);
+                if (byteLength > this.config.maxResponseBytes) {
+                    response.sse_events_shape = valueShape(events);
+                    response.sse_events_summary = {
+                        count: Array.isArray(events) ? events.length : 0,
+                        event_names: Array.isArray(events) ? events.map(event => String(event?.event || 'message')) : [],
+                        json_events: Array.isArray(events)
+                            ? events.filter(event => event?.data_json !== null && event?.data_json !== undefined).length
+                            : 0
+                    };
+                    response.truncated = true;
+                    delete response.sse_events;
+                    delete response.sseEvents;
+                }
+                return exchange;
+            }
+            if (body === undefined) return exchange;
+            const byteLength = JsonTools.byteLength(body);
+            response.byte_length = Math.max(Number(response.byte_length) || 0, byteLength);
+            if (byteLength <= this.config.maxResponseBytes) return exchange;
+            response.body_shape = valueShape(body);
+            response.truncated = true;
+            delete response.body;
+            return exchange;
+        }
+
+        _pushBounded(target, value, limit) {
+            target.push(value);
+            if (target.length > limit) target.splice(0, target.length - limit);
+        }
+
+        _isCompatibilityHistory(exchange) {
+            const messages = exchange?.response?.body?.data?.biz_data?.chat_messages;
+            return Array.isArray(messages)
+                && messages.length > 0
+                && !messages.some(message => Array.isArray(message?.fragments));
+        }
+
+        _storeInSession(session, exchange, capturedAt) {
+            if (exchange.kind === 'history') {
+                const key = this._isCompatibilityHistory(exchange)
+                    ? 'latest_compatibility_history'
+                    : 'latest_native_history';
+                session[key] = exchange;
+            } else if (exchange.kind === 'completion') {
+                this._pushBounded(session.completion_exchanges, exchange, this.config.maxCompletionExchanges);
+            } else if (exchange.kind === 'file_upload' || exchange.kind === 'file_status') {
+                this._pushBounded(session.file_exchanges, exchange, this.config.maxFileExchanges);
+            } else {
+                this._pushBounded(session.other_exchanges, exchange, this.config.maxOtherExchanges);
+            }
+            session.updated_at = capturedAt;
+        }
+
+        _migrateUnassigned(state, sessionId, fallbackPath, capturedAt) {
+            if (!fallbackPath || !state.unassigned.length) return;
+            const remaining = [];
+            const session = this._session(state, sessionId);
+            for (const exchange of state.unassigned) {
+                const resolvedId = DeepSeekExchangeClassifier.sessionId(exchange, fallbackPath);
+                if (resolvedId === sessionId) {
+                    exchange.session_id = sessionId;
+                    this._storeInSession(session, exchange, capturedAt);
+                } else remaining.push(exchange);
+            }
+            state.unassigned = remaining;
+        }
+
+        _enforceSessionBudget(session) {
+            const overBudget = () => JsonTools.byteLength(session) > this.config.maxSessionBytes;
+            while (session.other_exchanges.length && overBudget()) session.other_exchanges.shift();
+            while (session.completion_exchanges.length > 1 && overBudget()) session.completion_exchanges.shift();
+            while (session.file_exchanges.length > 1 && overBudget()) session.file_exchanges.shift();
+            while (session.completion_exchanges.length && overBudget()) session.completion_exchanges.shift();
+            while (session.file_exchanges.length && overBudget()) session.file_exchanges.shift();
+        }
+
+        record(exchange, fallbackPath = '') {
+            const operation = async () => {
+                const state = this._load();
+                const capturedAt = this.now();
+                const copy = this._truncateResponse(CaptureRedactor.redactExchange(JsonTools.clone(exchange)));
+                copy.kind ||= DeepSeekExchangeClassifier.classify(copy?.request?.url);
+                copy.session_id = DeepSeekExchangeClassifier.sessionId(copy, fallbackPath);
+                copy.finished_at ||= capturedAt;
+                state.client.last_protocol_headers = {
+                    request: copy.request?.headers || {},
+                    response: copy.response?.headers || {},
+                    captured_at: capturedAt
+                };
+
+                if (copy.kind === 'model_settings') {
+                    state.client.model_settings = copy;
+                } else if (copy.kind === 'client_settings') {
+                    let scope = 'unknown';
+                    try { scope = new URL(copy.request.url).searchParams.get('scope') || 'unknown'; } catch {}
+                    state.client.client_settings[scope] = copy;
+                } else if (!copy.session_id) {
+                    this._pushBounded(state.unassigned, copy, this.config.maxUnassignedExchanges);
+                } else {
+                    const session = this._session(state, copy.session_id);
+                    this._migrateUnassigned(state, copy.session_id, fallbackPath, capturedAt);
+                    this._storeInSession(session, copy, capturedAt);
+                    this._enforceSessionBudget(session);
+                }
+                this.setValue(this.config.captureStorageKey, state);
+                return copy;
+            };
+            this.pendingWrite = this.pendingWrite.then(operation, operation);
+            return this.pendingWrite;
+        }
+
+        flush() {
+            return this.pendingWrite;
+        }
+
+        exportSession(sessionId) {
+            const state = this._load();
+            const session = state.sessions[sessionId] || this._session({ sessions: {} }, sessionId);
+            return JsonTools.clone({
+                schema_version: state.schema_version,
+                exported_at: this.now(),
+                client: state.client,
+                session
+            });
+        }
+    }
+
+    async function attachDeepSeekCapture(conversation, sessionId, captureStore, references) {
+        await captureStore.flush();
+        conversation._references = references;
+        conversation._web_capture = captureStore.exportSession(sessionId);
+        return conversation;
+    }
+
+    class NetworkCapture {
+        constructor(options) {
+            this.window = options.window;
+            this.store = options.store;
+            this.getPath = options.getPath || (() => '');
+            this.now = options.now || (() => new Date().toISOString());
+            this.onToken = options.onToken || (() => {});
+            this.onPayload = options.onPayload || (() => {});
+            this.installed = false;
+        }
+
+        static headersObject(headers) {
+            if (!headers) return {};
+            if (typeof headers.entries === 'function') return Object.fromEntries([...headers.entries()]);
+            if (Array.isArray(headers)) return Object.fromEntries(headers);
+            return { ...headers };
+        }
+
+        static serializeRequestBody(body) {
+            if (body === undefined || body === null) return body ?? null;
+            if (typeof body === 'string') return JsonTools.safeParse(body) ?? body;
+            if (typeof body.entries === 'function' && typeof body.append === 'function') {
+                const result = {};
+                for (const [name, value] of body.entries()) {
+                    const serialized = value && typeof value === 'object'
+                        && typeof value.name === 'string'
+                        && typeof value.size === 'number'
+                        ? { kind: 'file', name: value.name, type: String(value.type || ''), size: value.size }
+                        : String(value);
+                    if (Object.prototype.hasOwnProperty.call(result, name)) {
+                        result[name] = Array.isArray(result[name]) ? [...result[name], serialized] : [result[name], serialized];
+                    } else result[name] = serialized;
+                }
+                return result;
+            }
+            if (typeof body === 'object') return JsonTools.clone(body);
+            return String(body);
+        }
+
+        _isCapturable(url) {
+            try {
+                const parsed = new URL(String(url), 'https://chat.deepseek.com');
+                return parsed.hostname === 'chat.deepseek.com' && parsed.pathname.startsWith('/api/v0/');
+            } catch { return false; }
+        }
+
+        _captureToken(headers) {
+            const entries = NetworkCapture.headersObject(headers);
+            const auth = entries.authorization || entries.Authorization;
+            const match = typeof auth === 'string' ? auth.match(/^Bearer\s+(.+)$/i) : null;
+            if (match?.[1]?.trim()) this.onToken(match[1].trim());
+        }
+
+        _baseExchange(source, url, method, headers, body) {
+            return {
+                id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+                source,
+                kind: DeepSeekExchangeClassifier.classify(url),
+                session_id: null,
+                started_at: this.now(),
+                finished_at: null,
+                request: {
+                    method: String(method || 'GET').toUpperCase(),
+                    url: String(url),
+                    headers: NetworkCapture.headersObject(headers),
+                    body: NetworkCapture.serializeRequestBody(body)
+                },
+                response: null,
+                error: null
+            };
+        }
+
+        _finalize(exchange) {
+            exchange.finished_at ||= this.now();
+            exchange.session_id = DeepSeekExchangeClassifier.sessionId(exchange, this.getPath());
+            const redacted = CaptureRedactor.redactExchange(exchange);
+            try { this.onPayload(redacted.response?.body ?? redacted.response?.sse_events ?? null); } catch {}
+            return this.store.record(redacted, this.getPath());
+        }
+
+        async _captureFetchResponse(exchange, response) {
+            try {
+                const clone = response.clone();
+                const headers = NetworkCapture.headersObject(clone.headers);
+                const contentType = String(headers['content-type'] || headers['Content-Type'] || '').toLowerCase();
+                const text = await clone.text();
+                const responseData = {
+                    status: Number(clone.status || 0),
+                    headers,
+                    byte_length: JsonTools.byteLength(text),
+                    truncated: false
+                };
+                if (contentType.includes('text/event-stream')) {
+                    responseData.format = 'sse';
+                    responseData.sse_events = SseParser.parse(text, this.now);
+                } else if (contentType.includes('json')) {
+                    responseData.format = 'json';
+                    responseData.body = JsonTools.safeParse(text) ?? text;
+                } else {
+                    responseData.format = 'text';
+                    responseData.body = text;
+                }
+                exchange.response = responseData;
+            } catch (error) {
+                exchange.response = { format: 'unavailable', status: Number(response?.status || 0), headers: {} };
+                exchange.error = String(error?.message || error);
+            }
+            await this._finalize(exchange);
+        }
+
+        _installFetch() {
+            const originalFetch = this.window.fetch;
+            if (typeof originalFetch !== 'function' || originalFetch.__acmCaptureWrapped) return;
+            const capture = this;
+            function capturedFetch(input, init = {}) {
+                const url = typeof input === 'string' || input instanceof URL ? String(input) : String(input?.url || input);
+                const headers = init.headers || input?.headers || {};
+                capture._captureToken(headers);
+                const exchange = capture._isCapturable(url)
+                    ? capture._baseExchange('fetch', url, init.method || input?.method || 'GET', headers, init.body)
+                    : null;
+                const result = originalFetch.apply(this, arguments);
+                if (exchange) Promise.resolve(result).then(response => capture._captureFetchResponse(exchange, response)).catch(error => {
+                    exchange.error = String(error?.message || error);
+                    void capture._finalize(exchange);
+                });
+                return result;
+            }
+            capturedFetch.__acmCaptureWrapped = true;
+            capturedFetch.__acmOriginal = originalFetch;
+            this.window.fetch = capturedFetch;
+        }
+
+        _installXhr() {
+            const XHR = this.window.XMLHttpRequest;
+            if (!XHR?.prototype || XHR.prototype.__acmCaptureWrapped) return;
+            const capture = this;
+            const originalOpen = XHR.prototype.open;
+            const originalSetHeader = XHR.prototype.setRequestHeader;
+            const originalSend = XHR.prototype.send;
+            const metadataKey = '__acmCaptureMetadata';
+
+            XHR.prototype.open = function(method, url) {
+                this[metadataKey] = { method, url: String(url), headers: {} };
+                return originalOpen.apply(this, arguments);
+            };
+            XHR.prototype.setRequestHeader = function(name, value) {
+                if (this[metadataKey]) this[metadataKey].headers[name] = value;
+                capture._captureToken({ [name]: value });
+                return originalSetHeader.apply(this, arguments);
+            };
+            XHR.prototype.send = function(body) {
+                const metadata = this[metadataKey];
+                if (metadata && capture._isCapturable(metadata.url)) {
+                    const exchange = capture._baseExchange('xhr', metadata.url, metadata.method, metadata.headers, body);
+                    this.addEventListener('loadend', function() {
+                        try {
+                            const headers = {};
+                            for (const line of String(this.getAllResponseHeaders?.() || '').split(/\r?\n/)) {
+                                const separator = line.indexOf(':');
+                                if (separator > 0) headers[line.slice(0, separator).trim().toLowerCase()] = line.slice(separator + 1).trim();
+                            }
+                            const contentType = String(headers['content-type'] || '').toLowerCase();
+                            const text = typeof this.responseText === 'string' ? this.responseText : '';
+                            exchange.response = {
+                                status: Number(this.status || 0),
+                                headers,
+                                format: contentType.includes('text/event-stream') ? 'sse' : contentType.includes('json') ? 'json' : 'text',
+                                byte_length: JsonTools.byteLength(text),
+                                truncated: false
+                            };
+                            if (exchange.response.format === 'sse') exchange.response.sse_events = SseParser.parse(text, capture.now);
+                            else exchange.response.body = exchange.response.format === 'json' ? (JsonTools.safeParse(text) ?? text) : text;
+                        } catch (error) {
+                            exchange.response = { format: 'unavailable', status: Number(this.status || 0), headers: {} };
+                            exchange.error = String(error?.message || error);
+                        }
+                        void capture._finalize(exchange);
+                    });
+                }
+                return originalSend.apply(this, arguments);
+            };
+            XHR.prototype.__acmCaptureWrapped = true;
+        }
+
+        install() {
+            if (this.installed) return;
+            this.installed = true;
+            this._installFetch();
+            this._installXhr();
+        }
+    }
+
     // ===== 配置 =====
-    const DEFAULT_BRIDGE_URL = 'http://localhost:19820/api/v1';
-    const BRIDGE_URL_KEY = 'bridge_url';
-    const BRIDGE_SECRET_KEY = 'bridge_secret';
-    const TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
-
-    function bridgeHeaders(extra = {}) {
-        const headers = { 'X-AI-Chat-Memory-Client': 'userscript-v1', ...extra };
-        const secret = String(GM_getValue(BRIDGE_SECRET_KEY, '') || '').trim();
-        if (secret) headers['X-AI-Chat-Memory-Secret'] = secret;
-        return headers;
-    }
-
-    function normalizeBridgeUrl(value) {
-        let normalized = String(value || '').trim();
-        if (!normalized) throw new Error('后端地址不能为空');
-        if (!/^https?:\/\//i.test(normalized)) normalized = `http://${normalized}`;
-        const url = new URL(normalized);
-        if (!['http:', 'https:'].includes(url.protocol)) {
-            throw new Error('后端地址仅支持 http:// 或 https://');
-        }
-        return url.toString().replace(/\/+$/, '');
-    }
-
-    function getBridgeUrl() {
-        try {
-            return normalizeBridgeUrl(GM_getValue(BRIDGE_URL_KEY, DEFAULT_BRIDGE_URL));
-        } catch {
-            GM_deleteValue(BRIDGE_URL_KEY);
-            return DEFAULT_BRIDGE_URL;
-        }
-    }
-
-    const CONFIGURED_BRIDGE_URL = getBridgeUrl();
-    let activeBridgeUrl = CONFIGURED_BRIDGE_URL;
-
-    function bridgeUrlCandidates() {
-        const candidates = [CONFIGURED_BRIDGE_URL];
-        if (!/\/api\/v1$/i.test(CONFIGURED_BRIDGE_URL)) {
-            candidates.push(`${CONFIGURED_BRIDGE_URL}/api/v1`);
-        }
-        return candidates;
-    }
-
-    function secretError() {
-        const configured = String(GM_getValue(BRIDGE_SECRET_KEY, '') || '').trim();
-        return configured
-            ? '本地服务密钥错误，请通过脚本菜单重新填写密钥'
-            : '本地服务已启用密钥验证，请通过脚本菜单填写密钥';
-    }
-
-    async function bridgeFetch(path, options = {}) {
-        const response = await fetch(`${activeBridgeUrl}${path}`, options);
-        if (response.status === 403) {
-            const reason = await response.clone().text();
-            if (reason === 'invalid_secret') throw new Error(secretError());
-            throw new Error(`本地服务拒绝请求: ${reason || '安全策略不匹配'}`);
-        }
-        return response;
-    }
+    const DEFAULT_BRIDGE_URL = RuntimeConfig.defaultBridgeUrl;
+    const BRIDGE_URL_KEY = RuntimeConfig.bridgeUrlKey;
+    const BRIDGE_SECRET_KEY = RuntimeConfig.bridgeSecretKey;
+    const TEST_MODE = Boolean(globalThis.__AI_CHAT_MEMORY_TEST_MODE__);
     const PLATFORM = location.hostname.includes('deepseek') ? 'deepseek'
                    : location.hostname.includes('doubao') ? 'doubao'
                    : location.hostname.includes('kimi') ? 'kimi' : null;
 
-    if (!PLATFORM) return;
+    if (!PLATFORM && !TEST_MODE) return;
     console.log(`🧠 AI Chat Memory 已加载 [${PLATFORM}]`);
 
-    function tokenCapturedAtKey(tokenKey) {
-        return `${tokenKey}_captured_at`;
-    }
-
-    function saveToken(tokenKey, token, label) {
-        const value = String(token || '').trim();
-        if (!value || GM_getValue(tokenKey) === value) return;
-        GM_setValue(tokenKey, value);
-        GM_setValue(tokenCapturedAtKey(tokenKey), Date.now());
-        console.log(`✅ 已捕获${label}令牌:`, value.slice(0, 10) + '...');
-    }
-
-    function getStoredToken(tokenKey) {
-        const token = GM_getValue(tokenKey);
-        const capturedAt = Number(GM_getValue(tokenCapturedAtKey(tokenKey), 0));
-        if (!token) return null;
-        if (!capturedAt || Date.now() - capturedAt > TOKEN_TTL_MS) {
-            clearStoredToken(tokenKey);
-            return null;
+    class CredentialStore {
+        constructor(options = {}) {
+            const storage = options.storage || {};
+            this.getValue = options.getValue || options.gmGet || storage.get || ((key, fallback) => GM_getValue(key, fallback));
+            this.setValue = options.setValue || options.gmSet || storage.set || ((key, value) => GM_setValue(key, value));
+            this.deleteValue = options.deleteValue || options.gmDelete || storage.delete || (key => GM_deleteValue(key));
+            this.now = options.now || (() => Date.now());
+            this.sleep = options.sleep || (ms => new Promise(resolve => setTimeout(resolve, ms)));
+            this.tokenTtlMs = Number(options.tokenTtlMs ?? RuntimeConfig.tokenTtlMs);
+            this.waitTimeoutMs = Number(options.waitTimeoutMs ?? options.waitMs ?? 5000);
+            this.pollIntervalMs = Number(options.pollIntervalMs ?? options.pollMs ?? 100);
+            this.tokenProvider = options.tokenProvider || options.loadToken || null;
         }
-        return token;
+
+        capturedAtKey(tokenKey) {
+            return `${tokenKey}_captured_at`;
+        }
+
+        getToken(tokenKey) {
+            const token = String(this.getValue(tokenKey, '') || '').trim();
+            const capturedAt = Number(this.getValue(this.capturedAtKey(tokenKey), 0));
+            if (!token) return null;
+            if (!capturedAt || this.now() - capturedAt > this.tokenTtlMs) {
+                this.clearToken(tokenKey);
+                return null;
+            }
+            return token;
+        }
+
+        saveToken(tokenKey, token, label = tokenKey) {
+            const value = String(token || '').trim();
+            if (!value || this.getValue(tokenKey, '') === value) return value || null;
+            this.setValue(tokenKey, value);
+            this.setValue(this.capturedAtKey(tokenKey), this.now());
+            try { console.log(`✅ 已捕获${label}令牌`); } catch {}
+            return value;
+        }
+
+        clearToken(tokenKey) {
+            this.deleteValue(tokenKey);
+            this.deleteValue(this.capturedAtKey(tokenKey));
+        }
+
+        async waitForToken(tokenKey, options = {}) {
+            const timeoutMs = Math.max(0, Number(options.timeoutMs ?? this.waitTimeoutMs));
+            const intervalMs = Math.max(1, Number(options.intervalMs ?? this.pollIntervalMs));
+            const startedAt = Number(this.now());
+            const startedRealAt = Date.now();
+            while (true) {
+                if (typeof this.tokenProvider === 'function') {
+                    const provided = await this.tokenProvider(tokenKey);
+                    if (provided) return String(provided);
+                }
+                const token = this.getToken(tokenKey);
+                if (token) return token;
+                if (options.signal?.aborted) return null;
+                const clockElapsed = Number(this.now()) - startedAt;
+                const elapsed = Math.max(Number.isFinite(clockElapsed) ? clockElapsed : 0, Date.now() - startedRealAt);
+                if (timeoutMs === 0 || elapsed >= timeoutMs) return null;
+                await this.sleep(Math.min(intervalMs, timeoutMs));
+            }
+        }
+
+        getSecret(secretKey = RuntimeConfig.bridgeSecretKey) {
+            return String(this.getValue(secretKey, '') || '').trim();
+        }
+
+        setSecret(secretKey, secret) {
+            const value = String(secret || '').trim();
+            if (value) this.setValue(secretKey, value);
+            else this.deleteValue(secretKey);
+            return value;
+        }
+
+        clearSecret(secretKey = RuntimeConfig.bridgeSecretKey) {
+            this.deleteValue(secretKey);
+        }
+
+        get(tokenKey) {
+            return this.getToken(tokenKey);
+        }
+
+        set(tokenKey, token, label = tokenKey) {
+            return this.saveToken(tokenKey, token, label);
+        }
+
+        clear(tokenKey) {
+            return this.clearToken(tokenKey);
+        }
+
+        wait(tokenKey, options = {}) {
+            return this.waitForToken(tokenKey, options);
+        }
     }
 
-    function clearStoredToken(tokenKey) {
-        GM_deleteValue(tokenKey);
-        GM_deleteValue(tokenCapturedAtKey(tokenKey));
+    class BridgeClient {
+        constructor(options = {}) {
+            this.fetchImpl = options.fetch || options.fetchImpl || options.request || globalThis.fetch;
+            this.secretProvider = options.getSecret || null;
+            this.credentials = options.credentials || new CredentialStore({
+                getValue: options.getValue,
+                setValue: options.setValue,
+                deleteValue: options.deleteValue,
+                storage: options.storage
+            });
+            const storage = options.storage || {};
+            this.getValue = options.getValue || options.gmGet || storage.get || ((key, fallback) => GM_getValue(key, fallback));
+            this.setValue = options.setValue || options.gmSet || storage.set || ((key, value) => GM_setValue(key, value));
+            this.deleteValue = options.deleteValue || options.gmDelete || storage.delete || (key => GM_deleteValue(key));
+            this.defaultUrl = options.defaultUrl || RuntimeConfig.defaultBridgeUrl;
+            this.urlKey = options.urlKey || RuntimeConfig.bridgeUrlKey;
+            this.secretKey = options.secretKey || RuntimeConfig.bridgeSecretKey;
+            this.normalizeUrl = options.normalizeUrl || BridgeClient.normalizeUrl;
+            this.configuredUrl = this._readConfiguredUrl();
+            this.activeUrl = this.configuredUrl;
+            this.baseUrl = this.activeUrl;
+        }
+
+        static normalizeUrl(value) {
+            let normalized = String(value || '').trim();
+            if (!normalized) throw new Error('后端地址不能为空');
+            if (!/^https?:\/\//i.test(normalized)) normalized = `http://${normalized}`;
+            const url = new URL(normalized);
+            if (!['http:', 'https:'].includes(url.protocol)) {
+                throw new Error('后端地址仅支持 http:// 或 https://');
+            }
+            return url.toString().replace(/\/+$/, '');
+        }
+
+        _readConfiguredUrl() {
+            try { return this.normalizeUrl(this.getValue(this.urlKey, this.defaultUrl)); } catch {
+                this.deleteValue(this.urlKey);
+                return this.normalizeUrl(this.defaultUrl);
+            }
+        }
+
+        urlCandidates() {
+            const candidates = [this.configuredUrl];
+            if (!/\/api\/v1$/i.test(this.configuredUrl)) candidates.push(`${this.configuredUrl}/api/v1`);
+            return [...new Set(candidates)];
+        }
+
+        headers(extra = {}) {
+            const headers = {};
+            if (extra && typeof extra.entries === 'function') {
+                for (const [name, value] of extra.entries()) headers[name] = value;
+            } else Object.assign(headers, extra || {});
+            const result = { 'X-AI-Chat-Memory-Client': 'userscript-v1', ...headers };
+            const secret = this.secretProvider ? this.secretProvider(this.secretKey) : this.credentials.getSecret(this.secretKey);
+            if (secret) result['X-AI-Chat-Memory-Secret'] = secret;
+            return result;
+        }
+
+        _secretError() {
+            return this.credentials.getSecret(this.secretKey)
+                ? '本地服务密钥错误，请通过脚本菜单重新填写密钥'
+                : '本地服务已启用密钥验证，请通过脚本菜单填写密钥';
+        }
+
+        async _responseText(response) {
+            const readable = typeof response?.clone === 'function' ? response.clone() : response;
+            return typeof readable?.text === 'function' ? readable.text() : '';
+        }
+
+        _url(path, base = this.activeUrl) {
+            const value = String(path || '');
+            return /^https?:\/\//i.test(value) ? value : `${base}${value.startsWith('/') ? value : `/${value}`}`;
+        }
+
+        async request(path, options = {}) {
+            if (typeof this.fetchImpl !== 'function') throw new Error('本地服务 fetch 不可用');
+            const response = await this.fetchImpl(this._url(path), {
+                ...options,
+                headers: this.headers(options.headers)
+            });
+            if (response?.status === 403) {
+                const reason = await this._responseText(response);
+                if (reason === 'invalid_secret') throw new Error(this._secretError());
+                throw new Error(`本地服务拒绝请求: ${reason || '安全策略不匹配'}`);
+            }
+            return response;
+        }
+
+        fetch(path, options = {}) {
+            return this.request(path, options);
+        }
+
+        async checkServer() {
+            let lastError = null;
+            for (const candidate of this.urlCandidates()) {
+                try {
+                    const response = await this.fetchImpl(`${candidate}/health`, { headers: this.headers() });
+                    if (response.status === 403) {
+                        const reason = await this._responseText(response);
+                        if (reason === 'invalid_secret') return { state: 'secret', message: this._secretError() };
+                        return { state: 'rejected', message: `本地服务拒绝请求: ${reason || '安全策略不匹配'}` };
+                    }
+                    if (response.ok) {
+                        this.activeUrl = candidate;
+                        this.baseUrl = candidate;
+                        return { state: 'connected', url: candidate };
+                    }
+                    lastError = `HTTP ${response.status}`;
+                } catch (error) {
+                    lastError = error?.message || String(error);
+                }
+            }
+            return { state: 'unreachable', message: lastError || '无法连接本地服务' };
+        }
+
+        check() {
+            return this.checkServer();
+        }
+
+        health() {
+            return this.checkServer();
+        }
+
+        async json(path, options = {}) {
+            const response = await this.request(path, options);
+            if (!response.ok) throw new Error(`请求失败 ${response.status}: ${await this._responseText(response)}`);
+            return response.json();
+        }
+
+        setUrl(value) {
+            const normalized = this.normalizeUrl(value);
+            this.setValue(this.urlKey, normalized);
+            this.configuredUrl = normalized;
+            this.activeUrl = normalized;
+            this.baseUrl = normalized;
+            return normalized;
+        }
+
+        resetUrl() {
+            this.deleteValue(this.urlKey);
+            this.configuredUrl = this.normalizeUrl(this.defaultUrl);
+            this.activeUrl = this.configuredUrl;
+            this.baseUrl = this.activeUrl;
+        }
     }
 
     // ===== 适配器基类 =====
@@ -120,10 +854,41 @@
         needsToken = false;
         tokenKey = '';
 
+        constructor(options = {}) {
+            this.fetchImpl = options.fetch || options.fetchImpl || globalThis.fetch;
+            this.request = options.request || options.requestJson || null;
+            this.window = options.window || globalThis;
+            this.xhrFactory = options.xhrFactory || (() => new this.window.XMLHttpRequest());
+            this.credentials = options.credentials || new CredentialStore();
+            this.location = options.location || globalThis.location || { pathname: '' };
+            this.sleep = options.sleep || (ms => new Promise(resolve => setTimeout(resolve, ms)));
+            this.tokenWaitOptions = options.tokenWaitOptions || {};
+            this.randomUUID = options.randomUUID || (() => globalThis.crypto?.randomUUID?.()
+                || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`);
+            this.tokenProvider = options.tokenProvider || options.getToken || null;
+        }
+
         async getToken() { return null; }
         async fetchAllSessions() { return []; }
         async fetchConversation(id) { return null; }
         getCurrentSessionId() { return null; }
+
+        listSessions() {
+            return this.fetchAllSessions();
+        }
+
+        getConversation(id) {
+            return this.fetchConversation(id);
+        }
+
+        async _fetchJson(url, options = {}) {
+            if (this.request) {
+                const value = await this.request(url, options);
+                return value && typeof value.json === 'function' ? value.json() : value;
+            }
+            const response = await this.fetchImpl(url, options);
+            return response.json();
+        }
     }
 
     // ===== DeepSeek 适配器 =====
@@ -132,10 +897,13 @@
         needsToken = true;
         tokenKey = 'ds_token';
 
-        constructor() {
-            super();
-            this.referenceCacheKey = 'deepseek_reference_cache_v1';
-            this._captureToken();
+        constructor(options = {}) {
+            super(options);
+            this.referenceCacheKey = RuntimeConfig.referenceStorageKey;
+            this.captureStore = options.captureStore || null;
+            this.getValue = options.getValue || ((key, fallback) => GM_getValue(key, fallback));
+            this.setValue = options.setValue || ((key, value) => GM_setValue(key, value));
+            this.autoWaitForToken = options.autoWaitForToken !== false;
         }
 
         _extractReferences(value) {
@@ -165,68 +933,43 @@
             const sessionId = this.getCurrentSessionId();
             const found = this._extractReferences(value);
             if (!sessionId || !found.length) return;
-            const cache = GM_getValue(this.referenceCacheKey, {});
+            const cache = this.getValue(this.referenceCacheKey, {}) || {};
             const merged = new Map((cache[sessionId] || []).map(item => [item.cite_index, item]));
             found.forEach(item => merged.set(item.cite_index, item));
             cache[sessionId] = [...merged.values()].sort((a, b) => a.cite_index - b.cite_index);
-            GM_setValue(this.referenceCacheKey, cache);
+            this.setValue(this.referenceCacheKey, cache);
             console.log(`🔗 DeepSeek: 已缓存 ${cache[sessionId].length} 条网页引用`);
         }
 
         _referencesForSession(sessionId) {
-            return GM_getValue(this.referenceCacheKey, {})[sessionId] || [];
+            return (this.getValue(this.referenceCacheKey, {}) || {})[sessionId] || [];
         }
 
-        _captureToken() {
-            console.log('🔄 令牌窃听器已启动，等待有效 Bearer 令牌...');
+        async getToken(options = {}) {
+            const wait = options.wait ?? this.autoWaitForToken;
+            if (wait) return this.credentials.waitForToken(this.tokenKey, { ...this.tokenWaitOptions, ...options });
+            return this.credentials.getToken(this.tokenKey);
+        }
 
-            const originalFetch = unsafeWindow.fetch;
-            const tokenKey = this.tokenKey;
-            const adapter = this;
-            unsafeWindow.fetch = function(...args) {
-                const options = args[1] || {};
-                const headers = options.headers || {};
-                const auth = typeof headers.get === 'function'
-                    ? headers.get('authorization')
-                    : (headers.Authorization || headers.authorization);
-                const match = typeof auth === 'string' && auth.match(/^Bearer\s+(.+)$/);
-                if (match && match[1].trim() !== '') {
-                    saveToken(tokenKey, match[1], 'DeepSeek');
-                }
-                const request = originalFetch.apply(this, args);
-                request.then(response => response.clone().json().then(json => adapter._cacheReferences(json)).catch(() => {})).catch(() => {});
-                return request;
-            };
-
-            const XHR = unsafeWindow.XMLHttpRequest;
-            const origOpen = XHR.prototype.open;
-            const origSetHeader = XHR.prototype.setRequestHeader;
-            const origSend = XHR.prototype.send;
-
-            XHR.prototype.open = function(method, url) { this._url = url; return origOpen.apply(this, arguments); };
-            XHR.prototype.setRequestHeader = function(h, v) { if (h.toLowerCase() === 'authorization') this._authHeader = v; return origSetHeader.apply(this, arguments); };
-            XHR.prototype.send = function(...args) {
-                if (this._authHeader) {
-                    const match = this._authHeader.match(/^Bearer\s+(.+)$/);
-                    if (match && match[1].trim() !== '') {
-                        saveToken(tokenKey, match[1], 'DeepSeek');
+        async _xhr(url, retry = 0) {
+            const token = await this.getToken({ wait: true });
+            if (this.needsToken && !token) throw new Error('Token 未就绪');
+            if (this.request) {
+                const value = await this.request(url, {
+                    method: 'GET',
+                    headers: {
+                        Authorization: `Bearer ${token}`,
+                        'x-client-version': '1.7.0',
+                        'x-app-version': '20241129.1',
+                        'x-client-locale': 'zh_CN',
+                        'x-client-platform': 'web',
+                        'x-client-timezone-offset': '28800'
                     }
-                }
-                this.addEventListener('load', () => {
-                    try { adapter._cacheReferences(JSON.parse(this.responseText)); } catch (e) {}
                 });
-                return origSend.apply(this, args);
-            };
-        }
-
-        async getToken() {
-            return getStoredToken(this.tokenKey);
-        }
-
-        _xhr(url, retry = 0) {
-            const token = getStoredToken(this.tokenKey);
+                return value && typeof value.json === 'function' ? value.json() : value;
+            }
             return new Promise((resolve, reject) => {
-                const xhr = new unsafeWindow.XMLHttpRequest();
+                const xhr = this.xhrFactory();
                 xhr.open('GET', url);
                 xhr.withCredentials = true;
                 xhr.setRequestHeader('Authorization', `Bearer ${token}`);
@@ -239,7 +982,7 @@
                     if (xhr.status === 429 && retry < 3) {
                         const wait = (retry + 1) * 15000;
                         console.warn(`⚠️ 429限流，${wait/1000}s 后重试 (${retry+1}/3)`);
-                        setTimeout(() => this._xhr(url, retry + 1).then(resolve, reject), wait);
+                        this.sleep(wait).then(() => this._xhr(url, retry + 1).then(resolve, reject), reject);
                         return;
                     }
 
@@ -282,11 +1025,11 @@
         }
 
         async fetchAllSessions() {
-            const token = await this.getToken();
+            const token = await this.getToken({ wait: true });
             if (!token) throw new Error('Token 未就绪');
             const allSessions = [];
 
-            let json = await this._xhr('https://chat.deepseek.com/api/v0/chat_session/fetch_page?lte_cursor.pinned=false');
+            let json = await this.fetchSessionPage();
             let { sessions, hasMore } = this._extractSessionsPage(json);
             allSessions.push(...sessions);
             console.log(`📋 首页 ${sessions.length} 条, hasMore=${hasMore}`);
@@ -294,7 +1037,7 @@
             if (hasMore) {
                 do {
                     const cursor = sessions[sessions.length - 1].updated_at;
-                    json = await this._xhr(`https://chat.deepseek.com/api/v0/chat_session/fetch_page?lte_cursor.pinned=false&lte_cursor.updated_at=${cursor}`);
+                    json = await this.fetchSessionPage(cursor);
                     ({ sessions, hasMore } = this._extractSessionsPage(json));
                     allSessions.push(...sessions);
                     console.log(`📋 本页 ${sessions.length} 条, 累计 ${allSessions.length}, hasMore=${hasMore}`);
@@ -305,10 +1048,24 @@
             return allSessions;
         }
 
+        async fetchSessionPage(cursor = null) {
+            const query = 'https://chat.deepseek.com/api/v0/chat_session/fetch_page?lte_cursor.pinned=false'
+                + (cursor ? `&lte_cursor.updated_at=${encodeURIComponent(cursor)}` : '');
+            return this._xhr(query);
+        }
+
         async fetchConversation(id) {
             const conversation = await this._xhr(`https://chat.deepseek.com/api/v0/chat/history_messages?chat_session_id=${id}`);
-            conversation._references = this._referencesForSession(id);
-            return conversation;
+            if (!this.captureStore) {
+                conversation._references = this._referencesForSession(id);
+                return conversation;
+            }
+            return attachDeepSeekCapture(
+                conversation,
+                id,
+                this.captureStore,
+                this._referencesForSession(id)
+            );
         }
 
         async createOfficialExportTask() {
@@ -324,7 +1081,7 @@
             const walk = value => {
                 if (!value || seen.has(value)) return null;
                 if (typeof value === 'string') {
-                    return /^https?:\/\/.+\.zip(\?|$)/.test(value) ? value : null;
+                    return /^https?:\/\/.+(?:\.zip(?:\?|$)|\/download(?:[/?#]|$))/.test(value) ? value : null;
                 }
                 if (Array.isArray(value)) {
                     for (const item of value) {
@@ -351,7 +1108,7 @@
         }
 
         getCurrentSessionId() {
-            return location.pathname.match(/\/s\/([^/?]+)/)?.[1];
+            return this.location.pathname.match(/\/s\/([^/?]+)/)?.[1];
         }
     }
 
@@ -362,38 +1119,40 @@
         apiParams = 'version_code=20800&language=zh&device_platform=web&aid=497858&real_aid=497858&pkg_type=release_version&device_id=0&pc_version=3.5.9&samantha_web=1&use-olympus-account=1';
 
         async fetchAllSessions() {
-            const res = await fetch(`https://www.doubao.com/im/chain/recent_conv?${this.apiParams}`, {
+            const url = `https://www.doubao.com/im/chain/recent_conv?${this.apiParams}`;
+            const options = {
                 method: 'POST',
                 headers: { 'content-type': 'application/json; encoding=utf-8' },
                 body: JSON.stringify({
                     cmd: 3200,
                     uplink_body: { pull_recent_conv_chain_uplink_body: { limit: 100, api_version: 1, direction: 3, option: { not_need_message: true, need_complete_conversation: true } } },
-                    sequence_id: crypto.randomUUID(),
+                    sequence_id: this.randomUUID(),
                     channel: 2,
                     version: "1"
                 })
-            });
-            const json = await res.json();
+            };
+            const json = await this._fetchJson(url, options);
             return json?.downlink_body?.pull_recent_conv_chain_downlink_body?.cells || [];
         }
 
         async fetchConversation(id) {
-            const res = await fetch(`https://www.doubao.com/im/chain/single?${this.apiParams}`, {
+            const url = `https://www.doubao.com/im/chain/single?${this.apiParams}`;
+            const options = {
                 method: 'POST',
                 headers: { 'content-type': 'application/json; encoding=utf-8' },
                 body: JSON.stringify({
                     cmd: 3100,
                     uplink_body: { pull_singe_chain_uplink_body: { conversation_id: id, conversation_type: 3, anchor_index: 9007199254740991, direction: 1, limit: 1000 } },
-                    sequence_id: crypto.randomUUID(),
+                    sequence_id: this.randomUUID(),
                     channel: 2,
                     version: "1"
                 })
-            });
-            return res.json();
+            };
+            return this._fetchJson(url, options);
         }
 
         getCurrentSessionId() {
-            return location.pathname.match(/\/chat\/(\d+)/)?.[1];
+            return this.location.pathname.match(/\/chat\/(\d+)/)?.[1];
         }
     }
 
@@ -403,37 +1162,45 @@
         needsToken = true;
         tokenKey = 'kimi_token';
 
-        constructor() {
-            super();
-            this._captureToken();
+        constructor(options = {}) {
+            super(options);
+            this.autoWaitForToken = options.autoWaitForToken !== false;
+            if (options.autoCaptureToken !== false && options.window) this.installTokenCapture(options.window);
         }
 
-        _captureToken() {
-            const originalFetch = unsafeWindow.fetch;
+        installTokenCapture(windowObject = globalThis) {
+            const originalFetch = windowObject.fetch;
+            if (typeof originalFetch !== 'function' || originalFetch.__acmCredentialWrapped) return;
             const tokenKey = this.tokenKey;
-            unsafeWindow.fetch = function(...args) {
+            const credentials = this.credentials;
+            windowObject.fetch = function(...args) {
                 try {
                     const options = args[1] || {};
-                    let auth = null;
-                    if (options.headers) {
-                        auth = typeof options.headers.get === 'function'
-                            ? options.headers.get('authorization')
-                            : (options.headers.authorization || options.headers.Authorization);
-                    }
+                    const headers = options.headers || args[0]?.headers;
+                    const auth = headers && typeof headers.get === 'function'
+                        ? headers.get('authorization')
+                        : headers?.authorization || headers?.Authorization;
                     const match = typeof auth === 'string' && auth.match(/^Bearer\s+(.+)$/);
                     if (match && match[1].trim() !== '') {
-                        saveToken(tokenKey, match[1], 'Kimi');
+                        credentials.saveToken(tokenKey, match[1], 'Kimi');
                     }
-                } catch(e) {}
+                } catch {}
                 return originalFetch.apply(this, args);
             };
+            windowObject.fetch.__acmCredentialWrapped = true;
+            windowObject.fetch.__acmOriginal = originalFetch;
         }
 
-        async getToken() { return getStoredToken(this.tokenKey); }
+        async getToken(options = {}) {
+            const wait = options.wait ?? this.autoWaitForToken;
+            if (wait) return this.credentials.waitForToken(this.tokenKey, { ...this.tokenWaitOptions, ...options });
+            return this.credentials.getToken(this.tokenKey);
+        }
 
         async _fetch(url, body) {
-            const token = getStoredToken(this.tokenKey);
-            const res = await fetch(url, {
+            const token = await this.getToken({ wait: true });
+            if (this.needsToken && !token) throw new Error('Kimi Token 未就绪');
+            const options = {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
@@ -442,7 +1209,13 @@
                 },
                 credentials: 'include',
                 body: JSON.stringify(body)
-            });
+            };
+            if (this.request) {
+                const value = await this.request(url, options);
+                if (value?.status === 429) throw new Error('Kimi 429 限流');
+                return value && typeof value.json === 'function' ? value.json() : value;
+            }
+            const res = await this.fetchImpl(url, options);
             if (res.status === 429) throw new Error('Kimi 429 限流');
             return res.json();
         }
@@ -470,233 +1243,266 @@
         }
 
         getCurrentSessionId() {
-            return location.pathname.match(/\/chat\/([^/?]+)/)?.[1];
+            return this.location.pathname.match(/\/chat\/([^/?]+)/)?.[1];
         }
     }
 
-    // ===== 核心功能 =====
-    const adapter = PLATFORM === 'deepseek' ? new DeepSeekAdapter()
-                  : PLATFORM === 'kimi' ? new KimiAdapter()
-                  : new DoubaoAdapter();
-
-    GM_registerMenuCommand('设置后端地址', () => {
-        const value = prompt('请输入后端地址；可省略 http:// 和 /api/v1', CONFIGURED_BRIDGE_URL);
-        if (value === null) return;
-        try {
-            GM_setValue(BRIDGE_URL_KEY, normalizeBridgeUrl(value));
-            alert('后端地址已保存，刷新页面后生效。');
-        } catch (error) {
-            alert(`后端地址无效: ${error.message}`);
+    class SyncCoordinator {
+        constructor(options = {}) {
+            this.adapter = options.adapter;
+            this.platform = options.platform || this.adapter?.platform || PLATFORM;
+            this.bridge = options.bridgeClient || options.bridge || null;
+            this.ui = options.ui || null;
+            this.fetchImpl = options.fetch || globalThis.fetch;
+            this.sleep = options.sleep || (ms => new Promise(resolve => setTimeout(resolve, ms)));
+            this.detailConcurrency = Math.max(1, Number(options.detailConcurrency || 4));
+            this.detailDelayMs = Math.max(0, Number(options.detailDelayMs ?? 50));
+            this.exportPollAttempts = Math.max(1, Number(options.exportPollAttempts || 72));
+            this.exportPollDelayMs = Math.max(0, Number(options.exportPollDelayMs ?? 5000));
+            this.stopped = false;
+            this.abortController = null;
         }
-    });
-    GM_registerMenuCommand('重置后端地址', () => {
-        GM_deleteValue(BRIDGE_URL_KEY);
-        alert(`后端地址已重置为 ${DEFAULT_BRIDGE_URL}，刷新页面后生效。`);
-    });
-    GM_registerMenuCommand('设置本地服务密钥', () => {
-        const value = prompt('请输入桌面端生成的随机密钥；留空表示清除', GM_getValue(BRIDGE_SECRET_KEY, ''));
-        if (value === null) return;
-        const secret = value.trim();
-        if (secret) GM_setValue(BRIDGE_SECRET_KEY, secret);
-        else GM_deleteValue(BRIDGE_SECRET_KEY);
-        alert(secret ? '本地服务密钥已保存。' : '本地服务密钥已清除。');
-    });
-    if (adapter.tokenKey) {
-        GM_registerMenuCommand('清除已保存令牌', () => {
-            clearStoredToken(adapter.tokenKey);
-            alert(`${PLATFORM} 令牌已清除，将自动捕获新的令牌。`);
-        });
-    }
 
-    async function checkServer() {
-        let lastError = null;
-        for (const candidate of bridgeUrlCandidates()) {
+        _status(text) {
+            try { this.ui?.setStatus(text); } catch {}
+        }
+
+        _progress(current, total, text) {
+            try { this.ui?.setProgress(current, total, text); } catch {}
+        }
+
+        _isStopped() {
+            return this.stopped || Boolean(this.abortController?.signal?.aborted);
+        }
+
+        stop() {
+            this.stopped = true;
+            try { this.abortController?.abort(); } catch {}
+            this._status('⏹ 已停止');
+        }
+
+        stopSync() {
+            this.stop();
+        }
+
+        static toEpochSeconds(value) {
+            if (value === null || value === undefined || value === '') return 0;
+            const numeric = Number(value);
+            if (Number.isFinite(numeric)) return Math.abs(numeric) > 1e11 ? numeric / 1000 : numeric;
+            const milliseconds = Date.parse(String(value));
+            return Number.isFinite(milliseconds) ? milliseconds / 1000 : 0;
+        }
+
+        toEpochSeconds(value) {
+            return SyncCoordinator.toEpochSeconds(value);
+        }
+
+        async fetchSessionsIncremental(lastUpdatedAt) {
+            const token = this.adapter?.needsToken ? await this.adapter.getToken({ wait: true }) : true;
+            if (this.adapter?.needsToken && !token) throw new Error('Token 未就绪');
+            const newSessions = [];
+            const lastUpdatedSeconds = this.toEpochSeconds(lastUpdatedAt);
+            let cursor = null;
+            let hasMore = true;
+
+            while (hasMore && !this._isStopped()) {
+                const json = this.adapter.fetchSessionPage
+                    ? await this.adapter.fetchSessionPage(cursor)
+                    : await this.adapter._xhr(`https://chat.deepseek.com/api/v0/chat_session/fetch_page?lte_cursor.pinned=false${cursor ? `&lte_cursor.updated_at=${encodeURIComponent(cursor)}` : ''}`);
+                const page = this.adapter._extractSessionsPage
+                    ? this.adapter._extractSessionsPage(json, '增量会话列表')
+                    : {
+                        sessions: json?.sessions || json?.data?.biz_data?.chat_sessions || [],
+                        hasMore: Boolean(json?.hasMore ?? json?.has_more ?? json?.data?.biz_data?.has_more)
+                    };
+                const sessions = page.sessions || [];
+                hasMore = Boolean(page.hasMore);
+                let hitOld = false;
+                for (const session of sessions) {
+                    const updatedSeconds = this.toEpochSeconds(session.updated_at);
+                    if (session.pinned) {
+                        if (updatedSeconds > lastUpdatedSeconds) newSessions.push(session);
+                        continue;
+                    }
+                    if (lastUpdatedSeconds && updatedSeconds <= lastUpdatedSeconds) {
+                        hitOld = true;
+                        break;
+                    }
+                    newSessions.push(session);
+                }
+                if (hitOld || !sessions.length) break;
+                cursor = sessions[sessions.length - 1].updated_at;
+            }
+            return newSessions;
+        }
+
+        async selectSessions(lastUpdatedAt) {
+            if (!lastUpdatedAt) {
+                this._status('本地为空，全量拉取...');
+                return this.adapter.fetchAllSessions();
+            }
+            if (this.platform === 'deepseek' && (this.adapter.fetchSessionPage || this.adapter._xhr)) {
+                this._status('增量拉取...');
+                return this.fetchSessionsIncremental(lastUpdatedAt);
+            }
+            return this.adapter.fetchAllSessions();
+        }
+
+        _sessionId(session) {
+            return this.platform === 'doubao' ? session?.conversation?.conversation_id : session?.id;
+        }
+
+        async syncDeepSeekOfficialExport() {
+            const token = await this.adapter.getToken({ wait: true });
+            if (!token) throw new Error('Token 未就绪');
+
+            this._progress(1, 4, '创建官方导出任务...');
+            await this.adapter.createOfficialExportTask();
+            if (this._isStopped()) return { state: 'stopped' };
+
+            let zipUrl = null;
+            for (let attempt = 1; attempt <= this.exportPollAttempts && !this._isStopped(); attempt++) {
+                this._progress(2, 4, `等待官方导出 ${attempt}/${this.exportPollAttempts}`);
+                const status = await this.adapter.fetchOfficialExportStatus();
+                zipUrl = this.adapter.extractOfficialZipUrl(status);
+                if (zipUrl) break;
+                this._status(this.adapter.describeExportStatus(status));
+                await this.sleep(this.exportPollDelayMs);
+            }
+            if (this._isStopped()) return { state: 'stopped' };
+            if (!zipUrl) throw new Error('官方导出超时，未获取到 ZIP 下载地址');
+
+            this._progress(3, 4, '下载官方 ZIP...');
+            const zipResponse = await this.fetchImpl(zipUrl, {
+                method: 'GET', credentials: 'omit', mode: 'cors', signal: this.abortController?.signal
+            });
+            if (!zipResponse.ok) throw new Error(`ZIP 下载失败 ${zipResponse.status}: ${await zipResponse.text()}`);
+            const zipBlob = await zipResponse.blob();
+            if (!zipBlob.size) throw new Error('ZIP 下载为空');
+            if (this._isStopped()) return { state: 'stopped' };
+
+            this._progress(4, 4, '导入官方 ZIP...');
+            const importResponse = await this.bridge.request('/sessions/import/deepseek-export', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/zip' },
+                body: zipBlob,
+                signal: this.abortController?.signal
+            });
+            if (!importResponse.ok) throw new Error(`官方 ZIP 导入失败 ${importResponse.status}: ${await importResponse.text()}`);
+            const data = await importResponse.json();
+            this._status(`✅ 官方导入 ${data.imported} 个, 跳过 ${data.skipped} 个`);
+            return data;
+        }
+
+        async fetchDetailsAndPush(sessions) {
+            if (!sessions.length) {
+                this._status('✅ 无新会话需要同步');
+                return { imported: 0, skipped: 0, sessions: [] };
+            }
+            const queue = [...sessions];
+            const results = [];
+            let counter = 0;
+            const worker = async () => {
+                while (queue.length && !this._isStopped()) {
+                    const session = queue.shift();
+                    const id = this._sessionId(session);
+                    const number = ++counter;
+                    this._progress(number, sessions.length, `获取详情 ${number}/${sessions.length}`);
+                    const conversation = await this.adapter.fetchConversation(id);
+                    results.push({ ...session, _conversation: conversation });
+                    if (this.detailDelayMs) await this.sleep(this.detailDelayMs);
+                }
+            };
+            await Promise.all(Array.from({ length: this.detailConcurrency }, worker));
+            if (this._isStopped()) return { state: 'stopped', sessions: results };
+
+            this._progress(1, 1, '推送到服务端...');
+            const response = await this.bridge.request('/sessions/import', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ platform: this.platform, sessions: results }),
+                signal: this.abortController?.signal
+            });
+            if (!response.ok) throw new Error(`导入失败 ${response.status}: ${await response.text()}`);
+            const data = await response.json();
+            this._status(`✅ 导入 ${data.imported} 个, 跳过 ${data.skipped} 个`);
+            return { ...data, sessions: results };
+        }
+
+        async sync(fullSync = false) {
+            if (!this.bridge) throw new Error('BridgeClient 未配置');
+            this.stopped = false;
+            let connection;
             try {
-                const res = await fetch(`${candidate}/health`, { headers: bridgeHeaders() });
-                if (res.status === 403) {
-                    const reason = await res.text();
-                    if (reason === 'invalid_secret') return { state: 'secret', message: secretError() };
-                    return { state: 'rejected', message: `本地服务拒绝请求: ${reason || '安全策略不匹配'}` };
-                }
-                if (res.ok) {
-                    activeBridgeUrl = candidate;
-                    return { state: 'connected', url: candidate };
-                }
-                lastError = `HTTP ${res.status}`;
+                connection = await this.bridge.checkServer();
             } catch (error) {
-                lastError = error.message || String(error);
+                this._status('❌ ' + (error?.message || String(error)));
+                return { state: 'error', error };
             }
-        }
-        return { state: 'unreachable', message: lastError || '无法连接本地服务' };
-    }
-
-    async function fetchSessionsIncremental(lastUpdatedAt) {
-        const token = await adapter.getToken();
-        if (adapter.needsToken && !token) throw new Error('Token 未就绪');
-        const newSessions = [];
-        let cursor = null, hasMore = true;
-
-        while (hasMore) {
-            let url = 'https://chat.deepseek.com/api/v0/chat_session/fetch_page?lte_cursor.pinned=false';
-            if (cursor) url += `&lte_cursor.updated_at=${cursor}`;
-            const json = await adapter._xhr(url);
-            const page = adapter._extractSessionsPage(json, '增量会话列表');
-            const sessions = page.sessions;
-            hasMore = page.hasMore;
-
-            let hitOld = false;
-            const lastUpdatedSeconds = toEpochSeconds(lastUpdatedAt);
-            for (const s of sessions) {
-                const sessionUpdatedSeconds = toEpochSeconds(s.updated_at);
-                if (s.pinned) {
-                    if (sessionUpdatedSeconds > lastUpdatedSeconds) newSessions.push(s);
-                    continue;
-                }
-                if (lastUpdatedSeconds && sessionUpdatedSeconds <= lastUpdatedSeconds) {
-                    hitOld = true;
-                    break;
-                }
-                newSessions.push(s);
+            if (connection.state !== 'connected') {
+                this._status(`❌ ${connection.message}`);
+                return { state: connection.state, connection };
             }
-            if (hitOld || !sessions.length) break;
-            cursor = sessions[sessions.length - 1].updated_at;
-            console.log(`📋 增量: 本页 ${sessions.length} 条, 新会话累计 ${newSessions.length}`);
-        }
-        return newSessions;
-    }
-
-    function toEpochSeconds(value) {
-        if (value === null || value === undefined || value === '') return 0;
-        const numeric = Number(value);
-        if (Number.isFinite(numeric)) return Math.abs(numeric) > 1e11 ? numeric / 1000 : numeric;
-        const milliseconds = Date.parse(String(value));
-        return Number.isFinite(milliseconds) ? milliseconds / 1000 : 0;
-    }
-
-    let syncAbort = false;
-
-    async function syncDeepSeekOfficialExport() {
-        const token = await adapter.getToken();
-        if (!token) throw new Error('Token 未就绪');
-
-        ui.setProgress(1, 4, '创建官方导出任务...');
-        await adapter.createOfficialExportTask();
-        if (syncAbort) { ui.setStatus('⏹ 已停止'); return; }
-
-        let zipUrl = null;
-        const maxAttempts = 72;
-        for (let attempt = 1; attempt <= maxAttempts && !syncAbort; attempt++) {
-            ui.setProgress(2, 4, `等待官方导出 ${attempt}/${maxAttempts}`);
-            const status = await adapter.fetchOfficialExportStatus();
-            zipUrl = adapter.extractOfficialZipUrl(status);
-            if (zipUrl) break;
-            ui.setStatus(adapter.describeExportStatus(status));
-            await new Promise(r => setTimeout(r, 5000));
-        }
-        if (syncAbort) { ui.setStatus('⏹ 已停止'); return; }
-        if (!zipUrl) throw new Error('官方导出超时，未获取到 ZIP 下载地址');
-
-        ui.setProgress(3, 4, '下载官方 ZIP...');
-        const zipRes = await fetch(zipUrl, { method: 'GET', credentials: 'omit', mode: 'cors' });
-        if (!zipRes.ok) throw new Error(`ZIP 下载失败 ${zipRes.status}: ${await zipRes.text()}`);
-        const zipBlob = await zipRes.blob();
-        if (!zipBlob.size) throw new Error('ZIP 下载为空');
-        if (syncAbort) { ui.setStatus('⏹ 已停止'); return; }
-
-        ui.setProgress(4, 4, '导入官方 ZIP...');
-        const importRes = await bridgeFetch('/sessions/import/deepseek-export', {
-            method: 'POST',
-            headers: bridgeHeaders({ 'Content-Type': 'application/zip' }),
-            body: zipBlob
-        });
-        if (!importRes.ok) throw new Error(`官方 ZIP 导入失败 ${importRes.status}: ${await importRes.text()}`);
-        const data = await importRes.json();
-        ui.setStatus(`✅ 官方导入 ${data.imported} 个, 跳过 ${data.skipped} 个`);
-    }
-
-    async function fetchDetailsAndPush(sessions) {
-        if (!sessions.length) {
-            ui.setStatus('✅ 无新会话需要同步');
-            return;
-        }
-        const CONCURRENCY = 4, DELAY = 50;
-        const queue = [...sessions];
-        const results = [];
-        let counter = 0;
-
-        async function worker() {
-            while (queue.length > 0 && !syncAbort) {
-                const s = queue.shift();
-                const id = PLATFORM === 'doubao' ? s.conversation?.conversation_id : s.id;
-                const n = ++counter;
-                ui.setProgress(n, sessions.length, `获取详情 ${n}/${sessions.length}`);
-                const conv = await adapter.fetchConversation(id);
-                results.push({ ...s, _conversation: conv });
-                await new Promise(r => setTimeout(r, DELAY));
-            }
-        }
-        await Promise.all(Array(CONCURRENCY).fill().map(() => worker()));
-        if (syncAbort) { ui.setStatus('⏹ 已停止'); return; }
-
-        ui.setProgress(1, 1, '推送到服务端...');
-        const res = await bridgeFetch('/sessions/import', {
-            method: 'POST',
-            headers: bridgeHeaders({ 'Content-Type': 'application/json' }),
-            body: JSON.stringify({ platform: PLATFORM, sessions: results })
-        });
-        if (!res.ok) throw new Error(`导入失败 ${res.status}: ${await res.text()}`);
-        const data = await res.json();
-        ui.setStatus(`✅ 导入 ${data.imported} 个, 跳过 ${data.skipped} 个`);
-    }
-
-    async function syncToServer(fullSync = false) {
-        const connection = await checkServer();
-        if (connection.state !== 'connected') {
-            ui.setStatus(`❌ ${connection.message}`);
-            return;
-        }
-        syncAbort = false;
-        ui.setSyncing(true);
-        try {
-            let sessions;
-            if (fullSync) {
-                if (PLATFORM === 'deepseek') {
-                    await syncDeepSeekOfficialExport();
-                    return;
-                }
-                ui.setStatus('全量拉取会话列表...');
-                sessions = await adapter.fetchAllSessions();
-                ui.setStatus(`全量获取 ${sessions.length} 个会话`);
-            } else {
-                ui.setStatus('查询同步状态...');
-                const statusRes = await bridgeFetch(`/sessions/sync-status?platform=${PLATFORM}`, { headers: bridgeHeaders() });
-                if (!statusRes.ok) throw new Error(`同步状态查询失败 ${statusRes.status}: ${await statusRes.text()}`);
-                const { last_updated_at } = await statusRes.json();
-
-                if (!last_updated_at) {
-                    ui.setStatus('本地为空，全量拉取...');
-                    sessions = await adapter.fetchAllSessions();
-                } else if (PLATFORM === 'deepseek') {
-                    ui.setStatus('增量拉取...');
-                    sessions = await fetchSessionsIncremental(last_updated_at);
+            if (this._isStopped()) return { state: 'stopped' };
+            this.abortController = typeof AbortController === 'function' ? new AbortController() : null;
+            try { this.ui?.setSyncing(true); } catch {}
+            try {
+                if (fullSync && this.platform === 'deepseek') return await this.syncDeepSeekOfficialExport();
+                let sessions;
+                if (fullSync) {
+                    this._status('全量拉取会话列表...');
+                    sessions = await this.adapter.fetchAllSessions();
+                    this._status(`全量获取 ${sessions.length} 个会话`);
                 } else {
-                    sessions = await adapter.fetchAllSessions();
+                    this._status('查询同步状态...');
+                    const statusResponse = await this.bridge.request(`/sessions/sync-status?platform=${encodeURIComponent(this.platform)}`);
+                    if (!statusResponse.ok) throw new Error(`同步状态查询失败 ${statusResponse.status}: ${await statusResponse.text()}`);
+                    const status = await statusResponse.json();
+                    sessions = await this.selectSessions(status.last_updated_at);
+                    this._status(`需同步 ${sessions.length} 个会话`);
                 }
-                ui.setStatus(`需同步 ${sessions.length} 个会话`);
+                if (this._isStopped()) return { state: 'stopped', sessions: [] };
+                return this.fetchDetailsAndPush(sessions);
+            } catch (error) {
+                if (this._isStopped()) return { state: 'stopped' };
+                this._status('❌ ' + (error?.message || String(error)));
+                return { state: 'error', error };
+            } finally {
+                try { this.ui?.setSyncing(false); } catch {}
+                this.abortController = null;
             }
-            if (syncAbort) { ui.setStatus('⏹ 已停止'); return; }
-            await fetchDetailsAndPush(sessions);
-        } catch (e) {
-            ui.setStatus('❌ ' + e.message);
-        } finally {
-            ui.setSyncing(false);
+        }
+
+        run(fullSync = false) {
+            return this.sync(fullSync);
+        }
+
+        syncToServer(fullSync = false) {
+            return this.sync(fullSync);
         }
     }
 
-    // ===== UI 面板 =====
-    const ui = (() => {
-        const panel = document.createElement('div');
-        panel.innerHTML = `
+    class SyncPanel {
+        constructor(options = {}) {
+            this.document = options.document || globalThis.document || null;
+            this.onSync = options.onSync || (() => {});
+            this.onFullSync = options.onFullSync || (() => {});
+            this.onStop = options.onStop || (() => {});
+            this.onCheckServer = options.onCheckServer || null;
+            this.setIntervalImpl = options.setInterval || globalThis.setInterval;
+            this.clearIntervalImpl = options.clearInterval || globalThis.clearInterval;
+            this.setTimeoutImpl = options.setTimeout || globalThis.setTimeout || (() => {});
+            this.pollIntervalMs = Number(options.pollIntervalMs || 18000);
+            this.panel = null;
+            this.pollTimer = null;
+            this.mounted = false;
+            if (options.autoMount !== false && this.document?.createElement) this.mount();
+        }
+
+        mount() {
+            if (this.mounted || !this.document?.createElement) return this;
+            const panel = this.document.createElement('div');
+            panel.innerHTML = `
         <div id="acm-panel" style="position:fixed;top:70px;right:70px;z-index:99999;background:#fff;border:1px solid #d0d0d0;box-shadow:0 2px 8px rgba(0,0,0,0.12);border-radius:6px;padding:14px 18px;font-family:system-ui,sans-serif;font-size:13px;color:#333;width:260px;">
             <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
                 <span style="font-weight:600;font-size:14px;">🧠 AI Chat Memory</span>
@@ -711,77 +1517,211 @@
                 <button id="acm-full-btn" style="flex:1;padding:6px 0;border:none;border-radius:4px;background:#2196f3;color:#fff;cursor:pointer;font-size:13px;">全量同步</button>
             </div>
             <div style="font-size:12px;color:#aaa;">服务: <span id="acm-srv">检测中...</span></div>
-        </div>`;
-        document.addEventListener('DOMContentLoaded', () => document.body.appendChild(panel));
-        if (document.body) document.body.appendChild(panel);
-
-        const $ = id => panel.querySelector('#' + id);
-        const syncBtn = () => $('acm-sync-btn');
-        const fullBtn = () => $('acm-full-btn');
-        const bar = () => $('acm-bar');
-        const statusLine = () => $('acm-status-line');
-        const srvSpan = () => $('acm-srv');
-
-        // 服务状态轮询
-        async function pollServer() {
-            const connection = await checkServer();
-            const ok = connection.state === 'connected';
-            const el = srvSpan();
-            if (el) {
-                el.textContent = ok ? '🟢 运行中' : connection.state === 'secret' ? '🟡 请填写密钥' : '🔴 连接失败';
-                el.title = ok ? activeBridgeUrl : connection.message;
-                el.style.color = ok ? '#4caf50' : connection.state === 'secret' ? '#ffb300' : '#f44336';
+            </div>`;
+            const host = this.document.body || this.document.documentElement;
+            if (!host) {
+                this.document.addEventListener?.('DOMContentLoaded', () => this.mount(), { once: true });
+                return this;
             }
-            const sb = syncBtn(), fb = fullBtn();
-            if (sb && sb.dataset.syncing !== '1') { sb.disabled = !ok; sb.style.opacity = ok ? '1' : '0.5'; }
-            if (fb && !fb.dataset.fullDisabled) { fb.disabled = !ok; fb.style.opacity = ok ? '1' : '0.5'; }
-        }
-        pollServer();
-        setInterval(pollServer, 18000);
-
-        // 按钮事件
-        const bindOnce = () => {
-            const sb = syncBtn(), fb = fullBtn();
-            if (!sb) return;
-            sb.onclick = () => {
-                if (sb.dataset.syncing === '1') { syncAbort = true; return; }
-                syncToServer(false);
-            };
-            fb.onclick = () => {
-                if (fb.disabled) return;
-                syncToServer(true);
-            };
-            const closeBtn = $('acm-close');
-            if (closeBtn) closeBtn.onclick = () => { $('acm-panel').style.display = 'none'; };
-        };
-        document.addEventListener('DOMContentLoaded', bindOnce);
-        if (document.body) bindOnce();
-
-        return {
-            setProgress(current, total, text) {
-                const pct = Math.round((current / total) * 100);
-                const b = bar(); if (b) b.style.width = pct + '%';
-                const s = statusLine(); if (s) s.textContent = text || `${current}/${total}`;
-            },
-            setStatus(text) {
-                const s = statusLine(); if (!s) return;
-                s.textContent = text;
-                s.style.color = text.includes('❌') ? '#f44336' : text.includes('✅') ? '#4caf50' : '#888';
-            },
-            setSyncing(active) {
-                const sb = syncBtn(), fb = fullBtn(), b = bar();
-                if (!sb) return;
-                if (active) {
-                    sb.textContent = '停止同步'; sb.style.background = '#f44336'; sb.dataset.syncing = '1';
-                    fb.disabled = true; fb.style.opacity = '0.5';
-                } else {
-                    sb.textContent = '开始同步'; sb.style.background = '#4caf50'; sb.dataset.syncing = '0';
-                    fb.disabled = false; fb.style.opacity = '1';
-                    if (b) setTimeout(() => { b.style.width = '0%'; }, 2000);
+            host.appendChild(panel);
+            this.panel = panel;
+            this.mounted = true;
+            const syncButton = this._query('acm-sync-btn');
+            const fullButton = this._query('acm-full-btn');
+            syncButton && (syncButton.onclick = () => {
+                if (syncButton.dataset?.syncing === '1') this.onStop();
+                else this.onSync(false);
+            });
+            fullButton && (fullButton.onclick = () => {
+                if (!fullButton.disabled) this.onFullSync(true);
+            });
+            const closeButton = this._query('acm-close');
+            closeButton && (closeButton.onclick = () => {
+                const root = this._query('acm-panel');
+                if (root) root.style.display = 'none';
+            });
+            if (this.onCheckServer) {
+                void this.pollServer();
+                if (typeof this.setIntervalImpl === 'function') {
+                    this.pollTimer = this.setIntervalImpl(() => void this.pollServer(), this.pollIntervalMs);
                 }
             }
-        };
-    })();
+            return this;
+        }
+
+        _query(id) {
+            return this.panel?.querySelector?.('#' + id) || null;
+        }
+
+        async pollServer() {
+            if (!this.onCheckServer) return null;
+            const connection = await this.onCheckServer();
+            this.setServerStatus(connection);
+            return connection;
+        }
+
+        setServerStatus(connection = {}) {
+            const ok = connection.state === 'connected';
+            const service = this._query('acm-srv');
+            if (service) {
+                service.textContent = ok ? '🟢 运行中' : connection.state === 'secret' ? '🟡 请填写密钥' : '🔴 连接失败';
+                service.title = ok ? connection.url || '' : connection.message || '';
+                service.style.color = ok ? '#4caf50' : connection.state === 'secret' ? '#ffb300' : '#f44336';
+            }
+            const syncButton = this._query('acm-sync-btn');
+            const fullButton = this._query('acm-full-btn');
+            if (syncButton && syncButton.dataset?.syncing !== '1') {
+                syncButton.disabled = !ok;
+                syncButton.style.opacity = ok ? '1' : '0.5';
+            }
+            if (fullButton && !fullButton.dataset?.fullDisabled) {
+                fullButton.disabled = !ok;
+                fullButton.style.opacity = ok ? '1' : '0.5';
+            }
+        }
+
+        setConnection(connection = {}) {
+            this.setServerStatus(connection);
+        }
+
+        setProgress(current, total, text) {
+            const bar = this._query('acm-bar');
+            const status = this._query('acm-status-line');
+            const pct = total ? Math.round((current / total) * 100) : 0;
+            if (bar) bar.style.width = pct + '%';
+            if (status) status.textContent = text || `${current}/${total}`;
+        }
+
+        setStatus(text) {
+            const status = this._query('acm-status-line');
+            if (!status) return;
+            status.textContent = text;
+            status.style.color = String(text).includes('❌') ? '#f44336'
+                : String(text).includes('✅') ? '#4caf50' : '#888';
+        }
+
+        setSyncing(active) {
+            const syncButton = this._query('acm-sync-btn');
+            const fullButton = this._query('acm-full-btn');
+            const bar = this._query('acm-bar');
+            if (!syncButton) return;
+            if (active) {
+                syncButton.textContent = '停止同步';
+                syncButton.style.background = '#f44336';
+                syncButton.dataset.syncing = '1';
+                if (fullButton) {
+                    fullButton.disabled = true;
+                    fullButton.style.opacity = '0.5';
+                }
+            } else {
+                syncButton.textContent = '开始同步';
+                syncButton.style.background = '#4caf50';
+                syncButton.dataset.syncing = '0';
+                if (fullButton) {
+                    fullButton.disabled = false;
+                    fullButton.style.opacity = '1';
+                }
+                if (bar) this.setTimeoutImpl(() => { bar.style.width = '0%'; }, 2000);
+            }
+        }
+
+        destroy() {
+            if (this.pollTimer !== null && typeof this.clearIntervalImpl === 'function') {
+                this.clearIntervalImpl(this.pollTimer);
+            }
+            this.pollTimer = null;
+            this.panel?.remove?.();
+            this.panel = null;
+            this.mounted = false;
+        }
+    }
+
+    const testApi = Object.freeze({
+        RuntimeConfig,
+        JsonTools,
+        CaptureRedactor,
+        SseParser,
+        DeepSeekExchangeClassifier,
+        CaptureStore,
+        NetworkCapture,
+        attachDeepSeekCapture,
+        CredentialStore,
+        BridgeClient,
+        BaseAdapter,
+        DeepSeekAdapter,
+        DoubaoAdapter,
+        KimiAdapter,
+        SyncCoordinator,
+        SyncPanel
+    });
+    if (TEST_MODE) {
+        globalThis.__AI_CHAT_MEMORY_TEST_API__ = testApi;
+        return;
+    }
+
+    // ===== 核心功能 =====
+    const credentialStore = new CredentialStore();
+    const bridgeClient = new BridgeClient({ credentials: credentialStore });
+    const deepSeekCaptureStore = PLATFORM === 'deepseek' ? new CaptureStore() : null;
+    const adapter = PLATFORM === 'deepseek'
+        ? new DeepSeekAdapter({ captureStore: deepSeekCaptureStore, credentials: credentialStore, location })
+        : PLATFORM === 'kimi'
+            ? new KimiAdapter({ credentials: credentialStore, location, fetch: globalThis.fetch, window: unsafeWindow })
+            : new DoubaoAdapter({ location, fetch: globalThis.fetch });
+
+    if (PLATFORM === 'deepseek') {
+        new NetworkCapture({
+            window: unsafeWindow,
+            store: deepSeekCaptureStore,
+            getPath: () => location.pathname,
+            onToken: token => credentialStore.saveToken(adapter.tokenKey, token, 'DeepSeek'),
+            onPayload: payload => adapter._cacheReferences(payload)
+        }).install();
+        console.log('🔄 DeepSeek 网页协议捕获器已启动');
+    }
+
+    GM_registerMenuCommand('设置后端地址', () => {
+        const value = prompt('请输入后端地址；可省略 http:// 和 /api/v1', bridgeClient.configuredUrl);
+        if (value === null) return;
+        try {
+            bridgeClient.setUrl(value);
+            alert('后端地址已保存，刷新页面后生效。');
+        } catch (error) {
+            alert(`后端地址无效: ${error.message}`);
+        }
+    });
+    GM_registerMenuCommand('重置后端地址', () => {
+        bridgeClient.resetUrl();
+        alert(`后端地址已重置为 ${DEFAULT_BRIDGE_URL}，刷新页面后生效。`);
+    });
+    GM_registerMenuCommand('设置本地服务密钥', () => {
+        const value = prompt('请输入桌面端生成的随机密钥；留空表示清除', credentialStore.getSecret(BRIDGE_SECRET_KEY));
+        if (value === null) return;
+        const secret = credentialStore.setSecret(BRIDGE_SECRET_KEY, value);
+        alert(secret ? '本地服务密钥已保存。' : '本地服务密钥已清除。');
+    });
+    if (adapter.tokenKey) {
+        GM_registerMenuCommand('清除已保存令牌', () => {
+            credentialStore.clearToken(adapter.tokenKey);
+            alert(`${PLATFORM} 令牌已清除，将自动捕获新的令牌。`);
+        });
+    }
+
+    let coordinator;
+    const ui = new SyncPanel({
+        document,
+        onSync: () => coordinator.sync(false),
+        onFullSync: () => coordinator.sync(true),
+        onStop: () => coordinator.stop(),
+        onCheckServer: () => bridgeClient.checkServer()
+    });
+    coordinator = new SyncCoordinator({
+        adapter,
+        bridgeClient,
+        platform: PLATFORM,
+        ui,
+        fetch: globalThis.fetch
+    });
 
     console.log('✅ AI Chat Memory UI 已注入');
 })();

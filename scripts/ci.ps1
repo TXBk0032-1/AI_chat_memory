@@ -124,6 +124,10 @@ Invoke-Step "Validate userscript syntax" {
     node --check (Join-Path $Root "userscript/dist/ai-chat-memory.user.js")
 }
 
+Invoke-Step "Run userscript tests" {
+    node --test (Join-Path $Root "userscript/tests/capture.test.mjs")
+}
+
 Invoke-Step "Check Rust formatting" {
     Push-Location $Rust
     try { cargo fmt --check } finally { Pop-Location }
