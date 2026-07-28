@@ -80,6 +80,31 @@ pub enum SyncTrigger {
     Manual,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct BundleChange {
+    pub local_seq: i64,
+    pub key: EntityKey,
+    pub operation: MutationOperation,
+    pub version: EntityVersion,
+    pub content_hash: Option<String>,
+    pub snapshot: Option<NormalizedSessionSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct BundleContents {
+    pub vault_id: String,
+    pub generation_id: String,
+    pub device_id: String,
+    pub start_seq: i64,
+    pub end_seq: i64,
+    pub previous_path: Option<String>,
+    pub previous_sha256: Option<String>,
+    pub previous_end_seq: Option<i64>,
+    pub changes: Vec<BundleChange>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
