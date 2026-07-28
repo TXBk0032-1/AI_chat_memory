@@ -1,5 +1,6 @@
 use crate::{
     error::{AppError, Result},
+    sync::crypto::PayloadProtector,
     sync::types::{
         BundleChange, BundleContents, EntityKey, EntityVersion, MutationOperation,
         NormalizedSessionSnapshot,
@@ -26,6 +27,7 @@ pub enum CompressionAlgorithm {
 #[serde(rename_all = "snake_case")]
 pub enum ProtectionAlgorithm {
     Plain,
+    XChaCha20Poly1305,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -121,7 +123,45 @@ struct BundleChangeWire {
     content_hash: Option<String>,
 }
 
+#[derive(Serialize)]
+struct AuthenticatedHeader<'a> {
+    vault_id: &'a str,
+    generation_id: &'a str,
+    device_id: &'a str,
+    start_seq: i64,
+    end_seq: i64,
+    previous_path: Option<&'a str>,
+    previous_sha256: Option<&'a str>,
+    previous_end_seq: Option<i64>,
+    compression: CompressionAlgorithm,
+    protection: ProtectionAlgorithm,
+    nonce: Option<&'a str>,
+}
+
 pub fn seal_bundle(contents: &BundleContents) -> Result<SealedBundle> {
+    let payload = build_payload(contents)?;
+    seal_payload(contents, payload, ProtectionAlgorithm::Plain, None)
+}
+
+pub fn seal_bundle_protected(
+    contents: &BundleContents,
+    protector: &dyn PayloadProtector,
+    nonce: [u8; 24],
+) -> Result<SealedBundle> {
+    if protector.algorithm() == ProtectionAlgorithm::Plain {
+        return Err(AppError::Crypto(
+            "encrypted bundle requires a non-plain protector".into(),
+        ));
+    }
+    let plaintext = build_payload(contents)?;
+    let nonce_hex = hex::encode(nonce);
+    let aad =
+        authenticated_header_bytes(contents, protector.algorithm(), Some(nonce_hex.as_str()))?;
+    let payload = protector.seal(&aad, &plaintext, nonce)?;
+    seal_payload(contents, payload, protector.algorithm(), Some(nonce_hex))
+}
+
+fn build_payload(contents: &BundleContents) -> Result<Vec<u8>> {
     validate_contents(contents)?;
     let mut changes = Vec::new();
     let mut sessions = HashMap::new();
@@ -165,11 +205,18 @@ pub fn seal_bundle(contents: &BundleContents) -> Result<SealedBundle> {
         }
         builder.finish()?;
     }
-    let payload = zstd::stream::encode_all(Cursor::new(tar_bytes), 3)?;
-    seal_payload(contents, payload)
+    Ok(zstd::stream::encode_all(Cursor::new(tar_bytes), 3)?)
 }
 
 pub fn open_bundle(bytes: &[u8], limits: &BundleLimits) -> Result<DecodedBundle> {
+    open_bundle_protected(bytes, limits, None)
+}
+
+pub fn open_bundle_protected(
+    bytes: &[u8],
+    limits: &BundleLimits,
+    protector: Option<&dyn PayloadProtector>,
+) -> Result<DecodedBundle> {
     if bytes.len() > limits.max_envelope_bytes || bytes.len() < PREFIX_LENGTH {
         return invalid("bundle envelope size is invalid");
     }
@@ -195,7 +242,35 @@ pub fn open_bundle(bytes: &[u8], limits: &BundleLimits) -> Result<DecodedBundle>
     {
         return invalid("bundle payload length or digest mismatch");
     }
-    let decompressed = decompress_limited(payload, limits.max_decompressed_bytes)?;
+    let plaintext = match header.protection {
+        ProtectionAlgorithm::Plain => payload.to_vec(),
+        ProtectionAlgorithm::XChaCha20Poly1305 => {
+            let protector = protector.ok_or_else(|| {
+                AppError::Crypto("encrypted bundle requires a payload protector".into())
+            })?;
+            if protector.algorithm() != header.protection {
+                return Err(AppError::Crypto(
+                    "payload protector algorithm mismatch".into(),
+                ));
+            }
+            let nonce = decode_nonce(header.nonce.as_deref())?;
+            let contents = BundleContents {
+                vault_id: header.vault_id.clone(),
+                generation_id: header.generation_id.clone(),
+                device_id: header.device_id.clone(),
+                start_seq: header.start_seq,
+                end_seq: header.end_seq,
+                previous_path: header.previous_path.clone(),
+                previous_sha256: header.previous_sha256.clone(),
+                previous_end_seq: header.previous_end_seq,
+                changes: Vec::new(),
+            };
+            let aad =
+                authenticated_header_bytes(&contents, header.protection, header.nonce.as_deref())?;
+            protector.open(&aad, payload, nonce)?
+        }
+    };
+    let decompressed = decompress_limited(&plaintext, limits.max_decompressed_bytes)?;
     let files = read_tar(&decompressed, limits)?;
     decode_contents(header, files, limits)
 }
@@ -260,10 +335,16 @@ fn validate_header(header: &BundleHeader) -> Result<()> {
         || header.start_seq < 0
         || header.end_seq < header.start_seq
         || !is_sha256(&header.payload_sha256)
-        || header.protection != ProtectionAlgorithm::Plain
-        || header.nonce.is_some()
     {
         return invalid("bundle header fields are invalid");
+    }
+    match header.protection {
+        ProtectionAlgorithm::Plain if header.nonce.is_none() => {}
+        ProtectionAlgorithm::XChaCha20Poly1305
+            if header.nonce.as_deref().is_some_and(|value| {
+                value.len() == 48 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+            }) => {}
+        _ => return invalid("bundle protection and nonce do not match"),
     }
     validate_previous(
         header.start_seq,
@@ -295,7 +376,12 @@ fn validate_previous(
     }
 }
 
-fn seal_payload(contents: &BundleContents, payload: Vec<u8>) -> Result<SealedBundle> {
+fn seal_payload(
+    contents: &BundleContents,
+    payload: Vec<u8>,
+    protection: ProtectionAlgorithm,
+    nonce: Option<String>,
+) -> Result<SealedBundle> {
     let header = BundleHeader {
         vault_id: contents.vault_id.clone(),
         generation_id: contents.generation_id.clone(),
@@ -306,8 +392,8 @@ fn seal_payload(contents: &BundleContents, payload: Vec<u8>) -> Result<SealedBun
         previous_sha256: contents.previous_sha256.clone(),
         previous_end_seq: contents.previous_end_seq,
         compression: CompressionAlgorithm::Zstandard,
-        protection: ProtectionAlgorithm::Plain,
-        nonce: None,
+        protection,
+        nonce,
         payload_length: payload.len() as u64,
         payload_sha256: sha256_hex(&payload),
     };
@@ -325,6 +411,34 @@ fn seal_payload(contents: &BundleContents, payload: Vec<u8>) -> Result<SealedBun
         bytes,
         header,
     })
+}
+
+fn authenticated_header_bytes(
+    contents: &BundleContents,
+    protection: ProtectionAlgorithm,
+    nonce: Option<&str>,
+) -> Result<Vec<u8>> {
+    Ok(serde_json::to_vec(&AuthenticatedHeader {
+        vault_id: &contents.vault_id,
+        generation_id: &contents.generation_id,
+        device_id: &contents.device_id,
+        start_seq: contents.start_seq,
+        end_seq: contents.end_seq,
+        previous_path: contents.previous_path.as_deref(),
+        previous_sha256: contents.previous_sha256.as_deref(),
+        previous_end_seq: contents.previous_end_seq,
+        compression: CompressionAlgorithm::Zstandard,
+        protection,
+        nonce,
+    })?)
+}
+
+fn decode_nonce(value: Option<&str>) -> Result<[u8; 24]> {
+    let bytes = hex::decode(value.ok_or_else(|| AppError::InvalidData("nonce is missing".into()))?)
+        .map_err(|_| AppError::InvalidData("nonce is not valid hex".into()))?;
+    bytes
+        .try_into()
+        .map_err(|_| AppError::InvalidData("nonce must contain 24 bytes".into()))
 }
 
 fn append_tar_file<W: std::io::Write>(
@@ -532,6 +646,7 @@ fn invalid<T>(message: &str) -> Result<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sync::crypto::{Argon2idConfig, XChaChaProtector};
     use crate::sync::types::{
         BundleChange, BundleContents, EntityKey, EntityVersion, MutationOperation,
         NormalizedSessionSnapshot,
@@ -585,6 +700,42 @@ mod tests {
             hex::encode(Sha256::digest(&sealed.bytes)),
             sealed.file_sha256
         );
+    }
+
+    #[test]
+    fn encrypted_bundle_round_trips_and_authenticates_header() {
+        let protector = XChaChaProtector::derive(
+            "sync passphrase",
+            &Argon2idConfig {
+                salt: [4; 16],
+                memory_kib: 8 * 1024,
+                iterations: 2,
+                parallelism: 1,
+            },
+        )
+        .unwrap();
+        let sealed = seal_bundle_protected(&fixture(), &protector, [6; 24]).unwrap();
+        assert_eq!(
+            sealed.header.protection,
+            ProtectionAlgorithm::XChaCha20Poly1305
+        );
+        assert_eq!(
+            open_bundle_protected(&sealed.bytes, &BundleLimits::test(), Some(&protector))
+                .unwrap()
+                .contents,
+            fixture()
+        );
+        assert!(open_bundle(&sealed.bytes, &BundleLimits::test()).is_err());
+
+        let mut tampered = sealed.bytes.clone();
+        let header_length = u32::from_be_bytes(tampered[5..9].try_into().unwrap()) as usize;
+        let header = &mut tampered[PREFIX_LENGTH..PREFIX_LENGTH + header_length];
+        let offset = header
+            .windows(b"vault-a".len())
+            .position(|window| window == b"vault-a")
+            .unwrap();
+        header[offset..offset + b"vault-a".len()].copy_from_slice(b"vault-b");
+        assert!(open_bundle_protected(&tampered, &BundleLimits::test(), Some(&protector)).is_err());
     }
 
     #[test]
@@ -678,7 +829,7 @@ mod tests {
         }
         tar.extend_from_slice(&[0; 1024]);
         let payload = zstd::stream::encode_all(Cursor::new(tar), 3)?;
-        Ok(seal_payload(contents, payload)?.bytes)
+        Ok(seal_payload(contents, payload, ProtectionAlgorithm::Plain, None)?.bytes)
     }
 
     fn append_raw_tar_entry(output: &mut Vec<u8>, path: &str, data: &[u8], kind: u8) {

@@ -395,6 +395,8 @@ fn format_app_error(err: &AppError) -> String {
         AppError::Io(e) => format!("I/O 错误：{e}"),
         AppError::Json(e) => format!("JSON 错误：{e}"),
         AppError::Zip(e) => format!("ZIP 错误：{e}"),
+        AppError::Crypto(msg) => format!("数据错误：{msg}"),
+        AppError::Credential(msg) => format!("配置错误：{msg}"),
     }
 }
 
