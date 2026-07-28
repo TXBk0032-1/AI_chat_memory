@@ -77,6 +77,7 @@ impl SyncStore {
         device_id: &str,
         display_name: &str,
     ) -> Result<DeviceState> {
+        let _gate = self.write_gate.lock().await;
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             "INSERT OR IGNORE INTO sync_device_state
@@ -202,6 +203,9 @@ impl SyncStore {
         snapshot: Option<NormalizedSessionSnapshot>,
         now_ms: i64,
     ) -> Result<PendingMutation> {
+        sqlx::query("UPDATE sync_device_state SET next_seq = next_seq WHERE singleton = 1")
+            .execute(&mut **tx)
+            .await?;
         let state = Self::required_device_state_in(tx).await?;
         let mut clock = HybridClock::new(
             state.device_id.clone(),
@@ -362,6 +366,7 @@ impl SyncStore {
         generation_id: &str,
         staged_at_ms: i64,
     ) -> Result<()> {
+        let _gate = self.write_gate.lock().await;
         sqlx::query(
             "INSERT INTO sync_published_bundles
              (bundle_sha256, generation_id, stage, staged_at_ms, published_at_ms)
@@ -386,10 +391,13 @@ impl SyncStore {
         bundle_sha256: &str,
         published_at_ms: i64,
     ) -> Result<()> {
+        let _gate = self.write_gate.lock().await;
         sqlx::query(
-            "UPDATE sync_published_bundles SET stage = 'published', published_at_ms = ?
+            "UPDATE sync_published_bundles SET stage = 'published',
+               published_at_ms = MAX(COALESCE(published_at_ms, ?), ?)
              WHERE bundle_sha256 = ?",
         )
+        .bind(published_at_ms)
         .bind(published_at_ms)
         .bind(bundle_sha256)
         .execute(&self.pool)
@@ -426,6 +434,7 @@ impl SyncStore {
         cursor_seq: i64,
         updated_at_ms: i64,
     ) -> Result<()> {
+        let _gate = self.write_gate.lock().await;
         sqlx::query(
             "INSERT INTO sync_remote_cursors(generation_id, remote_device_id, cursor_seq, updated_at_ms)
              VALUES (?, ?, ?, ?)
@@ -474,6 +483,7 @@ impl SyncStore {
         status: &str,
         error_code: Option<&str>,
     ) -> Result<i64> {
+        let _gate = self.write_gate.lock().await;
         let result = sqlx::query(
             "INSERT INTO sync_runs(trigger, started_at_ms, finished_at_ms, status, error_code)
              VALUES (?, ?, ?, ?, ?)",
@@ -855,7 +865,7 @@ mod tests {
         assert_eq!(pending[0].version, EntityVersion::new(1000, 0, "device-a"));
         assert_eq!(pending[1].version, EntityVersion::new(1000, 1, "device-a"));
         store.pool().close().await;
-        tokio::fs::remove_file(path).await.unwrap();
+        let _ = tokio::fs::remove_file(path).await;
     }
 
     #[tokio::test]
@@ -897,5 +907,81 @@ mod tests {
             .unwrap();
         assert_eq!(cursor.cursor_seq, 10);
         assert_eq!(cursor.updated_at_ms, 30);
+    }
+
+    #[tokio::test]
+    async fn published_bundle_time_never_moves_backwards() {
+        let store = SyncStore::new(test_pool().await);
+        store.initialize_device("device-a", "Laptop").await.unwrap();
+        store
+            .mark_bundle_staged("time", "generation-a", 10)
+            .await
+            .unwrap();
+        store.mark_bundle_published("time", 20).await.unwrap();
+        store.mark_bundle_published("time", 15).await.unwrap();
+        assert_eq!(
+            store
+                .published_bundle("time")
+                .await
+                .unwrap()
+                .unwrap()
+                .published_at_ms,
+            Some(20)
+        );
+    }
+
+    #[tokio::test]
+    async fn long_lived_in_transaction_waits_for_database_write_lock() {
+        let path =
+            std::env::temp_dir().join(format!("sync-store-long-{}.sqlite", uuid::Uuid::new_v4()));
+        let pool = crate::database::connect(&path).await.unwrap();
+        let store = SyncStore::new(pool.clone());
+        store.initialize_device("device-a", "Laptop").await.unwrap();
+        let mut tx_a = pool.begin().await.unwrap();
+        store
+            .queue_local_delete_in(
+                &mut tx_a,
+                EntityKey {
+                    platform: "chat".into(),
+                    platform_session_id: "a".into(),
+                },
+                1000,
+            )
+            .await
+            .unwrap();
+        let store_b = store.clone();
+        let pool_b = pool.clone();
+        let started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let started_b = started.clone();
+        let task_b = tokio::spawn(async move {
+            let mut tx_b = pool_b.begin().await.unwrap();
+            started_b.notify_one();
+            let result = store_b
+                .queue_local_delete_in(
+                    &mut tx_b,
+                    EntityKey {
+                        platform: "chat".into(),
+                        platform_session_id: "b".into(),
+                    },
+                    1000,
+                )
+                .await;
+            if result.is_ok() {
+                tx_b.commit().await.unwrap();
+            }
+            result
+        });
+        started.notified().await;
+        tokio::task::yield_now().await;
+        assert!(
+            !task_b.is_finished(),
+            "second transaction should wait for the first commit"
+        );
+        tx_a.commit().await.unwrap();
+        task_b.await.unwrap().unwrap();
+        let pending = store.pending_mutations(10).await.unwrap();
+        assert_eq!(pending.len(), 2);
+        pool.close().await;
+        let _ = tokio::fs::remove_file(path).await;
     }
 }

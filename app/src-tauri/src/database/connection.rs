@@ -4,6 +4,7 @@ use sqlx::{
 };
 use std::path::Path;
 use std::sync::Once;
+use std::time::Duration;
 
 use crate::error::Result;
 
@@ -39,7 +40,8 @@ pub async fn connect(path: &Path) -> Result<SqlitePool> {
     let options = SqliteConnectOptions::new()
         .filename(path)
         .create_if_missing(true)
-        .foreign_keys(true);
+        .foreign_keys(true)
+        .busy_timeout(Duration::from_secs(5));
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
         .connect_with(options)
