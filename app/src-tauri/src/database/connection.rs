@@ -61,7 +61,7 @@ pub async fn connect(path: &Path) -> Result<SqlitePool> {
     Ok(pool)
 }
 
-async fn initialize_schema(pool: &SqlitePool) -> Result<()> {
+pub(crate) async fn initialize_schema(pool: &SqlitePool) -> Result<()> {
     sqlx::query("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, platform TEXT NOT NULL, platform_session_id TEXT NOT NULL, title TEXT, created_at TEXT, updated_at TEXT, imported_at TEXT DEFAULT CURRENT_TIMESTAMP, raw_data TEXT, UNIQUE(platform, platform_session_id));").execute(pool).await?;
     sqlx::query("CREATE TABLE IF NOT EXISTS messages (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, role TEXT NOT NULL, content TEXT, metadata TEXT, created_at TEXT, seq INTEGER);").execute(pool).await?;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);")
@@ -109,6 +109,65 @@ async fn initialize_schema(pool: &SqlitePool) -> Result<()> {
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );",
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS sync_device_state (
+            singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+            device_id TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            hlc_wall_ms INTEGER NOT NULL,
+            hlc_counter INTEGER NOT NULL,
+            next_seq INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS sync_mutations (
+            platform TEXT NOT NULL,
+            platform_session_id TEXT NOT NULL,
+            local_seq INTEGER NOT NULL UNIQUE,
+            operation TEXT NOT NULL CHECK(operation IN ('upsert', 'delete')),
+            version_wall_ms INTEGER NOT NULL,
+            version_counter INTEGER NOT NULL,
+            version_device_id TEXT NOT NULL,
+            content_hash TEXT,
+            snapshot_json TEXT,
+            PRIMARY KEY(platform, platform_session_id)
+        );
+        CREATE TABLE IF NOT EXISTS sync_entity_versions (
+            platform TEXT NOT NULL,
+            platform_session_id TEXT NOT NULL,
+            operation TEXT NOT NULL CHECK(operation IN ('upsert', 'delete')),
+            version_wall_ms INTEGER NOT NULL,
+            version_counter INTEGER NOT NULL,
+            version_device_id TEXT NOT NULL,
+            content_hash TEXT,
+            PRIMARY KEY(platform, platform_session_id)
+        );
+        CREATE TABLE IF NOT EXISTS sync_remote_cursors (
+            generation_id TEXT NOT NULL,
+            remote_device_id TEXT NOT NULL,
+            cursor_seq INTEGER NOT NULL,
+            updated_at_ms INTEGER NOT NULL,
+            PRIMARY KEY(generation_id, remote_device_id)
+        );
+        CREATE TABLE IF NOT EXISTS sync_published_bundles (
+            bundle_sha256 TEXT PRIMARY KEY,
+            generation_id TEXT NOT NULL,
+            stage TEXT NOT NULL CHECK(stage IN ('staged', 'published')),
+            staged_at_ms INTEGER NOT NULL,
+            published_at_ms INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS sync_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            trigger TEXT NOT NULL,
+            started_at_ms INTEGER NOT NULL,
+            finished_at_ms INTEGER,
+            status TEXT NOT NULL,
+            error_code TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_sync_mutations_local_seq ON sync_mutations(local_seq);
+        CREATE INDEX IF NOT EXISTS idx_sync_runs_started_at ON sync_runs(started_at_ms);
+        CREATE INDEX IF NOT EXISTS idx_sync_bundles_stage ON sync_published_bundles(stage);",
     )
     .execute(pool)
     .await?;
@@ -393,6 +452,34 @@ mod tests {
             .await
             .unwrap();
         assert!(version.starts_with('v'), "{version}");
+    }
+
+    #[tokio::test]
+    async fn initializes_sync_tables() {
+        register_sqlite_vec();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        initialize_schema(&pool).await.unwrap();
+        for table in [
+            "sync_device_state",
+            "sync_mutations",
+            "sync_entity_versions",
+            "sync_remote_cursors",
+            "sync_published_bundles",
+            "sync_runs",
+        ] {
+            let exists: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?",
+            )
+            .bind(table)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(exists, 1, "missing sync table {table}");
+        }
     }
 
     #[tokio::test]
