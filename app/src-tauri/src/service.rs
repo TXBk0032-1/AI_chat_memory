@@ -18,6 +18,19 @@ use crate::{
     settings::SettingsStore,
 };
 
+const MAX_CONVERSATIONS_JSON_BYTES: u64 = 512 * 1024 * 1024;
+const CONVERSATIONS_JSON_TOO_LARGE: &str = "conversations.json 解压后超过 512 MB 限制";
+
+fn read_zip_entry_with_limit<R: Read>(reader: R, max_bytes: u64) -> Result<String> {
+    let mut content = String::new();
+    let mut limited = reader.take(max_bytes.saturating_add(1));
+    limited.read_to_string(&mut content)?;
+    if content.len() as u64 > max_bytes {
+        return Err(AppError::InvalidData(CONVERSATIONS_JSON_TOO_LARGE.into()));
+    }
+    Ok(content)
+}
+
 #[derive(Clone)]
 pub struct AppService {
     pool: SqlitePool,
@@ -141,19 +154,16 @@ impl AppService {
             return Err(AppError::InvalidData("ZIP 文件超过 128 MB 限制".into()));
         }
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
-        let mut file = archive
+        let file = archive
             .by_name("conversations.json")
             .map_err(|_| AppError::InvalidData("ZIP 中缺少 conversations.json".into()))?;
-        if file.size() > 512 * 1024 * 1024 {
-            return Err(AppError::InvalidData(
-                "conversations.json 解压后超过 512 MB 限制".into(),
-            ));
+        if file.size() > MAX_CONVERSATIONS_JSON_BYTES {
+            return Err(AppError::InvalidData(CONVERSATIONS_JSON_TOO_LARGE.into()));
         }
         if file.compressed_size() > 0 && file.size() / file.compressed_size() > 200 {
             return Err(AppError::InvalidData("ZIP 压缩比异常".into()));
         }
-        let mut content = String::new();
-        file.read_to_string(&mut content)?;
+        let content = read_zip_entry_with_limit(file, MAX_CONVERSATIONS_JSON_BYTES)?;
         let conversations: Vec<Value> = serde_json::from_str(&content)?;
         let normalized = conversations
             .iter()
@@ -289,5 +299,50 @@ impl AppService {
 
     pub async fn cancel_semantic_work(&self) -> Result<()> {
         self.semantic.cancel_semantic_work().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Cursor, Write};
+    use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
+
+    #[test]
+    fn rejects_zip_entry_that_exceeds_actual_output_limit_with_forged_metadata() {
+        let mut archive_bytes = Vec::new();
+        {
+            let mut writer = ZipWriter::new(Cursor::new(&mut archive_bytes));
+            writer
+                .start_file(
+                    "conversations.json",
+                    SimpleFileOptions::default().compression_method(CompressionMethod::Deflated),
+                )
+                .unwrap();
+            writer.write_all(&vec![b'a'; 2 * 1024]).unwrap();
+            writer.finish().unwrap();
+        }
+
+        let central_header = archive_bytes
+            .windows(4)
+            .rposition(|window| window == b"PK\x01\x02")
+            .unwrap();
+        archive_bytes[central_header + 24..central_header + 28]
+            .copy_from_slice(&1_u32.to_le_bytes());
+
+        let mut archive = ZipArchive::new(Cursor::new(archive_bytes)).unwrap();
+        let file = archive.by_name("conversations.json").unwrap();
+        assert_eq!(file.size(), 1, "测试 ZIP 必须伪造较小的声明大小");
+
+        assert!(matches!(
+            read_zip_entry_with_limit(file, 1024),
+            Err(AppError::InvalidData(message)) if message == "conversations.json 解压后超过 512 MB 限制"
+        ));
+    }
+
+    #[test]
+    fn accepts_zip_entry_at_actual_output_limit() {
+        let content = read_zip_entry_with_limit(Cursor::new(b"[]"), 2).unwrap();
+        assert_eq!(content, "[]");
     }
 }
