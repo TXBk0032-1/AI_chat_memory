@@ -453,6 +453,30 @@ impl SyncStore {
             .collect()
     }
 
+    pub async fn acknowledge_mutations(&self, mutations: &[PendingMutation]) -> Result<usize> {
+        let _gate = self.write_gate.lock().await;
+        let mut tx = self.pool.begin().await?;
+        let mut removed = 0;
+        for mutation in mutations {
+            let result = sqlx::query(
+                "DELETE FROM sync_mutations
+                 WHERE platform = ? AND platform_session_id = ? AND local_seq = ?
+                   AND version_wall_ms = ? AND version_counter = ? AND version_device_id = ?",
+            )
+            .bind(&mutation.key.platform)
+            .bind(&mutation.key.platform_session_id)
+            .bind(mutation.local_seq)
+            .bind(mutation.version.wall_ms)
+            .bind(mutation.version.counter)
+            .bind(&mutation.version.device_id)
+            .execute(&mut *tx)
+            .await?;
+            removed += result.rows_affected() as usize;
+        }
+        tx.commit().await?;
+        Ok(removed)
+    }
+
     pub async fn mark_bundle_staged(
         &self,
         bundle_sha256: &str,

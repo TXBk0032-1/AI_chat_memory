@@ -2,6 +2,7 @@ pub mod backend;
 pub mod bundle;
 pub mod credentials;
 pub mod crypto;
+pub mod engine;
 pub mod hlc;
 pub mod merge;
 pub mod store;
