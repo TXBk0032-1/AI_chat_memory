@@ -67,6 +67,10 @@ impl HybridClock {
         Ok(())
     }
 
+    pub fn state(&self) -> (i64, i64) {
+        (self.wall_ms, self.counter)
+    }
+
     fn increment(wall_ms: i64, counter: i64) -> Result<(i64, i64), HlcError> {
         if let Some(next_counter) = counter.checked_add(1) {
             return Ok((wall_ms, next_counter));
