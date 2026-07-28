@@ -27,6 +27,17 @@ pub struct AppService {
     last_userscript_request_at: Arc<RwLock<Option<u64>>>,
 }
 
+pub(crate) async fn import_local_sessions(
+    pool: &SqlitePool,
+    sessions: &[NormalizedSession],
+) -> Result<usize> {
+    database::import_sessions(pool, sessions, true).await
+}
+
+async fn delete_local_session(pool: &SqlitePool, id: &str) -> Result<()> {
+    database::delete_session(pool, id, true).await
+}
+
 impl AppService {
     pub async fn new(
         pool: SqlitePool,
@@ -115,7 +126,7 @@ impl AppService {
             .iter()
             .map(|raw| normalizer::normalize_session(&request.platform, raw))
             .collect::<Result<Vec<_>>>()?;
-        let imported = database::import_sessions(&self.pool, &normalized).await?;
+        let imported = import_local_sessions(&self.pool, &normalized).await?;
         for session in &normalized {
             if let Ok(Some(id)) = sqlx::query_scalar::<_, String>(
                 "SELECT id FROM sessions WHERE platform = ? AND platform_session_id = ?",
@@ -159,7 +170,7 @@ impl AppService {
             .iter()
             .map(normalizer::normalize_deepseek_export)
             .collect::<Result<Vec<_>>>()?;
-        let imported = database::import_sessions(&self.pool, &normalized).await?;
+        let imported = import_local_sessions(&self.pool, &normalized).await?;
         for session in &normalized {
             if let Ok(Some(id)) = sqlx::query_scalar::<_, String>(
                 "SELECT id FROM sessions WHERE platform = ? AND platform_session_id = ?",
@@ -217,7 +228,7 @@ impl AppService {
     }
 
     pub async fn delete(&self, id: &str) -> Result<()> {
-        database::delete_session(&self.pool, id).await?;
+        delete_local_session(&self.pool, id).await?;
         let _ = self.semantic.delete_session(id).await;
         tracing::info!("session deleted");
         Ok(())

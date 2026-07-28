@@ -24,7 +24,14 @@ use sqlx::SqlitePool;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::normalizer::normalize_session;
+    use crate::{
+        models::NormalizedSession,
+        normalizer::normalize_session,
+        sync::{
+            store::SyncStore,
+            types::{EntityKey, MutationOperation, NormalizedSessionSnapshot, SyncMessageSnapshot},
+        },
+    };
     use serde_json::json;
 
     async fn create_detail_pool() -> SqlitePool {
@@ -38,6 +45,51 @@ mod tests {
             .await
             .unwrap();
         pool
+    }
+
+    async fn create_sync_pool() -> SqlitePool {
+        connection::register_sqlite_vec();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        connection::initialize_schema(&pool).await.unwrap();
+        pool
+    }
+
+    fn session_fixture(remote_id: &str, title: &str) -> NormalizedSession {
+        normalize_session(
+            "custom",
+            &json!({
+                "id": remote_id,
+                "title": title,
+                "created_at": "2026-01-02T03:04:05Z",
+                "updated_at": "2026-01-02T04:05:06Z",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": format!("question-{remote_id}"),
+                        "metadata": {"turn": 1},
+                        "created_at": "2026-01-02T03:05:00Z"
+                    },
+                    {
+                        "role": "assistant",
+                        "content": format!("answer-{remote_id}"),
+                        "metadata": {"turn": 2},
+                        "created_at": "2026-01-02T03:06:00Z"
+                    }
+                ]
+            }),
+        )
+        .unwrap()
+    }
+
+    async fn table_count(pool: &SqlitePool, table: &str) -> i64 {
+        sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+            .fetch_one(pool)
+            .await
+            .unwrap()
     }
 
     #[tokio::test]
@@ -157,7 +209,7 @@ mod tests {
             &json!({"id":"a","title":"one","messages":[{"role":"user","content":"old"}]}),
         )
         .unwrap();
-        import_sessions(&pool, &[first]).await.unwrap();
+        import_sessions(&pool, &[first], false).await.unwrap();
         let original: String = sqlx::query_scalar("SELECT id FROM sessions")
             .fetch_one(&pool)
             .await
@@ -167,7 +219,7 @@ mod tests {
             &json!({"id":"a","title":"two","messages":[{"role":"assistant","content":"new"}]}),
         )
         .unwrap();
-        import_sessions(&pool, &[second]).await.unwrap();
+        import_sessions(&pool, &[second], false).await.unwrap();
         let current: String = sqlx::query_scalar("SELECT id FROM sessions")
             .fetch_one(&pool)
             .await
@@ -209,7 +261,7 @@ mod tests {
             &json!({"id":"safe","title":"safe","messages":[{"role":"user","content":"hello"}]}),
         )
         .unwrap();
-        import_sessions(&pool, &[session]).await.unwrap();
+        import_sessions(&pool, &[session], false).await.unwrap();
         let result = search(
             &pool,
             &SearchQuery {
@@ -231,7 +283,7 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(indexed_before_delete, 1);
-        delete_session(&pool, &id).await.unwrap();
+        delete_session(&pool, &id, false).await.unwrap();
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages")
             .fetch_one(&pool)
             .await
@@ -244,6 +296,188 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(indexed_after_delete, 0);
+    }
+
+    #[tokio::test]
+    async fn import_commits_business_data_and_complete_upsert_snapshot() {
+        let pool = create_sync_pool().await;
+        let store = SyncStore::new(pool.clone());
+        store.initialize_device("device-a", "Laptop").await.unwrap();
+        let session = session_fixture("remote-a", "Atomic import");
+
+        import_sessions(&pool, std::slice::from_ref(&session), true)
+            .await
+            .unwrap();
+
+        assert_eq!(table_count(&pool, "sessions").await, 1);
+        assert_eq!(table_count(&pool, "messages").await, 2);
+        assert_eq!(table_count(&pool, "session_fts").await, 1);
+        assert_eq!(table_count(&pool, "sync_mutations").await, 1);
+        assert_eq!(table_count(&pool, "sync_entity_versions").await, 1);
+        let pending = store.pending_mutations(10).await.unwrap();
+        assert_eq!(pending[0].operation, MutationOperation::Upsert);
+        assert_eq!(
+            pending[0].snapshot,
+            Some(NormalizedSessionSnapshot {
+                key: EntityKey {
+                    platform: session.platform.clone(),
+                    platform_session_id: session.platform_session_id.clone(),
+                },
+                title: session.title.clone(),
+                created_at: session.created_at.clone(),
+                updated_at: session.updated_at.clone(),
+                imported_at: session.imported_at.clone(),
+                raw_data: session.raw_data.clone(),
+                messages: session
+                    .messages
+                    .iter()
+                    .map(|message| SyncMessageSnapshot {
+                        role: message.role.clone(),
+                        content: message.content.clone(),
+                        metadata: message.metadata.clone(),
+                        created_at: message.created_at.clone(),
+                    })
+                    .collect(),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_commits_business_delete_and_tombstone() {
+        let pool = create_sync_pool().await;
+        let session = session_fixture("remote-delete", "Delete me");
+        import_sessions(&pool, &[session], false).await.unwrap();
+        let id: String = sqlx::query_scalar("SELECT id FROM sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let store = SyncStore::new(pool.clone());
+        store.initialize_device("device-a", "Laptop").await.unwrap();
+
+        delete_session(&pool, &id, true).await.unwrap();
+
+        assert_eq!(table_count(&pool, "sessions").await, 0);
+        assert_eq!(table_count(&pool, "messages").await, 0);
+        assert_eq!(table_count(&pool, "session_fts").await, 0);
+        assert_eq!(table_count(&pool, "sync_mutations").await, 1);
+        assert_eq!(table_count(&pool, "sync_entity_versions").await, 1);
+        let pending = store.pending_mutations(10).await.unwrap();
+        assert_eq!(pending[0].operation, MutationOperation::Delete);
+        assert_eq!(pending[0].key.platform, "custom");
+        assert_eq!(pending[0].key.platform_session_id, "remote-delete");
+        assert!(pending[0].snapshot.is_none());
+    }
+
+    #[tokio::test]
+    async fn record_sync_false_skips_import_and_delete_outbox() {
+        let pool = create_sync_pool().await;
+        let store = SyncStore::new(pool.clone());
+        store.initialize_device("device-a", "Laptop").await.unwrap();
+
+        import_sessions(&pool, &[session_fixture("remote-off", "Off")], false)
+            .await
+            .unwrap();
+        let id: String = sqlx::query_scalar("SELECT id FROM sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        delete_session(&pool, &id, false).await.unwrap();
+
+        assert_eq!(table_count(&pool, "sync_mutations").await, 0);
+        assert_eq!(table_count(&pool, "sync_entity_versions").await, 0);
+        assert_eq!(store.device_state().await.unwrap().unwrap().next_seq, 1);
+    }
+
+    #[tokio::test]
+    async fn uninitialized_device_skips_import_and_delete_outbox() {
+        let pool = create_sync_pool().await;
+
+        import_sessions(
+            &pool,
+            &[session_fixture("remote-uninitialized", "No device")],
+            true,
+        )
+        .await
+        .unwrap();
+        let id: String = sqlx::query_scalar("SELECT id FROM sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        delete_session(&pool, &id, true).await.unwrap();
+
+        assert_eq!(table_count(&pool, "sessions").await, 0);
+        assert_eq!(table_count(&pool, "sync_mutations").await, 0);
+        assert_eq!(table_count(&pool, "sync_entity_versions").await, 0);
+    }
+
+    #[tokio::test]
+    async fn import_rolls_back_business_and_sync_rows_when_later_sync_write_fails() {
+        let pool = create_sync_pool().await;
+        let store = SyncStore::new(pool.clone());
+        store.initialize_device("device-a", "Laptop").await.unwrap();
+        sqlx::query("UPDATE sync_device_state SET hlc_wall_ms = ?, hlc_counter = ?, next_seq = 7")
+            .bind(i64::MAX)
+            .bind(i64::MAX - 1)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let error = import_sessions(
+            &pool,
+            &[
+                session_fixture("remote-first", "First"),
+                session_fixture("remote-second", "Second"),
+            ],
+            true,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, crate::error::AppError::InvalidData(_)));
+        assert_eq!(table_count(&pool, "sessions").await, 0);
+        assert_eq!(table_count(&pool, "messages").await, 0);
+        assert_eq!(table_count(&pool, "session_fts").await, 0);
+        assert_eq!(table_count(&pool, "sync_mutations").await, 0);
+        assert_eq!(table_count(&pool, "sync_entity_versions").await, 0);
+        let state = store.device_state().await.unwrap().unwrap();
+        assert_eq!(
+            (state.hlc_wall_ms, state.hlc_counter, state.next_seq),
+            (i64::MAX, i64::MAX - 1, 7)
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_rolls_back_business_data_when_sync_write_fails() {
+        let pool = create_sync_pool().await;
+        import_sessions(
+            &pool,
+            &[session_fixture("remote-delete-rollback", "Keep me")],
+            false,
+        )
+        .await
+        .unwrap();
+        let id: String = sqlx::query_scalar("SELECT id FROM sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let store = SyncStore::new(pool.clone());
+        store.initialize_device("device-a", "Laptop").await.unwrap();
+        sqlx::query("UPDATE sync_device_state SET hlc_wall_ms = ?, hlc_counter = ?, next_seq = 11")
+            .bind(i64::MAX)
+            .bind(i64::MAX)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let error = delete_session(&pool, &id, true).await.unwrap_err();
+
+        assert!(matches!(error, crate::error::AppError::InvalidData(_)));
+        assert_eq!(table_count(&pool, "sessions").await, 1);
+        assert_eq!(table_count(&pool, "messages").await, 2);
+        assert_eq!(table_count(&pool, "session_fts").await, 1);
+        assert_eq!(table_count(&pool, "sync_mutations").await, 0);
+        assert_eq!(table_count(&pool, "sync_entity_versions").await, 0);
+        assert_eq!(store.device_state().await.unwrap().unwrap().next_seq, 11);
     }
 
     #[tokio::test]

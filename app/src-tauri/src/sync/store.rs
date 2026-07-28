@@ -1,8 +1,11 @@
 use crate::error::{AppError, Result};
+use crate::models::{NormalizedMessage, NormalizedSession};
 use crate::sync::hlc::HybridClock;
 use crate::sync::types::{
-    EntityKey, EntityVersion, MutationOperation, NormalizedSessionSnapshot, SyncTrigger,
+    EntityKey, EntityVersion, MutationOperation, NormalizedSessionSnapshot, SyncMessageSnapshot,
+    SyncTrigger,
 };
+use chrono::Utc;
 use sha2::{Digest, Sha256};
 use sqlx::{Sqlite, SqlitePool, Transaction};
 use std::sync::Arc;
@@ -100,7 +103,9 @@ impl SyncStore {
         Ok(state)
     }
 
-    async fn device_state_in(tx: &mut Transaction<'_, Sqlite>) -> Result<Option<DeviceState>> {
+    pub(crate) async fn device_state_in(
+        tx: &mut Transaction<'_, Sqlite>,
+    ) -> Result<Option<DeviceState>> {
         Ok(sqlx::query_as::<_, (String, String, i64, i64, i64)>(
             "SELECT device_id, display_name, hlc_wall_ms, hlc_counter, next_seq
              FROM sync_device_state WHERE singleton = 1",
@@ -118,10 +123,103 @@ impl SyncStore {
         ))
     }
 
+    pub(crate) async fn lock_device_state_in(
+        tx: &mut Transaction<'_, Sqlite>,
+    ) -> Result<Option<DeviceState>> {
+        sqlx::query("UPDATE sync_device_state SET next_seq = next_seq WHERE singleton = 1")
+            .execute(&mut **tx)
+            .await?;
+        Self::device_state_in(tx).await
+    }
+
     async fn required_device_state_in(tx: &mut Transaction<'_, Sqlite>) -> Result<DeviceState> {
-        Self::device_state_in(tx)
+        Self::lock_device_state_in(tx)
             .await?
             .ok_or_else(|| AppError::NotFound("sync device state".into()))
+    }
+
+    pub async fn seed_local_baseline(&self) -> Result<usize> {
+        let _gate = self.write_gate.lock().await;
+        let mut tx = self.pool.begin().await?;
+        Self::required_device_state_in(&mut tx).await?;
+        let now_ms = current_time_millis();
+        let rows = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                String,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+            ),
+        >(
+            "SELECT id, platform, platform_session_id, title, created_at, updated_at,
+                    imported_at, raw_data
+             FROM sessions
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM sync_entity_versions versions
+                 WHERE versions.platform = sessions.platform
+                   AND versions.platform_session_id = sessions.platform_session_id
+             )
+               AND NOT EXISTS (
+                 SELECT 1 FROM sync_mutations mutations
+                 WHERE mutations.platform = sessions.platform
+                   AND mutations.platform_session_id = sessions.platform_session_id
+             )
+             ORDER BY platform, platform_session_id",
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        let mut seeded = 0;
+        for (
+            id,
+            platform,
+            platform_session_id,
+            title,
+            created_at,
+            updated_at,
+            imported_at,
+            raw_data,
+        ) in rows
+        {
+            let messages =
+                sqlx::query_as::<_, (String, Option<String>, Option<String>, Option<String>)>(
+                    "SELECT role, content, metadata, created_at
+                 FROM messages WHERE session_id = ? ORDER BY seq, id",
+                )
+                .bind(&id)
+                .fetch_all(&mut *tx)
+                .await?
+                .into_iter()
+                .map(|(role, content, metadata, created_at)| {
+                    Ok(NormalizedMessage {
+                        role,
+                        content: content.unwrap_or_default(),
+                        metadata: parse_stored_json(metadata)?,
+                        created_at,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let session = NormalizedSession {
+                id,
+                platform,
+                platform_session_id,
+                title: title.unwrap_or_default(),
+                created_at,
+                updated_at,
+                imported_at: imported_at.unwrap_or_default(),
+                messages,
+                raw_data: parse_stored_json(raw_data)?,
+            };
+            self.queue_local_upsert_in(&mut tx, snapshot_from_normalized_session(&session), now_ms)
+                .await?;
+            seeded += 1;
+        }
+        tx.commit().await?;
+        Ok(seeded)
     }
 
     pub async fn queue_local_upsert(
@@ -201,9 +299,6 @@ impl SyncStore {
         snapshot: Option<NormalizedSessionSnapshot>,
         now_ms: i64,
     ) -> Result<PendingMutation> {
-        sqlx::query("UPDATE sync_device_state SET next_seq = next_seq WHERE singleton = 1")
-            .execute(&mut **tx)
-            .await?;
         let state = Self::required_device_state_in(tx).await?;
         let mut clock = HybridClock::new(
             state.device_id.clone(),
@@ -518,6 +613,44 @@ impl SyncStore {
     }
 }
 
+pub(crate) fn current_time_millis() -> i64 {
+    Utc::now().timestamp_millis()
+}
+
+pub(crate) fn snapshot_from_normalized_session(
+    session: &NormalizedSession,
+) -> NormalizedSessionSnapshot {
+    NormalizedSessionSnapshot {
+        key: EntityKey {
+            platform: session.platform.clone(),
+            platform_session_id: session.platform_session_id.clone(),
+        },
+        title: session.title.clone(),
+        created_at: session.created_at.clone(),
+        updated_at: session.updated_at.clone(),
+        imported_at: session.imported_at.clone(),
+        raw_data: session.raw_data.clone(),
+        messages: session
+            .messages
+            .iter()
+            .map(|message| SyncMessageSnapshot {
+                role: message.role.clone(),
+                content: message.content.clone(),
+                metadata: message.metadata.clone(),
+                created_at: message.created_at.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn parse_stored_json(value: Option<String>) -> Result<serde_json::Value> {
+    value
+        .map(|value| serde_json::from_str(&value))
+        .transpose()
+        .map(|value| value.unwrap_or(serde_json::Value::Null))
+        .map_err(Into::into)
+}
+
 fn operation_wire(operation: &MutationOperation) -> &'static str {
     match operation {
         MutationOperation::Upsert => "upsert",
@@ -573,6 +706,7 @@ fn mutation_from_row(
 mod tests {
     use super::*;
     use crate::database::connection::{initialize_schema, register_sqlite_vec};
+    use crate::normalizer::normalize_session;
     use crate::sync::types::{EntityKey, NormalizedSessionSnapshot, SyncMessageSnapshot};
     use serde_json::json;
     use sqlx::sqlite::SqlitePoolOptions;
@@ -998,5 +1132,206 @@ mod tests {
         assert_eq!(pending.len(), 3);
         pool.close().await;
         let _ = tokio::fs::remove_file(path).await;
+    }
+
+    #[tokio::test]
+    async fn local_mutation_rechecks_device_after_initialization_gap() {
+        let pool = test_pool().await;
+        let local_store = SyncStore::new(pool.clone());
+        let enabling_store = SyncStore::new(pool.clone());
+        let observed_without_device = std::sync::Arc::new(tokio::sync::Notify::new());
+        let resume_mutation = std::sync::Arc::new(tokio::sync::Notify::new());
+        let mutation_observed = observed_without_device.clone();
+        let mutation_resume = resume_mutation.clone();
+        let mutation_pool = pool.clone();
+        let session = normalize_session(
+            "custom",
+            &json!({
+                "id": "during-enable",
+                "title": "During enable",
+                "messages": [{"role": "user", "content": "captured"}]
+            }),
+        )
+        .unwrap();
+        let mutation_task = tokio::spawn(async move {
+            assert!(
+                SyncStore::new(mutation_pool.clone())
+                    .device_state()
+                    .await?
+                    .is_none()
+            );
+            mutation_observed.notify_one();
+            mutation_resume.notified().await;
+            crate::service::import_local_sessions(&mutation_pool, &[session]).await
+        });
+
+        observed_without_device.notified().await;
+        enabling_store
+            .initialize_device("device-a", "Laptop")
+            .await
+            .unwrap();
+        assert_eq!(enabling_store.seed_local_baseline().await.unwrap(), 0);
+        resume_mutation.notify_one();
+
+        assert_eq!(mutation_task.await.unwrap().unwrap(), 1);
+        let pending = local_store.pending_mutations(10).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].key.platform_session_id, "during-enable");
+        assert_eq!(pending[0].operation, MutationOperation::Upsert);
+    }
+
+    #[tokio::test]
+    async fn seed_local_baseline_creates_each_existing_upsert_only_once() {
+        let pool = test_pool().await;
+        let sessions = [
+            normalize_session(
+                "custom",
+                &json!({
+                    "id": "baseline-a",
+                    "title": "Baseline A",
+                    "messages": [
+                        {"role": "user", "content": "a-0", "metadata": {"seq": 0}},
+                        {"role": "assistant", "content": "a-1", "metadata": {"seq": 1}}
+                    ]
+                }),
+            )
+            .unwrap(),
+            normalize_session(
+                "custom",
+                &json!({
+                    "id": "baseline-b",
+                    "title": "Baseline B",
+                    "messages": [{"role": "user", "content": "b-0"}]
+                }),
+            )
+            .unwrap(),
+        ];
+        crate::database::import_sessions(&pool, &sessions, false)
+            .await
+            .unwrap();
+        let store = SyncStore::new(pool.clone());
+        store.initialize_device("device-a", "Laptop").await.unwrap();
+
+        assert_eq!(store.seed_local_baseline().await.unwrap(), 2);
+        let first_pending = store.pending_mutations(10).await.unwrap();
+        assert_eq!(first_pending.len(), 2);
+        let version_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sync_entity_versions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(version_count, 2);
+        assert!(
+            first_pending
+                .iter()
+                .all(|mutation| mutation.operation == MutationOperation::Upsert)
+        );
+        assert_eq!(
+            first_pending[0].snapshot.as_ref().unwrap().messages.len(),
+            2
+        );
+        assert_eq!(
+            first_pending[0].snapshot.as_ref().unwrap().messages[0].content,
+            "a-0"
+        );
+        assert_eq!(
+            first_pending[0].snapshot.as_ref().unwrap().messages[1].content,
+            "a-1"
+        );
+        for (mutation, session) in first_pending.iter().zip(&sessions) {
+            let expected = NormalizedSessionSnapshot {
+                key: EntityKey {
+                    platform: session.platform.clone(),
+                    platform_session_id: session.platform_session_id.clone(),
+                },
+                title: session.title.clone(),
+                created_at: session.created_at.clone(),
+                updated_at: session.updated_at.clone(),
+                imported_at: session.imported_at.clone(),
+                raw_data: session.raw_data.clone(),
+                messages: session
+                    .messages
+                    .iter()
+                    .map(|message| SyncMessageSnapshot {
+                        role: message.role.clone(),
+                        content: message.content.clone(),
+                        metadata: message.metadata.clone(),
+                        created_at: message.created_at.clone(),
+                    })
+                    .collect(),
+            };
+            assert_eq!(mutation.snapshot.as_ref(), Some(&expected));
+            let wire = serde_json::to_value(mutation.snapshot.as_ref().unwrap()).unwrap();
+            assert!(wire.get("id").is_none());
+            assert!(wire["messages"].as_array().unwrap().iter().all(|message| {
+                message.get("id").is_none() && message.get("session_id").is_none()
+            }));
+        }
+        assert_eq!(store.seed_local_baseline().await.unwrap(), 0);
+        assert_eq!(store.pending_mutations(10).await.unwrap(), first_pending);
+        assert_eq!(store.device_state().await.unwrap().unwrap().next_seq, 3);
+    }
+
+    #[tokio::test]
+    async fn seed_local_baseline_rolls_back_all_rows_when_later_upsert_fails() {
+        let pool = test_pool().await;
+        let sessions = [
+            snapshot("first"),
+            NormalizedSessionSnapshot {
+                key: EntityKey {
+                    platform: "deepseek".into(),
+                    platform_session_id: "session-2".into(),
+                },
+                title: "second".into(),
+                created_at: None,
+                updated_at: None,
+                imported_at: "2026-01-01T00:00:00Z".into(),
+                raw_data: json!({"fixture": 2}),
+                messages: vec![],
+            },
+        ];
+        for (index, session) in sessions.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO sessions
+                 (id, platform, platform_session_id, title, created_at, updated_at, imported_at, raw_data)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(format!("local-{index}"))
+            .bind(&session.key.platform)
+            .bind(&session.key.platform_session_id)
+            .bind(&session.title)
+            .bind(&session.created_at)
+            .bind(&session.updated_at)
+            .bind(&session.imported_at)
+            .bind(session.raw_data.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let store = SyncStore::new(pool.clone());
+        store.initialize_device("device-a", "Laptop").await.unwrap();
+        sqlx::query("UPDATE sync_device_state SET hlc_wall_ms = ?, hlc_counter = ?, next_seq = 5")
+            .bind(i64::MAX)
+            .bind(i64::MAX - 1)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let error = store.seed_local_baseline().await.unwrap_err();
+
+        assert!(matches!(error, AppError::InvalidData(_)));
+        let mutation_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sync_mutations")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let version_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sync_entity_versions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!((mutation_count, version_count), (0, 0));
+        let state = store.device_state().await.unwrap().unwrap();
+        assert_eq!(
+            (state.hlc_wall_ms, state.hlc_counter, state.next_seq),
+            (i64::MAX, i64::MAX - 1, 5)
+        );
     }
 }
