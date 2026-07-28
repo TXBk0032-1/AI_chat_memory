@@ -5,6 +5,8 @@ use crate::sync::types::{
 };
 use sha2::{Digest, Sha256};
 use sqlx::{Sqlite, SqlitePool, Transaction};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceState {
@@ -55,11 +57,15 @@ pub struct SyncRun {
 #[derive(Debug, Clone)]
 pub struct SyncStore {
     pool: SqlitePool,
+    write_gate: Arc<Mutex<()>>,
 }
 
 impl SyncStore {
     pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            write_gate: Arc::new(Mutex::new(())),
+        }
     }
 
     pub fn pool(&self) -> &SqlitePool {
@@ -122,15 +128,27 @@ impl SyncStore {
         snapshot: NormalizedSessionSnapshot,
         now_ms: i64,
     ) -> Result<PendingMutation> {
+        let _gate = self.write_gate.lock().await;
         let mut tx = self.pool.begin().await?;
         let result = self
-            .queue_local_upsert_in(&mut tx, snapshot, now_ms)
+            .queue_local_upsert_in_unlocked(&mut tx, snapshot, now_ms)
             .await?;
         tx.commit().await?;
         Ok(result)
     }
 
     pub async fn queue_local_upsert_in(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        snapshot: NormalizedSessionSnapshot,
+        now_ms: i64,
+    ) -> Result<PendingMutation> {
+        let _gate = self.write_gate.lock().await;
+        self.queue_local_upsert_in_unlocked(tx, snapshot, now_ms)
+            .await
+    }
+
+    async fn queue_local_upsert_in_unlocked(
         &self,
         tx: &mut Transaction<'_, Sqlite>,
         snapshot: NormalizedSessionSnapshot,
@@ -147,13 +165,26 @@ impl SyncStore {
     }
 
     pub async fn queue_local_delete(&self, key: EntityKey, now_ms: i64) -> Result<PendingMutation> {
+        let _gate = self.write_gate.lock().await;
         let mut tx = self.pool.begin().await?;
-        let result = self.queue_local_delete_in(&mut tx, key, now_ms).await?;
+        let result = self
+            .queue_local_delete_in_unlocked(&mut tx, key, now_ms)
+            .await?;
         tx.commit().await?;
         Ok(result)
     }
 
     pub async fn queue_local_delete_in(
+        &self,
+        tx: &mut Transaction<'_, Sqlite>,
+        key: EntityKey,
+        now_ms: i64,
+    ) -> Result<PendingMutation> {
+        let _gate = self.write_gate.lock().await;
+        self.queue_local_delete_in_unlocked(tx, key, now_ms).await
+    }
+
+    async fn queue_local_delete_in_unlocked(
         &self,
         tx: &mut Transaction<'_, Sqlite>,
         key: EntityKey,
@@ -335,9 +366,12 @@ impl SyncStore {
             "INSERT INTO sync_published_bundles
              (bundle_sha256, generation_id, stage, staged_at_ms, published_at_ms)
              VALUES (?, ?, 'staged', ?, NULL)
-             ON CONFLICT(bundle_sha256) DO UPDATE SET generation_id = excluded.generation_id,
+             ON CONFLICT(bundle_sha256) DO UPDATE SET generation_id = CASE
+                 WHEN sync_published_bundles.stage = 'published' THEN sync_published_bundles.generation_id
+                 ELSE excluded.generation_id END,
                stage = CASE WHEN sync_published_bundles.stage = 'published' THEN 'published' ELSE 'staged' END,
-               staged_at_ms = excluded.staged_at_ms",
+               staged_at_ms = CASE WHEN sync_published_bundles.stage = 'published'
+                 THEN sync_published_bundles.staged_at_ms ELSE excluded.staged_at_ms END",
         )
         .bind(bundle_sha256)
         .bind(generation_id)
@@ -364,7 +398,7 @@ impl SyncStore {
     }
 
     pub async fn published_bundle(&self, bundle_sha256: &str) -> Result<Option<PublishedBundle>> {
-        sqlx::query_as::<_, (String, String, String, i64, Option<i64>)>(
+        let bundle = sqlx::query_as::<_, (String, String, String, i64, Option<i64>)>(
             "SELECT bundle_sha256, generation_id, stage, staged_at_ms, published_at_ms
              FROM sync_published_bundles WHERE bundle_sha256 = ?",
         )
@@ -381,8 +415,8 @@ impl SyncStore {
                     published_at_ms,
                 }
             },
-        )
-        .pipe(Ok)
+        );
+        Ok(bundle)
     }
 
     pub async fn set_remote_cursor(
@@ -395,7 +429,8 @@ impl SyncStore {
         sqlx::query(
             "INSERT INTO sync_remote_cursors(generation_id, remote_device_id, cursor_seq, updated_at_ms)
              VALUES (?, ?, ?, ?)
-             ON CONFLICT(generation_id, remote_device_id) DO UPDATE SET cursor_seq = excluded.cursor_seq,
+             ON CONFLICT(generation_id, remote_device_id) DO UPDATE SET
+               cursor_seq = MAX(sync_remote_cursors.cursor_seq, excluded.cursor_seq),
                updated_at_ms = excluded.updated_at_ms",
         )
         .bind(generation_id)
@@ -412,7 +447,7 @@ impl SyncStore {
         generation_id: &str,
         remote_device_id: &str,
     ) -> Result<Option<RemoteCursor>> {
-        sqlx::query_as::<_, (String, String, i64, i64)>(
+        let cursor = sqlx::query_as::<_, (String, String, i64, i64)>(
             "SELECT generation_id, remote_device_id, cursor_seq, updated_at_ms
              FROM sync_remote_cursors WHERE generation_id = ? AND remote_device_id = ?",
         )
@@ -427,8 +462,8 @@ impl SyncStore {
                 cursor_seq,
                 updated_at_ms,
             },
-        )
-        .pipe(Ok)
+        );
+        Ok(cursor)
     }
 
     pub async fn record_run(
@@ -454,7 +489,7 @@ impl SyncStore {
     }
 
     pub async fn run(&self, id: i64) -> Result<Option<SyncRun>> {
-        sqlx::query_as::<_, (i64, String, i64, Option<i64>, String, Option<String>)>(
+        let run = sqlx::query_as::<_, (i64, String, i64, Option<i64>, String, Option<String>)>(
             "SELECT id, trigger, started_at_ms, finished_at_ms, status, error_code
              FROM sync_runs WHERE id = ?",
         )
@@ -470,8 +505,8 @@ impl SyncStore {
                 status,
                 error_code,
             },
-        )
-        .pipe(Ok)
+        );
+        Ok(run)
     }
 }
 
@@ -525,13 +560,6 @@ fn mutation_from_row(
         snapshot,
     })
 }
-
-trait Pipe: Sized {
-    fn pipe<T>(self, f: impl FnOnce(Self) -> T) -> T {
-        f(self)
-    }
-}
-impl<T> Pipe for T {}
 
 #[cfg(test)]
 mod tests {
@@ -773,5 +801,101 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(store.run(id).await.unwrap().unwrap().status, "ok");
+    }
+
+    #[tokio::test]
+    async fn concurrent_local_mutations_are_serialized_and_keep_sequences() {
+        let path = std::env::temp_dir().join(format!("sync-store-{}.sqlite", uuid::Uuid::new_v4()));
+        let store = SyncStore::new(crate::database::connect(&path).await.unwrap());
+        store.initialize_device("device-a", "Laptop").await.unwrap();
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        let first_store = store.clone();
+        let first_barrier = barrier.clone();
+        let first = tokio::spawn(async move {
+            first_barrier.wait().await;
+            first_store
+                .queue_local_upsert(snapshot("first"), 1000)
+                .await
+        });
+        let second_store = store.clone();
+        let second = tokio::spawn(async move {
+            barrier.wait().await;
+            second_store
+                .queue_local_upsert(
+                    NormalizedSessionSnapshot {
+                        key: EntityKey {
+                            platform: "deepseek".into(),
+                            platform_session_id: "session-2".into(),
+                        },
+                        title: "second".into(),
+                        created_at: None,
+                        updated_at: None,
+                        imported_at: "2026-01-01T00:00:00Z".into(),
+                        raw_data: json!({}),
+                        messages: vec![],
+                    },
+                    1000,
+                )
+                .await
+        });
+        let (first, second) = tokio::join!(first, second);
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert!(first.is_ok(), "first mutation failed: {first:?}");
+        assert!(second.is_ok(), "second mutation failed: {second:?}");
+        let pending = store.pending_mutations(10).await.unwrap();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(
+            pending
+                .iter()
+                .map(|item| item.local_seq)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(pending[0].version, EntityVersion::new(1000, 0, "device-a"));
+        assert_eq!(pending[1].version, EntityVersion::new(1000, 1, "device-a"));
+        store.pool().close().await;
+        tokio::fs::remove_file(path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn published_bundle_is_immutable_across_generations() {
+        let store = SyncStore::new(test_pool().await);
+        store.initialize_device("device-a", "Laptop").await.unwrap();
+        store
+            .mark_bundle_staged("same", "generation-a", 10)
+            .await
+            .unwrap();
+        store.mark_bundle_published("same", 20).await.unwrap();
+        store
+            .mark_bundle_staged("same", "generation-b", 30)
+            .await
+            .unwrap();
+        let bundle = store.published_bundle("same").await.unwrap().unwrap();
+        assert_eq!(bundle.generation_id, "generation-a");
+        assert_eq!(bundle.stage, "published");
+        assert_eq!(bundle.staged_at_ms, 10);
+        assert_eq!(bundle.published_at_ms, Some(20));
+    }
+
+    #[tokio::test]
+    async fn remote_cursor_never_moves_backwards() {
+        let store = SyncStore::new(test_pool().await);
+        store.initialize_device("device-a", "Laptop").await.unwrap();
+        store
+            .set_remote_cursor("generation-a", "device-b", 10, 20)
+            .await
+            .unwrap();
+        store
+            .set_remote_cursor("generation-a", "device-b", 3, 30)
+            .await
+            .unwrap();
+        let cursor = store
+            .remote_cursor("generation-a", "device-b")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cursor.cursor_seq, 10);
+        assert_eq!(cursor.updated_at_ms, 30);
     }
 }
