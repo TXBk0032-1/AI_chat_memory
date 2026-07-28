@@ -144,7 +144,6 @@ impl SyncStore {
         snapshot: NormalizedSessionSnapshot,
         now_ms: i64,
     ) -> Result<PendingMutation> {
-        let _gate = self.write_gate.lock().await;
         self.queue_local_upsert_in_unlocked(tx, snapshot, now_ms)
             .await
     }
@@ -181,7 +180,6 @@ impl SyncStore {
         key: EntityKey,
         now_ms: i64,
     ) -> Result<PendingMutation> {
-        let _gate = self.write_gate.lock().await;
         self.queue_local_delete_in_unlocked(tx, key, now_ms).await
     }
 
@@ -977,10 +975,27 @@ mod tests {
             !task_b.is_finished(),
             "second transaction should wait for the first commit"
         );
+        let second_a = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            store.queue_local_delete_in(
+                &mut tx_a,
+                EntityKey {
+                    platform: "chat".into(),
+                    platform_session_id: "c".into(),
+                },
+                1000,
+            ),
+        )
+        .await;
+        assert!(
+            second_a.is_ok(),
+            "transaction A must be able to re-enter _in while B waits"
+        );
+        second_a.unwrap().unwrap();
         tx_a.commit().await.unwrap();
         task_b.await.unwrap().unwrap();
         let pending = store.pending_mutations(10).await.unwrap();
-        assert_eq!(pending.len(), 2);
+        assert_eq!(pending.len(), 3);
         pool.close().await;
         let _ = tokio::fs::remove_file(path).await;
     }
