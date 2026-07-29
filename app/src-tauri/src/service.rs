@@ -19,6 +19,7 @@ use crate::{
     sync::{
         backend::CloudBackend,
         credentials::{CredentialStore, SecretKind, SecretValue, SystemCredentialStore},
+        engine::SyncEngine,
         store::SyncStore,
         types::SyncTrigger,
         webdav::WebDavBackend,
@@ -185,7 +186,35 @@ impl AppService {
     }
 
     pub async fn sync_now(&self) -> Result<CloudSyncStatus> {
-        let _ = SyncTrigger::Manual;
+        let settings = self.settings().await;
+        if !settings.cloud_sync.enabled {
+            return Ok(self.cloud_sync_status().await);
+        }
+        let password = self
+            .credentials
+            .get("default", SecretKind::WebDavPassword)
+            .await?
+            .ok_or_else(|| AppError::Credential("WebDAV password is not configured".into()))?;
+        let backend = Arc::new(
+            WebDavBackend::new(
+                &settings.cloud_sync.base_url,
+                &settings.cloud_sync.username,
+                password.expose_secret(),
+            )
+            .map_err(|e| AppError::Configuration(e.to_string()))?,
+        );
+        let device_id = format!("device-{}", std::process::id());
+        self.sync_store
+            .initialize_device(&device_id, "本机")
+            .await?;
+        let engine = SyncEngine::new(
+            self.sync_store.clone(),
+            backend,
+            "default",
+            "generation-1",
+            device_id,
+        );
+        engine.run_once(SyncTrigger::Manual).await?;
         Ok(self.cloud_sync_status().await)
     }
 
