@@ -244,6 +244,9 @@ fn parse_multistatus(bytes: &[u8]) -> CloudResult<Vec<RemoteEntry>> {
                 b"collection" => collection = true,
                 _ => {}
             },
+            Ok(Event::Empty(event)) if event.local_name().as_ref() == b"collection" => {
+                collection = true;
+            }
             Ok(Event::Text(text)) => {
                 let value = String::from_utf8_lossy(text.as_ref()).into_owned();
                 match field.take() {

@@ -355,6 +355,7 @@ pub struct CloudSyncSettings {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
 pub enum CloudSyncState {
     Disabled,
     Idle,

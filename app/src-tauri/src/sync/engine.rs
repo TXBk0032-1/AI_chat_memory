@@ -2,7 +2,8 @@ use crate::{
     error::{AppError, Result},
     sync::{
         backend::{CloudBackend, RemotePath},
-        bundle::{SealedBundle, seal_bundle},
+        bundle::{BundleLimits, SealedBundle, open_bundle, seal_bundle},
+        merge::MergeEngine,
         store::{PendingMutation, SyncStore, current_time_millis},
         types::{BundleChange, BundleContents, SyncTrigger},
     },
@@ -129,8 +130,103 @@ impl<B: CloudBackend + 'static> SyncEngine<B> {
 
     pub async fn run_once(&self, _trigger: SyncTrigger) -> Result<SyncReport> {
         let _guard = self.single_flight.lock().await;
+        let mut report = self.pull_remote().await?;
         let published = self.publish_pending().await?;
-        Ok(published)
+        report.published += published.published;
+        report.acknowledged += published.acknowledged;
+        Ok(report)
+    }
+
+    async fn pull_remote(&self) -> Result<SyncReport> {
+        let devices_path =
+            RemotePath::parse(&format!("v1/generations/{}/devices", self.generation_id))
+                .map_err(|e| AppError::InvalidData(e.to_string()))?;
+        let entries = match self.backend.list_depth_one(&devices_path).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == "not_found" => return Ok(SyncReport::default()),
+            Err(error) => return Err(cloud_error(error)),
+        };
+        let merger = MergeEngine::new(self.store.pool().clone(), None);
+        let mut report = SyncReport::default();
+        for entry in entries
+            .into_iter()
+            .filter(|entry| entry.is_collection && entry.name != self.device_id)
+        {
+            let head_path = devices_path
+                .join(&entry.name)
+                .and_then(|p| p.join("head.json"))
+                .map_err(|e| AppError::InvalidData(e.to_string()))?;
+            let head: HeadDocument = serde_json::from_slice(
+                &self
+                    .backend
+                    .get(&head_path)
+                    .await
+                    .map_err(cloud_error)?
+                    .bytes,
+            )?;
+            let mut chain = Vec::new();
+            let mut current = Some(head);
+            let cursor = self
+                .store
+                .remote_cursor(&self.generation_id, &entry.name)
+                .await?
+                .map(|c| c.cursor_seq)
+                .unwrap_or(0);
+            while let Some(document) = current {
+                if document.end_seq <= cursor {
+                    break;
+                }
+                chain.push(document.clone());
+                current = match document.path.is_empty() {
+                    true => None,
+                    false => match document.path.parse::<String>() {
+                        Ok(_) => {
+                            let bytes = self
+                                .backend
+                                .get(
+                                    &RemotePath::parse(&document.path)
+                                        .map_err(|e| AppError::InvalidData(e.to_string()))?,
+                                )
+                                .await
+                                .map_err(cloud_error)?
+                                .bytes;
+                            let decoded = open_bundle(&bytes, &BundleLimits::default())?;
+                            decoded.header.previous_path.map(|path| HeadDocument {
+                                generation_id: decoded.header.generation_id,
+                                device_id: decoded.header.device_id,
+                                end_seq: decoded.header.previous_end_seq.unwrap_or(0),
+                                path,
+                                sha256: decoded.header.previous_sha256.unwrap_or_default(),
+                            })
+                        }
+                        Err(_) => None,
+                    },
+                };
+            }
+            for document in chain.into_iter().rev() {
+                let bytes = self
+                    .backend
+                    .get(
+                        &RemotePath::parse(&document.path)
+                            .map_err(|e| AppError::InvalidData(e.to_string()))?,
+                    )
+                    .await
+                    .map_err(cloud_error)?
+                    .bytes;
+                let decoded = open_bundle(&bytes, &BundleLimits::default())?;
+                let expected = self
+                    .store
+                    .remote_cursor(&self.generation_id, &entry.name)
+                    .await?
+                    .map(|c| c.cursor_seq)
+                    .unwrap_or(cursor);
+                let outcome = merger
+                    .apply_bundle(&self.generation_id, &entry.name, expected, &decoded)
+                    .await?;
+                report.pulled += outcome.applied;
+            }
+        }
+        Ok(report)
     }
 
     /// Rebuilds the local publication boundary under a new generation identifier.
@@ -152,6 +248,7 @@ impl<B: CloudBackend + 'static> SyncEngine<B> {
             self.device_id, contents.end_seq, sealed.file_sha256
         ))
         .map_err(|e| AppError::InvalidData(e.to_string()))?;
+        self.ensure_parent_collections(&path).await?;
         self.backend
             .put_immutable(&path, &sealed.bytes)
             .await
@@ -176,6 +273,7 @@ impl<B: CloudBackend + 'static> SyncEngine<B> {
         let contents = self.contents_from_pending(&pending)?;
         let sealed = seal_bundle(&contents)?;
         let path = self.bundle_path(&sealed, contents.start_seq, contents.end_seq)?;
+        self.ensure_parent_collections(&path).await?;
         let digest = sealed.file_sha256.clone();
         self.store
             .mark_bundle_staged(&digest, &self.generation_id, current_time_millis())
@@ -278,6 +376,23 @@ impl<B: CloudBackend + 'static> SyncEngine<B> {
         ))
         .map_err(|error| AppError::InvalidData(error.to_string()))
     }
+
+    async fn ensure_parent_collections(&self, path: &RemotePath) -> Result<()> {
+        if path.segments().len() < 2 {
+            return Ok(());
+        }
+        let mut parent = RemotePath::root();
+        for segment in &path.segments()[..path.segments().len() - 1] {
+            parent = parent
+                .join(segment)
+                .map_err(|e| AppError::InvalidData(e.to_string()))?;
+            self.backend
+                .create_collection(&parent)
+                .await
+                .map_err(cloud_error)?;
+        }
+        Ok(())
+    }
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -370,5 +485,59 @@ mod tests {
             engine.run_once(SyncTrigger::Manual).await.unwrap(),
             SyncReport::default()
         );
+    }
+
+    #[tokio::test]
+    async fn two_devices_pull_remote_bundle_without_echo_outbox() {
+        register_sqlite_vec();
+        let pool_a = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let pool_b = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        initialize_schema(&pool_a).await.unwrap();
+        initialize_schema(&pool_b).await.unwrap();
+        let store_a = SyncStore::new(pool_a.clone());
+        let store_b = SyncStore::new(pool_b.clone());
+        store_a.initialize_device("device-a", "A").await.unwrap();
+        store_b.initialize_device("device-b", "B").await.unwrap();
+        let session = NormalizedSession {
+            id: "local-a".into(),
+            platform: "chat".into(),
+            platform_session_id: "remote-1".into(),
+            title: "from-a".into(),
+            created_at: None,
+            updated_at: None,
+            imported_at: "2026-07-29T00:00:00Z".into(),
+            messages: vec![],
+            raw_data: json!({"fixture": true}),
+        };
+        import_sessions(&pool_a, &[session], true).await.unwrap();
+        let server = TestWebDav::start("user", "pass").await;
+        let backend_a = Arc::new(server.client("user", "pass").unwrap());
+        let backend_b = Arc::new(server.client("user", "pass").unwrap());
+        let engine_a = SyncEngine::new(store_a, backend_a, "vault", "generation", "device-a");
+        let engine_b = SyncEngine::new(
+            store_b.clone(),
+            backend_b.clone(),
+            "vault",
+            "generation",
+            "device-b",
+        );
+        let first_report = engine_a.run_once(SyncTrigger::Manual).await.unwrap();
+        assert_eq!((first_report.published, first_report.acknowledged), (1, 1));
+        let report = engine_b.run_once(SyncTrigger::Manual).await.unwrap();
+        assert!(report.pulled >= 1);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
+            .fetch_one(&pool_b)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        assert!(store_b.pending_mutations(10).await.unwrap().is_empty());
     }
 }
