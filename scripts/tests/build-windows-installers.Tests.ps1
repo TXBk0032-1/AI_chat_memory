@@ -34,6 +34,9 @@ if ($workflowSource -notmatch 'verify-portable-archive\.ps1') {
 if ($workflowSource -notmatch 'name:\s+ai-chat-memory-windows-release') {
     throw "Workflow artifact name is stale"
 }
+if ($workflowSource -notmatch 'CUDA_COMPUTE_CAP:\s+["'']89["'']') {
+    throw "Workflow does not set the CUDA compute capability for GPU-less runners"
+}
 
 $planJson = & $Builder -PlanOnly
 if ($LASTEXITCODE -ne 0) {

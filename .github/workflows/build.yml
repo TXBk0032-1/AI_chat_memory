@@ -38,6 +38,8 @@ jobs:
           sub-packages: '["nvcc", "cudart", "cublas", "curand", "nvrtc", "visual_studio_integration"]'
 
       - name: Build and test release
+        env:
+          CUDA_COMPUTE_CAP: "89"
         shell: pwsh
         run: ./scripts/ci.ps1 release
 
