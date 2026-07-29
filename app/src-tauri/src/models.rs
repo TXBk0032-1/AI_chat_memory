@@ -340,6 +340,65 @@ pub struct AppSettings {
     pub semantic_search: SemanticSearchSettings,
     #[serde(default = "default_true")]
     pub mcp_enabled: bool,
+    #[serde(default)]
+    pub cloud_sync: CloudSyncSettings,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloudSyncSettings {
+    pub enabled: bool,
+    pub base_url: String,
+    pub root_path: String,
+    pub username: String,
+    pub encryption_enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CloudSyncState {
+    Disabled,
+    Idle,
+    Syncing,
+    Offline,
+    NeedsUnlock,
+    AuthError,
+    ProtocolError,
+}
+
+impl Default for CloudSyncState {
+    fn default() -> Self {
+        Self::Disabled
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RemoteDeviceStatus {
+    pub device_id: String,
+    pub display_name: String,
+    pub last_seen_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CloudSyncStatus {
+    pub state: CloudSyncState,
+    pub last_success_at: Option<String>,
+    pub pending_mutations: i64,
+    pub last_error_code: Option<String>,
+    pub last_error_message: Option<String>,
+    pub devices: Vec<RemoteDeviceStatus>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CloudCredentialInput {
+    pub webdav_password: String,
+    pub sync_password: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CloudConnectionTestResult {
+    pub ok: bool,
+    pub message: String,
+    pub supports_conditional_write: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -387,6 +446,7 @@ impl Default for AppSettings {
             theme: ThemePreference::System,
             semantic_search: SemanticSearchSettings::default(),
             mcp_enabled: true,
+            cloud_sync: CloudSyncSettings::default(),
         }
     }
 }

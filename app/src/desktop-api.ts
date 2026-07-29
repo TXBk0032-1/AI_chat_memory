@@ -44,7 +44,21 @@ export type SettingsModel = {
   theme: ThemePreference
   semantic_search: SemanticSearchSettings
   mcp_enabled: boolean
+  cloud_sync: CloudSyncSettings
 }
+
+export type CloudSyncSettings = {
+  enabled: boolean
+  base_url: string
+  root_path: string
+  username: string
+  encryption_enabled: boolean
+}
+export type CloudSyncState = 'disabled' | 'idle' | 'syncing' | 'offline' | 'needs_unlock' | 'auth_error' | 'protocol_error'
+export type RemoteDeviceStatus = { device_id: string; display_name: string; last_seen_at?: string | null }
+export type CloudSyncStatus = { state: CloudSyncState; last_success_at?: string | null; pending_mutations: number; last_error_code?: string | null; last_error_message?: string | null; devices: RemoteDeviceStatus[] }
+export type CloudCredentialInput = { webdav_password: string; sync_password?: string | null }
+export type CloudConnectionTestResult = { ok: boolean; message: string; supports_conditional_write: boolean }
 
 export type LocalServiceStatus =
   | { state: 'starting' }
@@ -146,6 +160,12 @@ export interface DesktopApi {
   moveDataDirectory(path: string): Promise<void>
   confirmCloseBehavior(behavior: Exclude<CloseBehavior, 'ask'>): Promise<void>
   writeExportFile(path: string, payload: ExportFilePayload): Promise<void>
+  getCloudSyncStatus(): Promise<CloudSyncStatus>
+  testCloudSyncConnection(): Promise<CloudConnectionTestResult>
+  saveCloudSyncCredentials(credentials: CloudCredentialInput): Promise<void>
+  syncNow(): Promise<CloudSyncStatus>
+  rewriteCloudArchive(): Promise<CloudSyncStatus>
+  removeCloudDeviceRecord(deviceId: string): Promise<CloudSyncStatus>
 }
 
 export const desktopApi: DesktopApi = {
@@ -169,4 +189,10 @@ export const desktopApi: DesktopApi = {
   moveDataDirectory: (path) => invoke('move_data_directory', { path }),
   confirmCloseBehavior: (behavior) => invoke('confirm_close_behavior', { behavior }),
   writeExportFile: (path, payload) => invoke('write_export_file', { path, payload }),
+  getCloudSyncStatus: () => invoke('get_cloud_sync_status'),
+  testCloudSyncConnection: () => invoke('test_cloud_sync_connection'),
+  saveCloudSyncCredentials: (credentials) => invoke('save_cloud_sync_credentials', { credentials }),
+  syncNow: () => invoke('sync_now'),
+  rewriteCloudArchive: () => invoke('rewrite_cloud_archive'),
+  removeCloudDeviceRecord: (deviceId) => invoke('remove_cloud_device_record', { deviceId }),
 }

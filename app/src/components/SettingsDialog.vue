@@ -2,6 +2,7 @@
 import { ref, watch } from 'vue'
 import {
   Cable,
+  Cloud,
   Check,
   Clipboard,
   FolderOpen,
@@ -13,6 +14,7 @@ import {
   SlidersHorizontal,
   Sun,
 } from 'lucide-vue-next'
+import CloudSyncSettings from './CloudSyncSettings.vue'
 import type {
   ApiStatus,
   EmbeddingBackendKind,
@@ -24,6 +26,7 @@ import type {
   SemanticRuntimeStatus,
   SettingsModel,
   ThemePreference,
+  CloudSyncStatus,
 } from '../desktop-api'
 
 const props = defineProps<{
@@ -35,12 +38,16 @@ const props = defineProps<{
   semanticBusy?: boolean
   downloadProgress?: ModelDownloadProgress | null
   reindexProgress?: ReindexProgress | null
+  cloudSyncStatus?: CloudSyncStatus | null
+  cloudSyncBusy?: boolean
 }>()
 const settings = defineModel<SettingsModel>('settings', { required: true })
 const originText = defineModel<string>('originText', { required: true })
-type SettingsPage = 'general' | 'semantic' | 'connections'
+type SettingsPage = 'general' | 'semantic' | 'connections' | 'cloud-sync'
 
 const activePage = ref<SettingsPage>('general')
+const cloudPassword = ref('')
+const syncPassword = ref('')
 
 watch(() => props.visible, (visible) => {
   if (visible) activePage.value = 'general'
@@ -59,6 +66,9 @@ const emit = defineEmits<{
   downloadLocalModel: []
   importLocalModel: []
   cancelSemanticWork: []
+  cloudSyncTest: [password: string, syncPassword: string]
+  cloudSyncNow: [password: string, syncPassword: string]
+  cloudSyncRewrite: []
 }>()
 
 function mcpStateLabel(status: ApiStatus | null | undefined): string {
@@ -131,6 +141,15 @@ if (!settings.value.semantic_search.local.dtype) {
               <Cable :size="16" aria-hidden="true" />
               <span>连接服务</span>
             </button>
+            <button
+              id="settings-navigation-cloud-sync"
+              type="button"
+              class="settings-navigation__button"
+              :class="{ active: activePage === 'cloud-sync' }"
+              :aria-current="activePage === 'cloud-sync' ? 'page' : undefined"
+              aria-controls="settings-page-cloud-sync"
+              @click="activePage = 'cloud-sync'"
+            ><Cloud :size="16" aria-hidden="true" /><span>云同步</span></button>
           </nav>
           <div class="settings-pages">
             <section
@@ -312,6 +331,24 @@ if (!settings.value.semantic_search.local.dtype) {
               </button>
             </div>
           </section>
+            </section>
+            <section
+              v-show="activePage === 'cloud-sync'"
+              id="settings-page-cloud-sync"
+              class="settings-content settings-page"
+              role="region"
+              aria-labelledby="settings-navigation-cloud-sync"
+            >
+              <CloudSyncSettings
+                v-model:settings="settings.cloud_sync"
+                v-model:password="cloudPassword"
+                v-model:sync-password="syncPassword"
+                :status="cloudSyncStatus || { state: 'disabled', pending_mutations: 0, devices: [] }"
+                :busy="cloudSyncBusy"
+                @test="emit('cloudSyncTest', cloudPassword, syncPassword)"
+                @sync="emit('cloudSyncNow', cloudPassword, syncPassword)"
+                @rewrite="emit('cloudSyncRewrite')"
+              />
             </section>
           </div>
         </div>

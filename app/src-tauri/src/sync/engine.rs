@@ -10,6 +10,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -26,6 +27,77 @@ pub struct SyncReport {
     pub pulled: usize,
     pub published: usize,
     pub acknowledged: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct SchedulerState {
+    pending: Option<SyncTrigger>,
+    pub paused_for_auth: bool,
+    pub retry_delay: Duration,
+}
+
+impl Default for SchedulerState {
+    fn default() -> Self {
+        Self {
+            pending: None,
+            paused_for_auth: false,
+            retry_delay: Duration::from_secs(30),
+        }
+    }
+}
+
+impl SchedulerState {
+    pub fn submit(&mut self, trigger: SyncTrigger) {
+        if trigger == SyncTrigger::Manual {
+            self.paused_for_auth = false;
+        }
+        if self
+            .pending
+            .as_ref()
+            .is_none_or(|current| priority(trigger) > priority(*current))
+        {
+            self.pending = Some(trigger);
+        }
+    }
+
+    pub fn take(&mut self) -> Option<SyncTrigger> {
+        self.pending.take()
+    }
+
+    pub fn delay_for(trigger: SyncTrigger) -> Duration {
+        match trigger {
+            SyncTrigger::Manual => Duration::ZERO,
+            SyncTrigger::LocalMutation => Duration::from_secs(5),
+            SyncTrigger::Startup => Duration::from_secs(30),
+            SyncTrigger::Periodic => Duration::from_secs(15 * 60),
+        }
+    }
+
+    pub fn success(&mut self) {
+        self.retry_delay = Duration::from_secs(30);
+    }
+
+    pub fn failure(&mut self, authentication: bool) {
+        self.paused_for_auth = authentication;
+        self.retry_delay = (self.retry_delay * 2).min(Duration::from_secs(60 * 60));
+    }
+
+    pub fn retry_delay_with_jitter(&self, entropy: u32) -> Duration {
+        let window = self.retry_delay.as_millis() / 5;
+        let offset = (u128::from(entropy) % (window.saturating_mul(2).saturating_add(1))) as i128
+            - window as i128;
+        let base = self.retry_delay.as_millis() as i128;
+        Duration::from_millis(base.saturating_add(offset).max(0) as u64)
+    }
+}
+
+fn priority(trigger: SyncTrigger) -> u8 {
+    match trigger {
+        SyncTrigger::Periodic => 0,
+        SyncTrigger::Startup => 1,
+        SyncTrigger::LocalMutation => 2,
+        SyncTrigger::Manual => 3,
+    }
 }
 
 pub struct SyncEngine<B> {
@@ -59,6 +131,41 @@ impl<B: CloudBackend + 'static> SyncEngine<B> {
         let _guard = self.single_flight.lock().await;
         let published = self.publish_pending().await?;
         Ok(published)
+    }
+
+    /// Rebuilds the local publication boundary under a new generation identifier.
+    /// The existing generation remains untouched until the new immutable bundle has
+    /// been uploaded and read back successfully.
+    pub async fn rewrite_generation(&self, new_generation_id: &str) -> Result<SyncReport> {
+        if new_generation_id.is_empty() || new_generation_id == self.generation_id {
+            return Err(AppError::InvalidData("new generation id is invalid".into()));
+        }
+        let _guard = self.single_flight.lock().await;
+        let pending = self.store.pending_mutations(500).await?;
+        if pending.is_empty() {
+            return Ok(SyncReport::default());
+        }
+        let contents = self.contents_from_pending(&pending)?;
+        let sealed = seal_bundle(&contents)?;
+        let path = RemotePath::parse(&format!(
+            "v1/generations/{new_generation_id}/devices/{}/bundles/{}-{}.acmb",
+            self.device_id, contents.end_seq, sealed.file_sha256
+        ))
+        .map_err(|e| AppError::InvalidData(e.to_string()))?;
+        self.backend
+            .put_immutable(&path, &sealed.bytes)
+            .await
+            .map_err(cloud_error)?;
+        let downloaded = self.backend.get(&path).await.map_err(cloud_error)?;
+        if downloaded.bytes != sealed.bytes {
+            return Err(AppError::InvalidData(
+                "generation rewrite verification failed".into(),
+            ));
+        }
+        Ok(SyncReport {
+            published: pending.len(),
+            ..SyncReport::default()
+        })
     }
 
     pub async fn publish_pending(&self) -> Result<SyncReport> {
@@ -201,6 +308,34 @@ mod tests {
     };
     use serde_json::json;
     use sqlx::sqlite::SqlitePoolOptions;
+
+    #[test]
+    fn scheduler_coalesces_by_priority_and_caps_backoff() {
+        let mut state = SchedulerState::default();
+        state.submit(SyncTrigger::Periodic);
+        state.submit(SyncTrigger::Startup);
+        state.submit(SyncTrigger::LocalMutation);
+        state.submit(SyncTrigger::Manual);
+        assert_eq!(state.take(), Some(SyncTrigger::Manual));
+        assert_eq!(
+            SchedulerState::delay_for(SyncTrigger::LocalMutation),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            SchedulerState::delay_for(SyncTrigger::Periodic),
+            Duration::from_secs(900)
+        );
+        for _ in 0..10 {
+            state.failure(false);
+        }
+        assert_eq!(state.retry_delay, Duration::from_secs(3600));
+        state.failure(true);
+        assert!(state.paused_for_auth);
+        state.submit(SyncTrigger::Manual);
+        assert!(!state.paused_for_auth);
+        state.success();
+        assert_eq!(state.retry_delay, Duration::from_secs(30));
+    }
 
     #[tokio::test]
     async fn publish_is_idempotent_and_acknowledges_outbox_after_head_update() {

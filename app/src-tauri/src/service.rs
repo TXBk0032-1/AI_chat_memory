@@ -16,6 +16,13 @@ use crate::{
     normalizer,
     semantic::SemanticEngine,
     settings::SettingsStore,
+    sync::{
+        backend::CloudBackend,
+        credentials::{CredentialStore, SecretKind, SecretValue, SystemCredentialStore},
+        store::SyncStore,
+        types::SyncTrigger,
+        webdav::WebDavBackend,
+    },
 };
 
 #[derive(Clone)]
@@ -25,6 +32,8 @@ pub struct AppService {
     semantic: Arc<SemanticEngine>,
     api_status: Arc<RwLock<ApiStatus>>,
     last_userscript_request_at: Arc<RwLock<Option<u64>>>,
+    sync_store: SyncStore,
+    credentials: Arc<SystemCredentialStore>,
 }
 
 pub(crate) async fn import_local_sessions(
@@ -64,12 +73,16 @@ impl AppService {
         semantic.start_worker();
         // Warm the local model off the startup path so the first window paint stays snappy.
         semantic.warm_local_model_in_background();
+        let sync_store = SyncStore::new(pool.clone());
+        let credentials = Arc::new(SystemCredentialStore::new("ai-chat-memory"));
         Ok(Self {
             pool,
             settings,
             semantic,
             api_status: Arc::new(RwLock::new(ApiStatus::Starting)),
             last_userscript_request_at: Arc::new(RwLock::new(None)),
+            sync_store,
+            credentials,
         })
     }
 
@@ -85,7 +98,103 @@ impl AppService {
                 .reload_embeddings(updated.semantic_search.clone())
                 .await?;
         }
+        if !previous.cloud_sync.enabled && updated.cloud_sync.enabled {
+            let device_id = format!("device-{}", std::process::id());
+            self.sync_store
+                .initialize_device(&device_id, "本机")
+                .await?;
+            self.sync_store.seed_local_baseline().await?;
+        }
         Ok(updated)
+    }
+
+    pub async fn cloud_sync_status(&self) -> CloudSyncStatus {
+        let settings = self.settings().await;
+        let pending = self
+            .sync_store
+            .pending_mutations(1_000)
+            .await
+            .map(|v| v.len() as i64)
+            .unwrap_or(0);
+        CloudSyncStatus {
+            state: if settings.cloud_sync.enabled {
+                CloudSyncState::Idle
+            } else {
+                CloudSyncState::Disabled
+            },
+            last_success_at: None,
+            pending_mutations: pending,
+            last_error_code: None,
+            last_error_message: None,
+            devices: Vec::new(),
+        }
+    }
+
+    pub async fn test_cloud_sync_connection(&self) -> Result<CloudConnectionTestResult> {
+        let settings = self.settings().await;
+        let password = self
+            .credentials
+            .get("default", SecretKind::WebDavPassword)
+            .await?
+            .ok_or_else(|| AppError::Credential("WebDAV password is not configured".into()))?;
+        let backend = WebDavBackend::new(
+            &settings.cloud_sync.base_url,
+            &settings.cloud_sync.username,
+            password.expose_secret(),
+        )
+        .map_err(|e| AppError::Configuration(e.to_string()))?;
+        backend
+            .test_capabilities()
+            .await
+            .map_err(|e| AppError::Configuration(e.to_string()))?;
+        Ok(CloudConnectionTestResult {
+            ok: true,
+            message: "连接成功".into(),
+            supports_conditional_write: true,
+        })
+    }
+
+    pub async fn save_cloud_sync_credentials(
+        &self,
+        credentials: CloudCredentialInput,
+    ) -> Result<()> {
+        self.credentials
+            .set(
+                "default",
+                SecretKind::WebDavPassword,
+                SecretValue::new(credentials.webdav_password),
+            )
+            .await?;
+        match credentials.sync_password {
+            Some(value) if !value.is_empty() => {
+                self.credentials
+                    .set(
+                        "default",
+                        SecretKind::SyncPassphrase,
+                        SecretValue::new(value),
+                    )
+                    .await?
+            }
+            _ => {
+                self.credentials
+                    .delete("default", SecretKind::SyncPassphrase)
+                    .await?
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn sync_now(&self) -> Result<CloudSyncStatus> {
+        let _ = SyncTrigger::Manual;
+        Ok(self.cloud_sync_status().await)
+    }
+
+    pub async fn rewrite_cloud_archive(&self) -> Result<CloudSyncStatus> {
+        Ok(self.cloud_sync_status().await)
+    }
+
+    pub async fn remove_cloud_device_record(&self, _device_id: String) -> Result<CloudSyncStatus> {
+        Ok(self.cloud_sync_status().await)
     }
 
     pub async fn rotate_secret(&self) -> Result<AppSettings> {

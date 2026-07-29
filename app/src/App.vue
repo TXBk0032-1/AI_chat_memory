@@ -64,6 +64,7 @@ import { useSessionCatalog } from './composables/useSessionCatalog'
 import { usePaneResize } from './composables/usePaneResize'
 import { useTheme } from './composables/useTheme'
 import { useSettings } from './composables/useSettings'
+import { useCloudSync } from './composables/useCloudSync'
 import { useToastQueue } from './composables/useToastQueue'
 import { useBranchNavigation } from './composables/useBranchNavigation'
 import { useConversationSearch } from './composables/useConversationSearch'
@@ -94,7 +95,7 @@ const exportRenderModel = ref<ConversationExport | null>(null)
 const exportDocumentRef = ref<InstanceType<typeof ExportDocument> | null>(null)
 const pendingCloseBehavior = ref<'hide_to_tray' | 'exit' | null>(null)
 const expandedThinking = ref(new Set<string>())
-const settings = ref<SettingsModel>({ setup_complete: false, secret_enabled: false, allowed_origins: [], close_behavior: 'ask', tray_click_behavior: 'show_menu', theme: 'system', semantic_search: { enabled: true, default_mode: 'hybrid', backend: 'local', local: { model: 'BAAI/bge-small-zh-v1.5', device: 'auto', dtype: 'auto' }, ollama: { base_url: 'http://127.0.0.1:11434', model: 'nomic-embed-text' }, llama_cpp: { base_url: 'http://127.0.0.1:8080/v1', model: 'bge-small-zh-v1.5' }, openai_compatible: { base_url: 'https://api.openai.com/v1', model: 'text-embedding-3-small' } }, mcp_enabled: true })
+const settings = ref<SettingsModel>({ setup_complete: false, secret_enabled: false, allowed_origins: [], close_behavior: 'ask', tray_click_behavior: 'show_menu', theme: 'system', semantic_search: { enabled: true, default_mode: 'hybrid', backend: 'local', local: { model: 'BAAI/bge-small-zh-v1.5', device: 'auto', dtype: 'auto' }, ollama: { base_url: 'http://127.0.0.1:11434', model: 'nomic-embed-text' }, llama_cpp: { base_url: 'http://127.0.0.1:8080/v1', model: 'bge-small-zh-v1.5' }, openai_compatible: { base_url: 'https://api.openai.com/v1', model: 'text-embedding-3-small' } }, mcp_enabled: true, cloud_sync: { enabled: false, base_url: '', root_path: '', username: '', encryption_enabled: false } })
 const apiStatus = ref<ApiStatus>({ service: { state: 'starting' }, userscript_connected: false, mcp: { state: 'stopped' }, mcp_url: 'http://127.0.0.1:19821/mcp' })
 const contextMenu = ref({ visible: false, x: 0, y: 0, selectedText: '' })
 const sidebarCollapsed = ref(loadSidebarCollapsed())
@@ -206,6 +207,7 @@ const {
   }
 })
 const conversationSearch = useConversationSearch(selected, committedQuery, searchMode, desktopApi)
+const cloudSync = useCloudSync()
 const { hits: sessionSearchHits, index: searchHitIndex, loop: loopSearch } = conversationSearch
 const loadSearchHits = conversationSearch.load
 const {
@@ -217,6 +219,21 @@ const {
   accept: theme.acceptPreview,
   cancel: theme.cancelPreview,
 })
+
+async function cloudSyncTest(password: string, syncPassword: string) {
+  try {
+    if (password) await desktopApi.saveCloudSyncCredentials({ webdav_password: password, sync_password: syncPassword || null })
+    await desktopApi.testCloudSyncConnection()
+    await cloudSync.refreshStatus()
+  } catch (reason) { error.value = String(reason) }
+}
+async function cloudSyncNow(password: string, syncPassword: string) {
+  try {
+    if (password) await desktopApi.saveCloudSyncCredentials({ webdav_password: password, sync_password: syncPassword || null })
+    await cloudSync.syncNow()
+  } catch (reason) { error.value = String(reason) }
+}
+async function cloudSyncRewrite() { try { await cloudSync.rewriteArchive() } catch (reason) { error.value = String(reason) } }
 
 function setSidebarCollapsed(collapsed: boolean) {
   sidebarCollapsed.value = collapsed
@@ -893,6 +910,8 @@ onBeforeUnmount(() => {
       :semantic-busy="semanticBusy"
       :download-progress="downloadProgress"
       :reindex-progress="reindexProgress"
+      :cloud-sync-status="cloudSync.status.value"
+      :cloud-sync-busy="cloudSync.busy.value"
       @close="closeSettings"
       @save="saveSettings"
       @preview-theme="previewTheme"
@@ -905,6 +924,9 @@ onBeforeUnmount(() => {
       @download-local-model="downloadLocalModel"
       @import-local-model="importLocalModel"
       @cancel-semantic-work="cancelSemanticWork"
+      @cloud-sync-test="cloudSyncTest"
+      @cloud-sync-now="cloudSyncNow"
+      @cloud-sync-rewrite="cloudSyncRewrite"
     />
 
     <SessionDialogs

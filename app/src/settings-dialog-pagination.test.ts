@@ -38,6 +38,7 @@ function settingsFixture(): SettingsModel {
       openai_compatible: { base_url: 'https://example.test/v1', model: 'test-model' },
     },
     mcp_enabled: true,
+    cloud_sync: { enabled: false, base_url: '', root_path: '', username: '', encryption_enabled: false },
   }
 }
 
