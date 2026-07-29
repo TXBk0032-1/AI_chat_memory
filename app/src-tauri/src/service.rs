@@ -3,7 +3,10 @@ use sqlx::SqlitePool;
 use std::{
     io::Read,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::RwLock;
@@ -35,6 +38,7 @@ pub struct AppService {
     last_userscript_request_at: Arc<RwLock<Option<u64>>>,
     sync_store: SyncStore,
     credentials: Arc<SystemCredentialStore>,
+    sync_debounce_scheduled: Arc<AtomicBool>,
 }
 
 pub(crate) async fn import_local_sessions(
@@ -76,7 +80,7 @@ impl AppService {
         semantic.warm_local_model_in_background();
         let sync_store = SyncStore::new(pool.clone());
         let credentials = Arc::new(SystemCredentialStore::new("ai-chat-memory"));
-        Ok(Self {
+        let service = Self {
             pool,
             settings,
             semantic,
@@ -84,7 +88,43 @@ impl AppService {
             last_userscript_request_at: Arc::new(RwLock::new(None)),
             sync_store,
             credentials,
-        })
+            sync_debounce_scheduled: Arc::new(AtomicBool::new(false)),
+        };
+        service.start_cloud_sync_worker();
+        Ok(service)
+    }
+
+    fn start_cloud_sync_worker(&self) {
+        let service = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            loop {
+                if service.settings().await.cloud_sync.enabled
+                    && let Err(error) = service.sync_now().await
+                {
+                    tracing::warn!(%error, "periodic cloud sync failed");
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(15 * 60)).await;
+            }
+        });
+    }
+
+    fn notify_local_sync(&self) {
+        if self.sync_debounce_scheduled.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let service = self.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            service
+                .sync_debounce_scheduled
+                .store(false, Ordering::Release);
+            if service.settings().await.cloud_sync.enabled
+                && let Err(error) = service.sync_now().await
+            {
+                tracing::warn!(%error, "debounced cloud sync failed");
+            }
+        });
     }
 
     pub async fn settings(&self) -> AppSettings {
@@ -278,6 +318,7 @@ impl AppService {
             }
         }
         tracing::info!(%platform, received, imported, "session import completed");
+        self.notify_local_sync();
         Ok(ImportResponse {
             imported,
             skipped: 0,
@@ -327,6 +368,7 @@ impl AppService {
             imported,
             "DeepSeek archive import completed"
         );
+        self.notify_local_sync();
         Ok(ImportResponse {
             imported,
             skipped: 0,
@@ -369,6 +411,7 @@ impl AppService {
         delete_local_session(&self.pool, id).await?;
         let _ = self.semantic.delete_session(id).await;
         tracing::info!("session deleted");
+        self.notify_local_sync();
         Ok(())
     }
 
