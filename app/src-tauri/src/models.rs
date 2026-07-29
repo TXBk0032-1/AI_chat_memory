@@ -34,7 +34,7 @@ pub struct SessionOpen {
     pub references: Vec<Reference>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct Reference {
     pub cite_index: i64,
     pub url: String,
@@ -353,10 +353,11 @@ pub struct CloudSyncSettings {
     pub encryption_enabled: bool,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 #[allow(dead_code)]
 pub enum CloudSyncState {
+    #[default]
     Disabled,
     Idle,
     Syncing,
@@ -364,12 +365,6 @@ pub enum CloudSyncState {
     NeedsUnlock,
     AuthError,
     ProtocolError,
-}
-
-impl Default for CloudSyncState {
-    fn default() -> Self {
-        Self::Disabled
-    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
