@@ -141,6 +141,10 @@ Invoke-Step "Test Windows installer contract" {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "tests\build-windows-installers.Tests.ps1")
 }
 
+Invoke-Step "Test development single-file builder contract" {
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "tests\build-dev-portable.Tests.ps1")
+}
+
 Invoke-Step "Check Rust formatting" {
     Push-Location $Rust
     try { cargo fmt --check } finally { Pop-Location }
