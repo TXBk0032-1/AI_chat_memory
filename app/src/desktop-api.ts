@@ -1,6 +1,9 @@
 
 import { invoke } from '@tauri-apps/api/core'
 import type { BranchOverview, Message, SearchHit, SessionOpen, SessionSummary } from './conversation'
+import type { LanguagePreference, SupportedLocale } from './i18n/locale'
+
+export type { LanguagePreference, SupportedLocale } from './i18n/locale'
 
 export type ThemePreference = 'system' | 'light' | 'dark'
 export type CloseBehavior = 'ask' | 'hide_to_tray' | 'exit'
@@ -42,6 +45,7 @@ export type SettingsModel = {
   close_behavior: CloseBehavior
   tray_click_behavior: TrayClickBehavior
   theme: ThemePreference
+  language: LanguagePreference
   semantic_search: SemanticSearchSettings
   mcp_enabled: boolean
 }
@@ -146,6 +150,7 @@ export interface DesktopApi {
   moveDataDirectory(path: string): Promise<void>
   confirmCloseBehavior(behavior: Exclude<CloseBehavior, 'ask'>): Promise<void>
   writeExportFile(path: string, payload: ExportFilePayload): Promise<void>
+  setNativeLocale(locale: SupportedLocale): Promise<void>
 }
 
 export const desktopApi: DesktopApi = {
@@ -169,4 +174,5 @@ export const desktopApi: DesktopApi = {
   moveDataDirectory: (path) => invoke('move_data_directory', { path }),
   confirmCloseBehavior: (behavior) => invoke('confirm_close_behavior', { behavior }),
   writeExportFile: (path, payload) => invoke('write_export_file', { path, payload }),
+  setNativeLocale: (locale) => invoke('set_native_locale', { locale }),
 }

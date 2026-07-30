@@ -33,4 +33,13 @@ describe('desktopApi', () => {
     await desktopApi.confirmCloseBehavior('hide_to_tray')
     expect(invoke).toHaveBeenLastCalledWith('confirm_close_behavior', { behavior: 'hide_to_tray' })
   })
+
+  it('syncs the effective locale through the stable native command', async () => {
+    invoke.mockResolvedValue(undefined)
+    const { desktopApi } = await import('./desktop-api')
+
+    await desktopApi.setNativeLocale('en-US')
+
+    expect(invoke).toHaveBeenLastCalledWith('set_native_locale', { locale: 'en-US' })
+  })
 })

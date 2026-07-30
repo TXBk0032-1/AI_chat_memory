@@ -7,6 +7,7 @@ import {
   type ReadingPosition,
   type SessionOpen,
 } from '../conversation'
+import { translate as t } from '../i18n'
 
 const messageBatchSize = 50
 
@@ -113,7 +114,7 @@ export function useSessionDetail(api: DesktopApi = desktopApi) {
       } catch (reason) {
         if (requestGeneration === generation) {
           backgroundLoadFailed.value = true
-          error.value = `后台加载对话失败：${String(reason)}`
+          error.value = t('errors.backgroundLoad', { reason: String(reason) })
         }
       }
     }, 16)
@@ -136,7 +137,7 @@ export function useSessionDetail(api: DesktopApi = desktopApi) {
       .map((seq) => Math.max(0, Math.floor(seq / messageBatchSize) * messageBatchSize)))]
     for (const start of starts) await fetchBatch(start)
     const missing = seqs.filter((seq) => !messageSlots.value[seq])
-    if (missing.length) throw new Error(`无法加载 ${missing.length} 条导出消息`)
+    if (missing.length) throw new Error(t('errors.missingExportMessages', { count: missing.length }))
   }
 
   function isCurrent(requestGeneration: number) {

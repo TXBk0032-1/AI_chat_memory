@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 import type { Message, Reference } from '../conversation'
 import { renderMarkdown } from '../markdown'
+import { translate as t } from '../i18n'
 
 const props = defineProps<{
   title: string
@@ -32,13 +33,13 @@ defineExpose({ getElement: () => root.value })
   <article ref="root" class="export-document">
     <header class="export-document-header">
       <span>{{ platform }}</span>
-      <h1>{{ title || '未命名对话' }}</h1>
+      <h1>{{ title || t('app.untitledConversation') }}</h1>
       <time>{{ time }}</time>
     </header>
     <section v-for="item in rendered" :key="item.message.id" class="export-message">
       <div class="export-message-role">{{ roleLabel(item.message.role) }}</div>
       <div v-if="item.thinking" class="export-thinking">
-        <strong>{{ roleLabel(item.message.role) }} 思考过程</strong>
+        <strong>{{ t('export.thinkingLabel', { role: roleLabel(item.message.role) }) }}</strong>
         <div class="markdown" v-html="item.thinking"></div>
       </div>
       <div class="markdown" v-html="item.content"></div>

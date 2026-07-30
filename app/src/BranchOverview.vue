@@ -5,6 +5,7 @@ import { Bot, Focus, GitFork, Minus, Plus, UserRound } from 'lucide-vue-next'
 import { branchLeaf, layoutBranchOverview, type BranchNodeData } from './branch-overview'
 import type { BranchNode, BranchOverview } from './conversation'
 import '@vue-flow/core/dist/style.css'
+import { translate as t } from './i18n'
 
 const props = defineProps<{ overview: BranchOverview; activeNodeId: string }>()
 const emit = defineEmits<{ select: [node: BranchNode] }>()
@@ -67,8 +68,8 @@ onBeforeUnmount(() => {
             <strong><UserRound v-if="nodeData(data).role === 'user'" :size="12" /><Bot v-else :size="12" />{{ nodeData(data).roleLabel }}</strong>
             <span>#{{ nodeData(data).seq + 1 }}</span>
           </header>
-          <p>{{ nodeData(data).preview || '空消息' }}</p>
-          <small v-if="nodeData(data).childCount">{{ nodeData(data).childCount }} 个分支</small>
+          <p>{{ nodeData(data).preview || t('branch.emptyMessage') }}</p>
+          <small v-if="nodeData(data).childCount">{{ t('branch.count', { count: nodeData(data).childCount }) }}</small>
         </article>
         <Handle type="source" :position="Position.Bottom" />
       </template>
@@ -77,10 +78,10 @@ onBeforeUnmount(() => {
         <Handle type="source" :position="Position.Bottom" />
       </template>
     </VueFlow>
-    <div class="branch-controls" aria-label="分支画布缩放">
-      <button title="放大" aria-label="放大" @click="zoomIn({ duration: 180 })"><Plus :size="16" /></button>
-      <button title="缩小" aria-label="缩小" @click="zoomOut({ duration: 180 })"><Minus :size="16" /></button>
-      <button title="适配全图" aria-label="适配全图" @click="fitGraph()"><Focus :size="16" /></button>
+    <div class="branch-controls" :aria-label="t('branch.controls')">
+      <button :title="t('branch.zoomIn')" :aria-label="t('branch.zoomIn')" @click="zoomIn({ duration: 180 })"><Plus :size="16" /></button>
+      <button :title="t('branch.zoomOut')" :aria-label="t('branch.zoomOut')" @click="zoomOut({ duration: 180 })"><Minus :size="16" /></button>
+      <button :title="t('branch.fit')" :aria-label="t('branch.fit')" @click="fitGraph()"><Focus :size="16" /></button>
     </div>
   </div>
 </template>

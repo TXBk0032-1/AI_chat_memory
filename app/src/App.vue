@@ -69,7 +69,12 @@ import { useBranchNavigation } from './composables/useBranchNavigation'
 import { useConversationSearch } from './composables/useConversationSearch'
 import { useSessionDetail } from './composables/useSessionDetail'
 import { useMermaidRenderer } from './composables/useMermaidRenderer'
+import { useLocale } from './composables/useLocale'
+import { currentLocale, translate as t } from './i18n'
+import { formatDate as localizedDate } from './i18n/locale'
 import './style.css'
+
+const props = defineProps<{ initialSettings?: SettingsModel }>()
 
 const messageListRef = ref<HTMLElement | null>(null)
 const showClosePrompt = ref(false)
@@ -94,7 +99,7 @@ const exportRenderModel = ref<ConversationExport | null>(null)
 const exportDocumentRef = ref<InstanceType<typeof ExportDocument> | null>(null)
 const pendingCloseBehavior = ref<'hide_to_tray' | 'exit' | null>(null)
 const expandedThinking = ref(new Set<string>())
-const settings = ref<SettingsModel>({ setup_complete: false, secret_enabled: false, allowed_origins: [], close_behavior: 'ask', tray_click_behavior: 'show_menu', theme: 'system', semantic_search: { enabled: true, default_mode: 'hybrid', backend: 'local', local: { model: 'BAAI/bge-small-zh-v1.5', device: 'auto', dtype: 'auto' }, ollama: { base_url: 'http://127.0.0.1:11434', model: 'nomic-embed-text' }, llama_cpp: { base_url: 'http://127.0.0.1:8080/v1', model: 'bge-small-zh-v1.5' }, openai_compatible: { base_url: 'https://api.openai.com/v1', model: 'text-embedding-3-small' } }, mcp_enabled: true })
+const settings = ref<SettingsModel>(props.initialSettings ?? { setup_complete: false, secret_enabled: false, allowed_origins: [], close_behavior: 'ask', tray_click_behavior: 'show_menu', theme: 'system', language: 'system', semantic_search: { enabled: true, default_mode: 'hybrid', backend: 'local', local: { model: 'BAAI/bge-small-zh-v1.5', device: 'auto', dtype: 'auto' }, ollama: { base_url: 'http://127.0.0.1:11434', model: 'nomic-embed-text' }, llama_cpp: { base_url: 'http://127.0.0.1:8080/v1', model: 'bge-small-zh-v1.5' }, openai_compatible: { base_url: 'https://api.openai.com/v1', model: 'text-embedding-3-small' } }, mcp_enabled: true })
 const apiStatus = ref<ApiStatus>({ service: { state: 'starting' }, userscript_connected: false, mcp: { state: 'stopped' }, mcp_url: 'http://127.0.0.1:19821/mcp' })
 const contextMenu = ref({ visible: false, x: 0, y: 0, selectedText: '' })
 const sidebarCollapsed = ref(loadSidebarCollapsed())
@@ -123,6 +128,8 @@ const theme = useTheme(settings, (animate) => {
   }, animate ? 180 : 0)
 })
 const { effectiveTheme, commitTheme, previewTheme } = theme
+const locale = useLocale((value) => desktopApi.setNativeLocale(value))
+const { previewLanguage } = locale
 const {
   renderMermaidDiagrams,
   renderExportMermaidDiagrams,
@@ -216,6 +223,10 @@ const {
   begin: theme.beginPreview,
   accept: theme.acceptPreview,
   cancel: theme.cancelPreview,
+}, {
+  begin: locale.beginPreview,
+  accept: locale.acceptPreview,
+  cancel: locale.cancelPreview,
 })
 
 function setSidebarCollapsed(collapsed: boolean) {
@@ -238,12 +249,12 @@ async function enterExportSelection() {
   try {
     if (selected.value.has_branches && !branchOverview.value) {
       await branches.load()
-      if (!branchOverview.value) throw new Error(branchesError.value || '当前分支加载失败，请重试')
+      if (!branchOverview.value) throw new Error(branchesError.value || t('export.branchLoadRetry'))
     }
     const seqs = [...displayedMessageSeqs.value]
     await ensureMessagesLoaded(seqs)
     const items = seqs.map((seq) => messageSlots.value[seq]).filter((message): message is Message => Boolean(message))
-    if (items.length !== seqs.length) throw new Error('当前分支消息未完整加载')
+    if (items.length !== seqs.length) throw new Error(t('export.branchMessagesIncomplete'))
     exportTurns.value = groupConversationTurns(items)
     selectedExportTurnIds.value = new Set(exportTurns.value.map((turn) => turn.id))
     exportLockedSessionId.value = selected.value.id
@@ -253,7 +264,7 @@ async function enterExportSelection() {
     await nextTick()
     messageVirtualizer.value.measure()
   } catch (reason) {
-    error.value = `无法进入导出选择：${String(reason)}`
+    error.value = t('export.enterSelectionFailed', { reason: String(reason) })
   } finally {
     exportSelectionLoading.value = false
   }
@@ -300,11 +311,11 @@ function selectedMessages(): Message[] {
 }
 
 function createExportModel(messages: Message[]): ConversationExport {
-  if (!selected.value) throw new Error('当前对话已关闭')
+  if (!selected.value) throw new Error(t('export.conversationClosed'))
   const time = exportDate(selected.value.created_at || selected.value.updated_at)
   return {
     version: 1,
-    title: selected.value.title || '未命名对话',
+    title: selected.value.title || t('app.untitledConversation'),
     time,
     platform: platformName(selected.value.platform),
     branch_id: selected.value.has_branches ? exportLockedBranchId.value : null,
@@ -334,7 +345,7 @@ async function localizeExportImages(root: HTMLElement) {
     } catch {
       const replacement = document.createElement('span')
       replacement.className = 'export-image-fallback'
-      replacement.textContent = `[图片：${image.alt || image.src}]`
+      replacement.textContent = t('export.imageFallback', { description: image.alt || image.src })
       image.replaceWith(replacement)
     }
   }))
@@ -345,15 +356,15 @@ async function prepareExportPreview() {
   const generation = ++exportPreviewGeneration
   exportImageChecking.value = true
   exportImageTooLong.value = false
-  exportImageDisabledReason.value = '正在检查图片长度'
+  exportImageDisabledReason.value = t('export.checkingImageLength')
   try {
     const messages = selectedMessages()
-    if (messages.length !== selectedExportSeqs.value.length) throw new Error('所选消息未完整加载')
+    if (messages.length !== selectedExportSeqs.value.length) throw new Error(t('export.selectedMessagesIncomplete'))
     exportRenderModel.value = createExportModel(messages)
     exportRenderMessages.value = messages
     await nextTick()
     const root = exportDocumentRef.value?.getElement()
-    if (!root) throw new Error('图片导出文档未就绪')
+    if (!root) throw new Error(t('export.documentNotReady'))
     await renderExportMermaidDiagrams(root)
     await nextTick()
     await localizeExportImages(root)
@@ -361,7 +372,7 @@ async function prepareExportPreview() {
     if (generation !== exportPreviewGeneration) return
     exportImageTooLong.value = isImageExportTooLarge(root.scrollWidth, root.scrollHeight)
     exportImageDisabledReason.value = exportImageTooLong.value
-      ? '所选内容过长，请减少问答组或选择 Markdown/JSON'
+      ? t('export.contentTooLong')
       : ''
     if (exportImageTooLong.value && (exportFormat.value === 'png' || exportFormat.value === 'jpeg')) {
       exportFormat.value = 'md'
@@ -369,7 +380,7 @@ async function prepareExportPreview() {
   } catch (reason) {
     if (generation !== exportPreviewGeneration) return
     exportImageTooLong.value = true
-    exportImageDisabledReason.value = `无法预检图片长度：${String(reason)}`
+    exportImageDisabledReason.value = t('export.preflightFailed', { reason: String(reason) })
     if (exportFormat.value === 'png' || exportFormat.value === 'jpeg') exportFormat.value = 'md'
   } finally {
     if (generation === exportPreviewGeneration) exportImageChecking.value = false
@@ -379,13 +390,13 @@ async function prepareExportPreview() {
 async function renderExportImage(format: 'png' | 'jpeg'): Promise<string> {
   await nextTick()
   const root = exportDocumentRef.value?.getElement()
-  if (!root) throw new Error('图片导出文档未就绪')
+  if (!root) throw new Error(t('export.documentNotReady'))
   await renderExportMermaidDiagrams(root)
   await nextTick()
   await localizeExportImages(root)
   await document.fonts?.ready
   if (isImageExportTooLarge(root.scrollWidth, root.scrollHeight)) {
-    throw new Error('所选内容超过单张图片尺寸限制，请减少问答组或改用 Markdown/JSON')
+    throw new Error(t('export.imageLimitExceeded'))
   }
   const options = { backgroundColor: '#ffffff', cacheBust: true, pixelRatio: exportImagePixelRatio }
   return format === 'png'
@@ -397,7 +408,7 @@ async function exportSelectedConversation() {
   if (!selected.value || exportBusy.value || !selectedExportTurns.value.length) return
   if ((exportFormat.value === 'png' || exportFormat.value === 'jpeg') && exportImageDisabled.value) return
   if (selected.value.id !== exportLockedSessionId.value || activeBranchNode.value !== exportLockedBranchId.value) {
-    error.value = '当前对话分支已变化，请重新选择导出内容'
+    error.value = t('export.branchChanged')
     cancelExportSelection()
     return
   }
@@ -415,7 +426,7 @@ async function exportSelectedConversation() {
     if (typeof path !== 'string') return
     await ensureMessagesLoaded(selectedExportSeqs.value)
     const messages = selectedMessages()
-    if (messages.length !== selectedExportSeqs.value.length) throw new Error('所选消息未完整加载')
+    if (messages.length !== selectedExportSeqs.value.length) throw new Error(t('export.selectedMessagesIncomplete'))
     const model = createExportModel(messages)
     if (format === 'md' || format === 'json') {
       const data = format === 'md' ? serializeMarkdown(model) : serializeJson(model)
@@ -427,9 +438,9 @@ async function exportSelectedConversation() {
       await desktopApi.writeExportFile(path, { encoding: 'base64', data: dataUrl.slice(dataUrl.indexOf(',') + 1) })
     }
     succeeded = true
-    showToast(`已导出 ${selectedExportTurns.value.length} 组问答`)
+    showToast(t('export.exportedCount', { count: selectedExportTurns.value.length }))
   } catch (reason) {
-    error.value = `导出失败：${String(reason)}`
+    error.value = t('export.failed', { reason: String(reason) })
   } finally {
     exportBusy.value = false
     if (succeeded) cancelExportSelection()
@@ -497,7 +508,7 @@ async function navigateSearch(direction: number) {
   if (next < 0 || next >= selectedMatches.value.length) {
     if (!loopSearch.value) return
     next = next < 0 ? selectedMatches.value.length - 1 : 0
-    showToast('已循环到当前对话的另一端', 2600)
+    showToast(t('app.loopedSearch'), 2600)
   }
   searchHitIndex.value = next
   const match = selectedMatches.value[next]
@@ -542,7 +553,7 @@ async function removeSession() {
 }
 
 async function importZip() {
-  const path = await open({ multiple: false, filters: [{ name: 'DeepSeek 导出文件', extensions: ['zip'] }] })
+  const path = await open({ multiple: false, filters: [{ name: t('app.importFilterName'), extensions: ['zip'] }] })
   if (typeof path !== 'string') return
   loading.value = true
   error.value = ''
@@ -654,21 +665,16 @@ async function refreshApiStatus() {
 }
 
 function formatDate(value?: string, compact = false) {
-  if (!value) return '时间未知'
-  const numeric = Number(value)
-  const date = Number.isFinite(numeric) ? new Date(numeric * 1000) : new Date(value)
-  if (Number.isNaN(date.valueOf())) return value
-  return compact
-    ? new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(date)
-    : new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(date)
+  if (!value) return t('app.timeUnknown')
+  return localizedDate(value, currentLocale(), compact)
 }
 
 function platformName(value: string) {
-  return ({ deepseek: 'DeepSeek', doubao: '豆包', kimi: 'Kimi' } as Record<string, string>)[value] ?? value
+  return ({ deepseek: 'DeepSeek', doubao: t('app.platformDoubao'), kimi: 'Kimi' } as Record<string, string>)[value] ?? value
 }
 
 function roleName(value: string) {
-  return value === 'user' ? '你' : value === 'assistant' ? 'AI' : value
+  return value === 'user' ? t('app.roleYou') : value === 'assistant' ? t('app.roleAi') : value
 }
 
 function persistReadingPosition() {
@@ -697,7 +703,7 @@ onMounted(async () => {
   // Kick off the first session list immediately so the shell is never empty while
   // settings / API status catch up in parallel.
   const sessionsReady = loadSessions()
-  const settingsReady = desktopApi.getSettings().then((value) => {
+  const settingsReady = (props.initialSettings ? Promise.resolve(props.initialSettings) : desktopApi.getSettings()).then((value) => {
     settings.value = value
     searchMode.value = value.semantic_search?.default_mode || 'hybrid'
     commitTheme(value.theme, false)
@@ -751,42 +757,42 @@ onBeforeUnmount(() => {
 
     <main class="workspace">
       <header class="workspace-header">
-        <div><h1>全部对话</h1><p>集中查找和查看已同步的 AI 对话</p></div>
+        <div><h1>{{ t('app.allConversations') }}</h1><p>{{ t('app.subtitle') }}</p></div>
         <div class="header-actions">
-          <button class="secondary-button" :disabled="loading" @click="loadSessions()"><RefreshCw :size="16" :class="{ spinning: loading }" />刷新</button>
-          <button class="primary-button" @click="importZip"><FileArchive :size="16" />导入 ZIP</button>
+          <button class="secondary-button" :disabled="loading" @click="loadSessions()"><RefreshCw :size="16" :class="{ spinning: loading }" />{{ t('app.refresh') }}</button>
+          <button class="primary-button" @click="importZip"><FileArchive :size="16" />{{ t('app.importZip') }}</button>
         </div>
       </header>
 
       <section class="control-bar">
         <div class="search-stack">
           <div class="search-row">
-            <label class="search-field"><Search :size="17" /><input v-model="query" placeholder="搜索标题和消息内容" @input="searchElapsed=null" @keyup.enter="loadSessions()" /><button v-if="query" title="清除搜索" @click="query=''; searchElapsed=null; loadSessions()"><X :size="15" /></button></label>
+            <label class="search-field"><Search :size="17" /><input v-model="query" :placeholder="t('app.searchPlaceholder')" @input="searchElapsed=null" @keyup.enter="loadSessions()" /><button v-if="query" :title="t('app.clearSearch')" @click="query=''; searchElapsed=null; loadSessions()"><X :size="15" /></button></label>
             <select class="search-mode" :value="searchMode" @change="setSearchMode(($event.target as HTMLSelectElement).value as any)">
-              <option value="hybrid">混合</option>
-              <option value="semantic">语义</option>
-              <option value="keyword">关键词</option>
+              <option value="hybrid">{{ t('searchMode.hybrid') }}</option>
+              <option value="semantic">{{ t('searchMode.semantic') }}</option>
+              <option value="keyword">{{ t('searchMode.keyword') }}</option>
             </select>
           </div>
-          <Transition name="search-summary"><div v-if="searchElapsed !== null" class="search-summary">找到 {{ total }} 条结果 · {{ searchElapsed.toFixed(0) }} 毫秒 · {{ searchMode }} · 语义 {{ semanticStatus }}</div></Transition>
+          <Transition name="search-summary"><div v-if="searchElapsed !== null" class="search-summary">{{ t('app.searchSummary', { count: total, milliseconds: searchElapsed.toFixed(0), mode: t(`searchMode.${searchMode}`), status: semanticStatus }) }}</div></Transition>
         </div>
-        <button :class="['filter-button', { active: showFilters || filtered, expanded: showFilters }]" :aria-expanded="showFilters" @click="showFilters=!showFilters"><CalendarDays :size="16" />日期筛选<ChevronDown class="filter-chevron" :size="14" /></button>
+        <button :class="['filter-button', { active: showFilters || filtered, expanded: showFilters }]" :aria-expanded="showFilters" @click="showFilters=!showFilters"><CalendarDays :size="16" />{{ t('app.dateFilter') }}<ChevronDown class="filter-chevron" :size="14" /></button>
         <span class="result-count">{{ sessions.length }} / {{ total }}</span>
       </section>
 
       <Transition name="filter-panel">
         <section v-if="showFilters" class="filter-panel">
-          <label><span>开始日期</span><input v-model="dateFrom" type="date" /></label>
-          <label><span>结束日期</span><input v-model="dateTo" type="date" /></label>
-          <button class="primary-button compact" @click="loadSessions()">应用</button>
-          <button v-if="filtered" class="text-button" @click="resetFilters">清除条件</button>
+          <label><span>{{ t('app.startDate') }}</span><input v-model="dateFrom" type="date" /></label>
+          <label><span>{{ t('app.endDate') }}</span><input v-model="dateTo" type="date" /></label>
+          <button class="primary-button compact" @click="loadSessions()">{{ t('app.apply') }}</button>
+          <button v-if="filtered" class="text-button" @click="resetFilters">{{ t('app.clearFilters') }}</button>
         </section>
       </Transition>
 
       <div v-if="error || apiStatus.service.state === 'failed'" class="alert-bar">
         <Server :size="17" />
-        <span>{{ error || `本地同步服务启动失败：${apiStatus.service.message || '未知错误'}` }}</span>
-        <button title="关闭" @click="error=''"><X :size="15" /></button>
+        <span>{{ error || t('app.serviceStartFailed', { reason: apiStatus.service.message || t('app.unknownError') }) }}</span>
+        <button :title="t('app.close')" @click="error=''"><X :size="15" /></button>
       </div>
 
       <section :class="['content-grid', { resizing: resizingPanes }]" :style="{ '--session-pane-width': `${sessionPaneWidth}px` }">
@@ -801,41 +807,41 @@ onBeforeUnmount(() => {
           @load-more="loadMore"
         />
 
-        <div class="pane-resizer" role="separator" aria-label="调整对话列表和内容宽度" aria-orientation="vertical" tabindex="0" @pointerdown="startPaneResize" @pointermove="resizePanes" @pointerup="stopPaneResize" @pointercancel="stopPaneResize"></div>
+        <div class="pane-resizer" role="separator" :aria-label="t('app.paneResize')" aria-orientation="vertical" tabindex="0" @pointerdown="startPaneResize" @pointermove="resizePanes" @pointerup="stopPaneResize" @pointercancel="stopPaneResize"></div>
 
         <aside class="detail-pane">
-          <div v-if="detailLoading" class="loading-state"><LoaderCircle class="spinning" :size="22" /><span>正在打开对话</span></div>
+          <div v-if="detailLoading" class="loading-state"><LoaderCircle class="spinning" :size="22" /><span>{{ t('app.openingConversation') }}</span></div>
           <template v-else-if="selected">
             <div class="detail-header">
-              <div class="detail-title"><span class="platform-badge"><i :class="selected.platform"></i>{{ platformName(selected.platform) }}</span><h2>{{ selected.title || '未命名对话' }}</h2><p>{{ displayedMessageSeqs.length }} 条消息<span v-if="branchOverview && displayedMessageSeqs.length < selected.message_count"> · 共 {{ selected.message_count }} 个版本节点</span> · {{ formatDate(selected.updated_at) }}<span v-if="loadedMessageCount < selected.message_count" class="load-progress"> · 已加载 {{ loadedMessageCount }}/{{ selected.message_count }}</span><button v-if="backgroundLoadFailed" class="inline-retry" @click="retryBackgroundLoad">重试</button></p></div>
+              <div class="detail-title"><span class="platform-badge"><i :class="selected.platform"></i>{{ platformName(selected.platform) }}</span><h2>{{ selected.title || t('app.untitledConversation') }}</h2><p>{{ t('app.messageCount', { count: displayedMessageSeqs.length }) }}<span v-if="branchOverview && displayedMessageSeqs.length < selected.message_count"> · {{ t('app.versionNodeCount', { count: selected.message_count }) }}</span> · {{ formatDate(selected.updated_at) }}<span v-if="loadedMessageCount < selected.message_count" class="load-progress"> · {{ t('app.loadedCount', { loaded: loadedMessageCount, total: selected.message_count }) }}</span><button v-if="backgroundLoadFailed" class="inline-retry" @click="retryBackgroundLoad">{{ t('app.retry') }}</button></p></div>
               <div class="detail-actions" @click.stop>
-                <button class="icon-button" title="更多操作" aria-haspopup="menu" :aria-expanded="showDetailMenu" @click="toggleDetailMenu"><MoreHorizontal :size="19" /></button>
+                <button class="icon-button" :title="t('app.moreActions')" aria-haspopup="menu" :aria-expanded="showDetailMenu" @click="toggleDetailMenu"><MoreHorizontal :size="19" /></button>
                 <div v-if="showDetailMenu" class="detail-menu" role="menu">
-                  <button role="menuitem" :disabled="exportSelectionLoading" @click="enterExportSelection"><Download :size="14" />{{ exportSelectionLoading ? '正在准备' : '导出聊天记录' }}</button>
-                  <button role="menuitem" @click="showSessionInfo=true; showDetailMenu=false">对话详细信息</button>
-                  <button class="danger" role="menuitem" @click="showDeletePrompt=true; showDetailMenu=false"><Trash2 :size="14" />删除对话</button>
+                  <button role="menuitem" :disabled="exportSelectionLoading" @click="enterExportSelection"><Download :size="14" />{{ exportSelectionLoading ? t('app.preparing') : t('export.dialogTitle') }}</button>
+                  <button role="menuitem" @click="showSessionInfo=true; showDetailMenu=false">{{ t('app.conversationInfo') }}</button>
+                  <button class="danger" role="menuitem" @click="showDeletePrompt=true; showDetailMenu=false"><Trash2 :size="14" />{{ t('app.deleteConversation') }}</button>
                 </div>
               </div>
             </div>
             <div v-if="hasBranches" :class="['segmented-control', { branches: detailMode === 'branches' }]">
               <span class="segmented-highlight" aria-hidden="true"></span>
-              <button :class="{ active: detailMode === 'conversation' }" :disabled="exportSelecting" @click="detailMode='conversation'"><MessageSquareText :size="15" />对话</button>
-              <button :class="{ active: detailMode === 'branches' }" :disabled="exportSelecting" @click="showBranches"><GitBranch :size="15" />分支预览</button>
+              <button :class="{ active: detailMode === 'conversation' }" :disabled="exportSelecting" @click="detailMode='conversation'"><MessageSquareText :size="15" />{{ t('app.conversation') }}</button>
+              <button :class="{ active: detailMode === 'branches' }" :disabled="exportSelecting" @click="showBranches"><GitBranch :size="15" />{{ t('app.branchPreview') }}</button>
             </div>
             <div v-if="exportSelecting" class="export-selection-toolbar">
-              <strong>已选择 {{ selectedExportTurns.length }} / {{ exportTurns.length }} 组问答</strong>
+              <strong>{{ t('app.selectedQas', { selected: selectedExportTurns.length, total: exportTurns.length }) }}</strong>
               <div>
-                <button class="text-button" @click="selectAllExportTurns">全选</button>
-                <button class="text-button" @click="clearExportTurns">取消全选</button>
-                <button class="secondary-button compact" @click="cancelExportSelection">取消</button>
-                <button class="primary-button compact" :disabled="!selectedExportTurns.length" @click="openExportConfirmation"><Download :size="14" />导出所选</button>
+                <button class="text-button" @click="selectAllExportTurns">{{ t('app.selectAll') }}</button>
+                <button class="text-button" @click="clearExportTurns">{{ t('app.clearAll') }}</button>
+                <button class="secondary-button compact" @click="cancelExportSelection">{{ t('app.cancel') }}</button>
+                <button class="primary-button compact" :disabled="!selectedExportTurns.length" @click="openExportConfirmation"><Download :size="14" />{{ t('app.exportSelected') }}</button>
               </div>
             </div>
             <div v-if="committedQuery && detailMode === 'conversation'" class="search-navigation">
-              <span>{{ selectedMatches.length ? `${Math.max(searchHitIndex + 1, 0)} / ${selectedMatches.length}` : '当前对话无正文命中' }}</span>
-              <button class="icon-button" title="上一个命中" :disabled="!selectedMatches.length" @click="navigateSearch(-1)"><ArrowUp :size="15" /></button>
-              <button class="icon-button" title="下一个命中" :disabled="!selectedMatches.length" @click="navigateSearch(1)"><ArrowDown :size="15" /></button>
-              <label><input v-model="loopSearch" type="checkbox" />循环</label>
+              <span>{{ selectedMatches.length ? `${Math.max(searchHitIndex + 1, 0)} / ${selectedMatches.length}` : t('app.noBodyMatch') }}</span>
+              <button class="icon-button" :title="t('app.previousMatch')" :disabled="!selectedMatches.length" @click="navigateSearch(-1)"><ArrowUp :size="15" /></button>
+              <button class="icon-button" :title="t('app.nextMatch')" :disabled="!selectedMatches.length" @click="navigateSearch(1)"><ArrowDown :size="15" /></button>
+              <label><input v-model="loopSearch" type="checkbox" />{{ t('app.loop') }}</label>
             </div>
             <div ref="messageListRef" :class="['message-list', { 'branch-mode': detailMode === 'branches' }]" @scroll.passive="handleMessageScroll" @click="openMarkdownLink">
               <div v-if="selectedMatches.length" class="search-scroll-markers" aria-hidden="true">
@@ -852,7 +858,7 @@ onBeforeUnmount(() => {
                     :style="{ transform: `translateY(${virtualMessage.start}px)` }"
                   >
                     <label v-if="exportSelecting && exportTurnBySeq.get(displayedMessageSeqs[virtualMessage.index])?.seqs[0] === displayedMessageSeqs[virtualMessage.index]" class="export-turn-checkbox">
-                      <input type="checkbox" :checked="selectedExportTurnIds.has(exportTurnBySeq.get(displayedMessageSeqs[virtualMessage.index])!.id)" :aria-label="`选择第 ${(exportTurns.indexOf(exportTurnBySeq.get(displayedMessageSeqs[virtualMessage.index])!) + 1)} 组问答`" @change="toggleExportTurn(exportTurnBySeq.get(displayedMessageSeqs[virtualMessage.index])!.id)" />
+                      <input type="checkbox" :checked="selectedExportTurnIds.has(exportTurnBySeq.get(displayedMessageSeqs[virtualMessage.index])!.id)" :aria-label="t('app.selectQa', { index: exportTurns.indexOf(exportTurnBySeq.get(displayedMessageSeqs[virtualMessage.index])!) + 1 })" @change="toggleExportTurn(exportTurnBySeq.get(displayedMessageSeqs[virtualMessage.index])!.id)" />
                     </label>
                     <MessageBlock
                       v-if="messageSlots[displayedMessageSeqs[virtualMessage.index]]"
@@ -865,19 +871,19 @@ onBeforeUnmount(() => {
                       @toggle-thinking="toggleThinking"
                       @content-rendered="renderMermaidDiagrams"
                     />
-                    <div v-else class="message-placeholder" @vue:mounted="ensureMessageLoaded(displayedMessageSeqs[virtualMessage.index])"><LoaderCircle class="spinning" :size="16" /><span>加载消息</span></div>
+                    <div v-else class="message-placeholder" @vue:mounted="ensureMessageLoaded(displayedMessageSeqs[virtualMessage.index])"><LoaderCircle class="spinning" :size="16" /><span>{{ t('app.loadMessage') }}</span></div>
                   </div>
                 </div>
                 <div v-else key="branches" class="branch-view">
-                  <div v-if="branchesLoading" class="branch-state"><LoaderCircle class="spinning" :size="22" /><span>正在构建分支预览</span></div>
-                  <div v-else-if="branchesError" class="branch-state error"><GitBranch :size="25" /><strong>分支预览加载失败</strong><span>{{ branchesError }}</span><button class="secondary-button compact" @click="loadBranches">重试</button></div>
-                  <div v-else-if="branchOverview && !branchOverview.nodes.length" class="branch-state"><GitBranch :size="28" /><strong>没有可预览的分支节点</strong></div>
+                  <div v-if="branchesLoading" class="branch-state"><LoaderCircle class="spinning" :size="22" /><span>{{ t('app.buildingBranches') }}</span></div>
+                  <div v-else-if="branchesError" class="branch-state error"><GitBranch :size="25" /><strong>{{ t('app.branchLoadFailed') }}</strong><span>{{ branchesError }}</span><button class="secondary-button compact" @click="loadBranches">{{ t('app.retry') }}</button></div>
+                  <div v-else-if="branchOverview && !branchOverview.nodes.length" class="branch-state"><GitBranch :size="28" /><strong>{{ t('app.noBranchNodes') }}</strong></div>
                   <BranchOverviewView v-else-if="branchOverview" :overview="branchOverview" :active-node-id="activeBranchNode" @select="selectBranch" />
                 </div>
               </Transition>
             </div>
           </template>
-          <div v-else class="detail-placeholder"><MessageSquareText :size="34" /><strong>选择一条对话</strong><span>消息内容会显示在这里</span></div>
+          <div v-else class="detail-placeholder"><MessageSquareText :size="34" /><strong>{{ t('app.selectConversation') }}</strong><span>{{ t('app.selectConversationHint') }}</span></div>
         </aside>
       </section>
     </main>
@@ -896,6 +902,7 @@ onBeforeUnmount(() => {
       @close="closeSettings"
       @save="saveSettings"
       @preview-theme="previewTheme"
+      @preview-language="previewLanguage"
       @change-data-directory="changeDataDirectory"
       @copy-secret="copySecret"
       @rotate-secret="rotateSecret"
@@ -945,8 +952,8 @@ onBeforeUnmount(() => {
     </div>
     <Transition name="context-menu">
       <div v-if="contextMenu.visible" class="context-menu" role="menu" :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }" @click.stop>
-        <button role="menuitem" :disabled="!contextMenu.selectedText" @click="copyContextSelection"><Copy :size="15" /><span>复制</span><kbd>Ctrl+C</kbd></button>
-        <button role="menuitem" @click="selectConversationContent"><Clipboard :size="15" /><span>全选对话内容</span><kbd>Ctrl+A</kbd></button>
+        <button role="menuitem" :disabled="!contextMenu.selectedText" @click="copyContextSelection"><Copy :size="15" /><span>{{ t('app.copy') }}</span><kbd>Ctrl+C</kbd></button>
+        <button role="menuitem" @click="selectConversationContent"><Clipboard :size="15" /><span>{{ t('app.selectConversationContent') }}</span><kbd>Ctrl+A</kbd></button>
       </div>
     </Transition>
     <TransitionGroup name="toast" tag="div" class="toast-stack" aria-live="polite" aria-atomic="false">
@@ -964,3 +971,4 @@ onBeforeUnmount(() => {
     </TransitionGroup>
   </div>
 </template>
+

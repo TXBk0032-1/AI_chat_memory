@@ -2,6 +2,7 @@ import MarkdownIt from 'markdown-it'
 import texmath from 'markdown-it-texmath'
 import katex from 'katex'
 import type { Message, Reference } from './conversation'
+import { translate as t } from './i18n'
 
 const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true }).use(texmath, {
   engine: katex,
@@ -51,17 +52,17 @@ export function renderMarkdown(value: string, message: Message, references: Map<
     const index = Number(rawIndex)
     const reference = resolveReference(index, message, references)
     const url = referenceValue(reference, ['url', 'link', 'href'])
-    if (!/^https?:\/\//i.test(url)) return `<span class="reference-marker reference-missing" title="该引用来源未随历史记录保存">${index}</span>`
-    const title = referenceValue(reference, ['title', 'name']) || `引用 ${index}`
+    if (!/^https?:\/\//i.test(url)) return `<span class="reference-marker reference-missing" title="${t('markdown.missingReference')}">${index}</span>`
+    const title = referenceValue(reference, ['title', 'name']) || t('markdown.reference', { index })
     const summary = referenceValue(reference, ['snippet', 'summary', 'description', 'content']).replace(/\s+/g, ' ').slice(0, 280)
     const safeTitle = markdown.utils.escapeHtml(title)
     const safeSummary = markdown.utils.escapeHtml(summary)
     const safeUrl = markdown.utils.escapeHtml(url)
-    return `<a class="reference-link reference-marker" href="${safeUrl}" target="_blank" rel="noopener noreferrer">${index}<span class="reference-preview"><strong>${safeTitle}</strong><span>${safeSummary || '暂无摘要'}</span><small>${safeUrl}</small></span></a>`
+    return `<a class="reference-link reference-marker" href="${safeUrl}" target="_blank" rel="noopener noreferrer">${index}<span class="reference-preview"><strong>${safeTitle}</strong><span>${safeSummary || t('markdown.noSummary')}</span><small>${safeUrl}</small></span></a>`
   })
   return highlightRenderedHtml(rendered, query)
 }
 
 export function escapeTitle(value: string) {
-  return markdown.utils.escapeHtml(value || '未命名对话')
+  return markdown.utils.escapeHtml(value || t('app.untitledConversation'))
 }
