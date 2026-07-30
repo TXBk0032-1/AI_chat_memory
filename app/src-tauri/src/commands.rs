@@ -6,6 +6,7 @@ use crate::{
     models::{
         AppSettings, BranchOverview, DesktopApiStatus, EmbeddingHealth, ImportResponse, Message,
         SearchMode, SearchQuery, SemanticRuntimeStatus, SessionList, SessionOpen, SessionSearchHit,
+        SupportedLocale,
     },
     service::AppService,
 };
@@ -105,6 +106,16 @@ pub async fn import_deepseek_zip(
 #[tauri::command]
 pub async fn get_settings(service: State<'_, AppService>) -> Result<AppSettings, String> {
     Ok(service.settings().await)
+}
+
+#[tauri::command]
+pub fn set_native_locale(app: AppHandle, locale: SupportedLocale) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        window
+            .set_title(crate::i18n::native_text(locale).app_title)
+            .map_err(message)?;
+    }
+    crate::tray::update_locale(&app, locale).map_err(message)
 }
 
 #[tauri::command]

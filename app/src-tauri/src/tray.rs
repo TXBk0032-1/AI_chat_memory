@@ -1,21 +1,28 @@
 //! 系统托盘图标与菜单的创建及事件处理模块。
 //! 所有托盘相关的 UI 和交互逻辑集中在此
 use tauri::{
-    Manager,
+    Manager, Runtime,
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 
-use crate::{models::TrayClickBehavior, service::AppService};
+use crate::{
+    i18n::native_text,
+    models::{SupportedLocale, TrayClickBehavior},
+    service::AppService,
+};
 
 pub fn build(app: &tauri::App, service: &AppService) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, "show", "打开对话归档", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &quit])?;
+    let settings = tauri::async_runtime::block_on(service.settings());
+    let locale = settings
+        .language
+        .supported_locale()
+        .unwrap_or(SupportedLocale::ZhCn);
+    let menu = build_menu(app, locale)?;
     TrayIconBuilder::with_id("main-tray")
         .menu(&menu)
         .show_menu_on_left_click(matches!(
-            tauri::async_runtime::block_on(service.settings()).tray_click_behavior,
+            settings.tray_click_behavior,
             TrayClickBehavior::ShowMenu
         ))
         .icon(app.default_window_icon().unwrap().clone())
@@ -44,6 +51,23 @@ pub fn build(app: &tauri::App, service: &AppService) -> tauri::Result<()> {
             }
         })
         .build(app)?;
+    Ok(())
+}
+
+fn build_menu<R: Runtime, M: Manager<R>>(
+    manager: &M,
+    locale: SupportedLocale,
+) -> tauri::Result<Menu<R>> {
+    let text = native_text(locale);
+    let show = MenuItem::with_id(manager, "show", text.open, true, None::<&str>)?;
+    let quit = MenuItem::with_id(manager, "quit", text.quit, true, None::<&str>)?;
+    Menu::with_items(manager, &[&show, &quit])
+}
+
+pub fn update_locale(app: &tauri::AppHandle, locale: SupportedLocale) -> tauri::Result<()> {
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        tray.set_menu(Some(build_menu(app, locale)?))?;
+    }
     Ok(())
 }
 

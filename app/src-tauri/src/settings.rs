@@ -101,6 +101,7 @@ fn generate_secret() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{LanguagePreference, SupportedLocale};
 
     #[tokio::test]
     async fn recovers_from_corrupt_settings() {
@@ -147,5 +148,33 @@ mod tests {
         assert!(!settings.secret_enabled);
         assert!(settings.secret.is_none());
         assert_eq!(settings.theme, crate::models::ThemePreference::System);
+    }
+
+    #[test]
+    fn defaults_language_for_legacy_json_and_round_trips_supported_values() {
+        let legacy: AppSettings = serde_json::from_str(
+            r#"{"setup_complete":true,"secret_enabled":false,"secret":null,"allowed_origins":[]}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.language, LanguagePreference::System);
+
+        for (json, value) in [
+            (r#""system""#, LanguagePreference::System),
+            (r#""zh-CN""#, LanguagePreference::ZhCn),
+            (r#""en-US""#, LanguagePreference::EnUs),
+        ] {
+            let decoded: LanguagePreference = serde_json::from_str(json).unwrap();
+            assert_eq!(decoded, value);
+            assert_eq!(serde_json::to_string(&decoded).unwrap(), json);
+        }
+
+        for (json, value) in [
+            (r#""zh-CN""#, SupportedLocale::ZhCn),
+            (r#""en-US""#, SupportedLocale::EnUs),
+        ] {
+            let decoded: SupportedLocale = serde_json::from_str(json).unwrap();
+            assert_eq!(decoded, value);
+            assert_eq!(serde_json::to_string(&decoded).unwrap(), json);
+        }
     }
 }
