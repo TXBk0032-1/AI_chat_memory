@@ -226,6 +226,13 @@ i.deepseek { background: #5273e6; } i.doubao { background: #e36f53; } i.kimi { b
 .markdown th:last-child, .markdown td:last-child { border-right: 0; }
 .markdown tr:last-child td { border-bottom: 0; }
 .markdown th { color: #394145; background: #f0f2f3; font-weight: 650; }
+.oversized-message { min-width: 0; }
+.oversized-message-preview { max-height: 30rem; margin: 0; overflow: auto; padding: 13px; border: 1px solid #d9dfe1; border-radius: 6px; color: #3f484c; background: #f7f9f9; font: inherit; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; -webkit-user-select: text; user-select: text; }
+.oversized-message-controls { margin-top: 9px; display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
+.oversized-message-meta { color: #8a9397; font-size: 10px; }
+.oversized-message-toggle { padding: 5px 9px; border: 1px solid #bdd2cb; border-radius: 5px; color: #216f5b; background: #f3faf7; cursor: pointer; font: inherit; font-size: 10px; font-weight: 650; }
+.oversized-message-toggle:hover { border-color: #8fb7aa; background: #eaf6f2; }
+.full-content-controls { padding-top: 4px; border-top: 1px solid #eceeef; }
 .mermaid-diagram { width: 100%; margin: 14px 0; overflow-x: auto; padding: 14px; border: 1px solid #d7dddf; border-radius: 6px; background: #fbfcfc; }
 .mermaid-diagram svg { display: block; width: auto; min-width: min(100%, 520px); max-width: none; height: auto; margin: 0 auto; }
 .mermaid-diagram pre { margin: 0; color: #596267; background: transparent; white-space: pre-wrap; }
@@ -492,6 +499,11 @@ html[data-theme="dark"] .markdown table { border-color: #4a5357; }
 html[data-theme="dark"] .markdown th,
 html[data-theme="dark"] .markdown td { border-color: #424a4e; }
 html[data-theme="dark"] .markdown th { color: #e8ecee; background: #30373b; }
+html[data-theme="dark"] .oversized-message-preview { color: #d6dcde; border-color: #424b4f; background: #202629; }
+html[data-theme="dark"] .oversized-message-meta { color: #939da1; }
+html[data-theme="dark"] .oversized-message-toggle { color: #80cfb7; border-color: #466e62; background: #263732; }
+html[data-theme="dark"] .oversized-message-toggle:hover { border-color: #5d8e7f; background: #2c433c; }
+html[data-theme="dark"] .full-content-controls { border-color: #343b3f; }
 html[data-theme="dark"] .mermaid-diagram { border-color: #444d51; background: #1b2023; }
 html[data-theme="dark"] .mermaid-diagram pre { color: #b9c1c5; }
 html[data-theme="dark"] .mermaid-diagram.mermaid-error { border-color: #754d4c; background: #322526; }
