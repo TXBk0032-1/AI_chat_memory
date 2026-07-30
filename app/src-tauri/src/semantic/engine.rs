@@ -1,6 +1,7 @@
 use sqlx::SqlitePool;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Mutex, Notify, RwLock};
 
 use super::index;
@@ -19,7 +20,9 @@ pub struct SemanticEngine {
     data_dir: PathBuf,
     embeddings: Arc<RwLock<EmbeddingManager>>,
     wake: Arc<Notify>,
-    worker_running: Arc<Mutex<bool>>,
+    worker_gate: Arc<Mutex<()>>,
+    reload_gate: Arc<Mutex<()>>,
+    generation: Arc<AtomicU64>,
     last_error: Arc<RwLock<Option<String>>>,
     reindex_progress: Arc<RwLock<Option<ReindexProgress>>>,
 }
@@ -31,7 +34,9 @@ impl SemanticEngine {
             data_dir,
             embeddings: Arc::new(RwLock::new(embeddings)),
             wake: Arc::new(Notify::new()),
-            worker_running: Arc::new(Mutex::new(false)),
+            worker_gate: Arc::new(Mutex::new(())),
+            reload_gate: Arc::new(Mutex::new(())),
+            generation: Arc::new(AtomicU64::new(0)),
             last_error: Arc::new(RwLock::new(None)),
             reindex_progress: Arc::new(RwLock::new(None)),
         }
@@ -45,46 +50,18 @@ impl SemanticEngine {
         self.wake.notify_one();
     }
 
-    pub fn warm_local_model_in_background(self: &Arc<Self>) {
-        let engine = Arc::clone(self);
-        tauri::async_runtime::spawn(async move {
-            // Let the window paint and first keyword listing finish first.
-            tokio::time::sleep(std::time::Duration::from_millis(750)).await;
-            let manager = engine.embeddings.read().await;
-            if !matches!(
-                manager.settings().backend,
-                crate::models::EmbeddingBackendKind::Local
-            ) {
-                return;
-            }
-            if manager.is_ready() {
-                engine.wake.notify_one();
-                return;
-            }
-            let backend = manager.active();
-            drop(manager);
-            // Trigger lazy load via a tiny document encode when files already exist.
-            match backend.embed_documents(&["warmup".into()]).await {
-                Ok(_) => {
-                    tracing::info!("local embedding model warmed in background");
-                    engine.wake.notify_one();
-                }
-                Err(error) => {
-                    tracing::debug!(%error, "background embedding warm-up skipped");
-                }
-            }
-        });
-    }
-
     pub async fn reload_embeddings(
         &self,
         settings: crate::models::SemanticSearchSettings,
     ) -> Result<()> {
-        // Cancel any in-flight local download/embed from previous backend first.
-        if let Ok(manager) = self.embeddings.try_read() {
-            manager.request_cancel();
-        }
+        let _reload = self.reload_gate.lock().await;
         let manager = EmbeddingManager::from_settings(self.data_dir.clone(), settings).await?;
+        // Invalidate and cancel the old backend before waiting for its current batch.
+        // Holding worker_gate through activation prevents another old-backend batch
+        // from starting between the wait and the manager swap.
+        self.embeddings.read().await.request_cancel();
+        self.invalidate_generation();
+        let _worker = self.worker_gate.lock().await;
         let identity = manager.identity();
         crate::database::connection::ensure_embedding_vec_table(
             &self.pool,
@@ -101,6 +78,29 @@ impl SemanticEngine {
         self.request_reindex_all().await?;
         self.wake.notify_one();
         Ok(())
+    }
+
+    fn current_generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    fn invalidate_generation(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    async fn batch_matches_current(
+        &self,
+        generation: u64,
+        identity: &crate::embedding::BackendIdentity,
+    ) -> bool {
+        if self.current_generation() != generation {
+            return false;
+        }
+        let current = self.embeddings.read().await.identity();
+        current.backend == identity.backend
+            && current.backend_id == identity.backend_id
+            && current.model_id == identity.model_id
+            && current.dimensions == identity.dimensions
     }
 
     pub async fn cancel_semantic_work(&self) -> Result<()> {
@@ -309,7 +309,7 @@ impl SemanticEngine {
     pub async fn runtime_status(&self) -> SemanticRuntimeStatus {
         let manager = self.embeddings.read().await;
         let identity = manager.identity();
-        let health = manager.healthcheck().await;
+        let health = manager.status_snapshot();
         let pending = index::count_chunks(&self.pool, &identity, "pending")
             .await
             .unwrap_or(0);
@@ -428,9 +428,7 @@ impl SemanticEngine {
             .clone()
             .unwrap_or_else(|| settings.default_mode.clone());
         let runtime = self.runtime_status().await;
-        let backend_ready = self.embeddings.read().await.is_ready();
         let semantic_available = settings.enabled
-            && backend_ready
             && !matches!(
                 runtime.status,
                 SemanticStatus::Disabled | SemanticStatus::Unavailable
@@ -565,10 +563,6 @@ impl SemanticEngine {
         if !manager.settings().enabled {
             return Ok(None);
         }
-        // Avoid blocking the first UI search while the 500MB local model is still loading.
-        if !manager.is_ready() {
-            return Ok(None);
-        }
         let backend = manager.active();
         match backend.embed_queries(&[query.to_owned()]).await {
             Ok(mut vectors) => Ok(vectors.pop()),
@@ -590,34 +584,18 @@ impl SemanticEngine {
     }
 
     async fn drain_pending(&self) -> Result<()> {
-        let mut running = self.worker_running.lock().await;
-        if *running {
-            return Ok(());
-        }
-        *running = true;
-        drop(running);
-
-        let result = self.drain_pending_inner().await;
-
-        let mut running = self.worker_running.lock().await;
-        *running = false;
-        result
+        let _worker = self.worker_gate.lock().await;
+        self.drain_pending_inner().await
     }
 
     async fn drain_pending_inner(&self) -> Result<()> {
+        let generation = self.current_generation();
         loop {
-            let manager = self.embeddings.read().await;
-            if !manager.settings().enabled {
+            if self.current_generation() != generation {
                 break;
             }
-            // While the local model is still warming, leave pending chunks alone so
-            // UI-facing requests keep the async runtime free.
-            if !manager.is_ready()
-                && matches!(
-                    manager.settings().backend,
-                    crate::models::EmbeddingBackendKind::Local
-                )
-            {
+            let manager = self.embeddings.read().await;
+            if !manager.settings().enabled {
                 break;
             }
             let identity = manager.identity();
@@ -707,9 +685,23 @@ impl SemanticEngine {
                 }
             };
             let embed_ms = embed_started.elapsed().as_millis();
+            // HTTP backends may discover dimensions while serving this request, so
+            // compare the post-inference identity with the current manager.
+            let write_identity = backend.identity();
+            if !self
+                .batch_matches_current(generation, &write_identity)
+                .await
+            {
+                tracing::info!(
+                    generation,
+                    backend = %write_identity.backend_id,
+                    model = %write_identity.model_id,
+                    "discarding stale embedding batch after backend switch"
+                );
+                break;
+            }
             // HTTP backends may discover their actual dimensions from the first response.
             // Recreate vec0 before writing rather than padding/truncating to a stale guess.
-            let write_identity = backend.identity();
             if write_identity.dimensions != identity.dimensions {
                 crate::database::connection::ensure_embedding_vec_table(
                     &self.pool,
@@ -758,5 +750,160 @@ impl SemanticEngine {
             self.note_embedding_progress().await;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use sqlx::sqlite::SqlitePoolOptions;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use crate::{
+        embedding::{BackendIdentity, EmbeddingBackend},
+        error::Result,
+        models::{EmbeddingBackendKind, EmbeddingHealth, SemanticSearchSettings},
+    };
+
+    struct CountingBackend {
+        healthchecks: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl EmbeddingBackend for CountingBackend {
+        fn identity(&self) -> BackendIdentity {
+            BackendIdentity {
+                backend: EmbeddingBackendKind::Ollama,
+                backend_id: "counting".into(),
+                model_id: "counting-model".into(),
+                dimensions: 8,
+            }
+        }
+
+        async fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            Ok(vec![vec![0.0; 8]; texts.len()])
+        }
+
+        async fn embed_queries(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            Ok(vec![vec![0.0; 8]; texts.len()])
+        }
+
+        async fn healthcheck(&self) -> Result<EmbeddingHealth> {
+            self.healthchecks.fetch_add(1, Ordering::SeqCst);
+            Ok(EmbeddingHealth {
+                ok: true,
+                backend: EmbeddingBackendKind::Ollama,
+                model_id: "counting-model".into(),
+                dimensions: Some(8),
+                message: "ok".into(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn runtime_status_does_not_execute_backend_healthcheck() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE embedding_chunks (
+                backend_id TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                status TEXT NOT NULL
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let healthchecks = Arc::new(AtomicUsize::new(0));
+        let settings = SemanticSearchSettings {
+            enabled: true,
+            backend: EmbeddingBackendKind::Ollama,
+            ..SemanticSearchSettings::default()
+        };
+        let manager = EmbeddingManager::from_backend_for_test(
+            std::env::temp_dir().join("ai-chat-memory-runtime-status-test"),
+            settings,
+            Arc::new(CountingBackend {
+                healthchecks: healthchecks.clone(),
+            }),
+        );
+        let engine = SemanticEngine::new(pool, std::env::temp_dir(), manager);
+
+        let status = engine.runtime_status().await;
+
+        assert_eq!(status.model_id, "counting-model");
+        assert_eq!(healthchecks.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn invalidated_generation_rejects_old_embedding_batch() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let settings = SemanticSearchSettings {
+            enabled: true,
+            backend: EmbeddingBackendKind::Ollama,
+            ..SemanticSearchSettings::default()
+        };
+        let manager = EmbeddingManager::from_backend_for_test(
+            std::env::temp_dir(),
+            settings,
+            Arc::new(CountingBackend {
+                healthchecks: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        let engine = SemanticEngine::new(pool, std::env::temp_dir(), manager);
+        let generation = engine.current_generation();
+        let identity = engine.embeddings.read().await.identity();
+        assert!(engine.batch_matches_current(generation, &identity).await);
+
+        engine.invalidate_generation();
+
+        assert!(!engine.batch_matches_current(generation, &identity).await);
+    }
+
+    #[tokio::test]
+    async fn changed_backend_identity_rejects_old_embedding_batch() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let settings = SemanticSearchSettings {
+            enabled: true,
+            backend: EmbeddingBackendKind::Ollama,
+            ..SemanticSearchSettings::default()
+        };
+        let manager = EmbeddingManager::from_backend_for_test(
+            std::env::temp_dir(),
+            settings.clone(),
+            Arc::new(CountingBackend {
+                healthchecks: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        let engine = SemanticEngine::new(pool, std::env::temp_dir(), manager);
+        let generation = engine.current_generation();
+        let old_identity = engine.embeddings.read().await.identity();
+        *engine.embeddings.write().await = EmbeddingManager::from_backend_for_test(
+            std::env::temp_dir(),
+            settings,
+            Arc::new(crate::embedding::MockEmbeddingBackend::new(
+                EmbeddingBackendKind::Ollama,
+                "replacement-model".into(),
+                8,
+            )),
+        );
+
+        assert!(
+            !engine
+                .batch_matches_current(generation, &old_identity)
+                .await
+        );
     }
 }

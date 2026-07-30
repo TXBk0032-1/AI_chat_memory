@@ -3,6 +3,7 @@ use candle_core::{DType, Device, IndexOp, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config as BertConfig};
 use futures::StreamExt;
+use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,7 +24,12 @@ use crate::{
 const MODEL_FILES: [&str; 3] = ["config.json", "tokenizer.json", "model.safetensors"];
 const MAX_SEQUENCE_LEN: usize = 512;
 const DEFAULT_QUERY_PREFIX: &str = "为这个句子生成表示以用于检索相关文章：";
-const DEFAULT_DIMENSIONS: usize = 512;
+
+#[derive(Deserialize)]
+struct ModelMetadata {
+    model_type: Option<String>,
+    hidden_size: usize,
+}
 
 pub struct LocalBgeBackend {
     model_id: String,
@@ -46,6 +52,16 @@ struct LoadedModel {
     dtype_label: String,
 }
 
+async fn run_model_task<T, F>(task: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    tokio::task::spawn_blocking(task)
+        .await
+        .map_err(|error| AppError::Configuration(format!("BGE 模型执行器异常退出: {error}")))?
+}
+
 impl LocalBgeBackend {
     pub async fn open(
         model_id: String,
@@ -56,10 +72,11 @@ impl LocalBgeBackend {
         tokio::fs::create_dir_all(&model_dir)
             .await
             .map_err(|error| AppError::Configuration(error.to_string()))?;
+        let dimensions = resolve_dimensions(&model_id, &model_dir).await?;
         Ok(Self {
             model_id,
             model_dir,
-            dimensions: DEFAULT_DIMENSIONS,
+            dimensions,
             preferred_device: settings.device.clone(),
             preferred_dtype: settings.dtype.clone(),
             load_gate: Mutex::new(()),
@@ -168,11 +185,12 @@ impl LocalBgeBackend {
                 self.model_dir.display()
             )));
         }
-        let loaded = load_model(
-            &self.model_dir,
-            &self.preferred_device,
-            &self.preferred_dtype,
-        )?;
+        let model_dir = self.model_dir.clone();
+        let preferred_device = self.preferred_device.clone();
+        let preferred_dtype = self.preferred_dtype.clone();
+        let loaded =
+            run_model_task(move || load_model(&model_dir, &preferred_device, &preferred_dtype))
+                .await?;
         if let Ok(mut guard) = self.runtime_device.lock() {
             *guard = loaded.device_label.clone();
         }
@@ -194,14 +212,63 @@ impl LocalBgeBackend {
         }
         self.ensure_loaded().await?;
         let dimensions = self.dimensions;
-        let mut guard = self
-            .state
-            .lock()
-            .map_err(|_| AppError::Configuration("local model lock poisoned".into()))?;
-        let loaded = guard
-            .as_mut()
-            .ok_or_else(|| AppError::Configuration("local model not loaded".into()))?;
-        embed_batch(loaded, texts, is_query, dimensions, &self.cancel_flag)
+        let state = self.state.clone();
+        let texts = texts.to_vec();
+        let cancel_flag = self.cancel_flag.clone();
+        run_model_task(move || {
+            let mut guard = state
+                .lock()
+                .map_err(|_| AppError::Configuration("local model lock poisoned".into()))?;
+            let loaded = guard
+                .as_mut()
+                .ok_or_else(|| AppError::Configuration("local model not loaded".into()))?;
+            embed_batch(loaded, &texts, is_query, dimensions, &cancel_flag)
+        })
+        .await
+    }
+}
+
+async fn resolve_dimensions(model_id: &str, model_dir: &Path) -> Result<usize> {
+    let config_path = model_dir.join("config.json");
+    if config_path.exists() {
+        let content = tokio::fs::read_to_string(&config_path)
+            .await
+            .map_err(|error| AppError::Configuration(error.to_string()))?;
+        let metadata: ModelMetadata = serde_json::from_str(&content).map_err(|error| {
+            AppError::Configuration(format!(
+                "无法读取模型配置 {}: {error}",
+                config_path.display()
+            ))
+        })?;
+        let architecture = metadata.model_type.as_deref().unwrap_or("bert");
+        if architecture != "bert" {
+            return Err(AppError::Configuration(format!(
+                "BGE 模型架构 {architecture} 与当前 BertModel 执行器不兼容"
+            )));
+        }
+        if metadata.hidden_size == 0 {
+            return Err(AppError::Configuration(
+                "BGE 模型配置 hidden_size 必须大于 0".into(),
+            ));
+        }
+        return Ok(metadata.hidden_size);
+    }
+
+    let lower = model_id.to_ascii_lowercase();
+    if lower.contains("bge-small-zh") {
+        Ok(512)
+    } else if lower.contains("bge-base-zh") {
+        Ok(768)
+    } else if lower.contains("bge-large-zh") {
+        Ok(1024)
+    } else if lower.contains("bge-m3") {
+        Err(AppError::Configuration(
+            "BGE 模型架构 xlm-roberta 与当前 BertModel 执行器不兼容".into(),
+        ))
+    } else {
+        Err(AppError::Configuration(format!(
+            "无法在下载前确定 BGE 模型维度：{model_id}"
+        )))
     }
 }
 
@@ -484,7 +551,7 @@ fn load_model(
                         device_label: device_label.into(),
                         dtype_label: dtype_label.into(),
                     };
-                    if let Err(error) = warmup_model(&mut loaded) {
+                    if let Err(error) = warmup_model(&mut loaded, config.hidden_size) {
                         last_error = Some(error);
                         continue;
                     }
@@ -532,15 +599,15 @@ fn try_load(
     BertModel::load(vb, config).map_err(candle_err)
 }
 
-fn warmup_model(loaded: &mut LoadedModel) -> Result<()> {
+fn warmup_model(loaded: &mut LoadedModel, dimensions: usize) -> Result<()> {
     let vectors = embed_batch(
         loaded,
         &["warmup".into()],
         false,
-        DEFAULT_DIMENSIONS,
+        dimensions,
         &AtomicBool::new(false),
     )?;
-    if vectors.len() != 1 || vectors[0].len() != DEFAULT_DIMENSIONS {
+    if vectors.len() != 1 || vectors[0].len() != dimensions {
         return Err(AppError::Configuration(
             "bge warmup returned unexpected shape".into(),
         ));
@@ -667,6 +734,77 @@ fn candle_err(error: candle_core::Error) -> AppError {
 mod tests {
     use super::*;
 
+    fn test_dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("ai-chat-memory-bge-{name}-{}", std::process::id()))
+    }
+
+    #[tokio::test]
+    async fn reads_embedding_dimensions_from_model_config() {
+        let dir = test_dir("dimensions");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(
+            dir.join("config.json"),
+            r#"{"model_type":"bert","hidden_size":384}"#,
+        )
+        .await
+        .unwrap();
+
+        let backend = LocalBgeBackend::open(
+            "fixture/bge-model".into(),
+            dir.clone(),
+            &LocalEmbeddingSettings::default(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(backend.identity().dimensions, 384);
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test]
+    async fn rejects_incompatible_model_architecture_before_loading() {
+        let dir = test_dir("architecture");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        tokio::fs::write(
+            dir.join("config.json"),
+            r#"{"model_type":"xlm-roberta","hidden_size":1024}"#,
+        )
+        .await
+        .unwrap();
+
+        let result = LocalBgeBackend::open(
+            "fixture/bge-m3".into(),
+            dir.clone(),
+            &LocalEmbeddingSettings::default(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(AppError::Configuration(message)) if message.contains("xlm-roberta"))
+        );
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocking_model_work_does_not_block_tokio_worker() {
+        let model_work = run_model_task(|| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            Ok::<_, AppError>(7)
+        });
+        tokio::pin!(model_work);
+
+        tokio::select! {
+            _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
+            result = &mut model_work => panic!("model work completed on Tokio worker: {result:?}"),
+        }
+
+        assert_eq!(model_work.await.unwrap(), 7);
+    }
+
     #[tokio::test]
     async fn embeds_with_downloaded_bge_if_present() {
         let Some(appdata) = std::env::var_os("APPDATA") else {
@@ -697,7 +835,7 @@ mod tests {
             .expect("embed bge documents");
         assert_eq!(vectors.len(), 2);
         for vector in vectors {
-            assert_eq!(vector.len(), DEFAULT_DIMENSIONS);
+            assert_eq!(vector.len(), 512);
             let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
             assert!((norm - 1.0).abs() < 5e-2, "unexpected norm {norm}");
         }

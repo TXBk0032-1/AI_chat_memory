@@ -52,6 +52,20 @@ pub struct EmbeddingManager {
 }
 
 impl EmbeddingManager {
+    #[cfg(test)]
+    pub(crate) fn from_backend_for_test(
+        data_dir: PathBuf,
+        settings: SemanticSearchSettings,
+        active: Arc<dyn EmbeddingBackend>,
+    ) -> Self {
+        Self {
+            data_dir,
+            settings,
+            active,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
     pub async fn from_settings(
         data_dir: PathBuf,
         settings: SemanticSearchSettings,
@@ -107,8 +121,37 @@ impl EmbeddingManager {
         }
     }
 
+    pub fn status_snapshot(&self) -> EmbeddingHealth {
+        let identity = self.identity();
+        let available = match self.settings.backend {
+            EmbeddingBackendKind::Local => {
+                let model_dir = self.local_model_dir();
+                bge::model_files_present(&model_dir) || local::model_files_present(&model_dir)
+            }
+            _ => true,
+        };
+        EmbeddingHealth {
+            ok: available,
+            backend: identity.backend,
+            model_id: identity.model_id,
+            dimensions: Some(identity.dimensions),
+            message: if !available {
+                format!("模型文件未就绪：{}", self.local_model_dir().display())
+            } else if self.is_ready() {
+                "后端已就绪".into()
+            } else {
+                "模型文件已就绪（按需加载）".into()
+            },
+        }
+    }
+
     pub fn local_model_dir(&self) -> PathBuf {
-        local_model_dir(&self.data_dir, &self.settings.local.model)
+        self.settings
+            .local
+            .model_path
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| local_model_dir(&self.data_dir, &self.settings.local.model))
     }
 }
 
@@ -126,24 +169,15 @@ pub async fn build_backend(
                 .map(PathBuf::from)
                 .unwrap_or_else(|| local_model_dir(data_dir, &settings.local.model));
             if bge::is_bge_model(&settings.local.model) {
-                match LocalBgeBackend::open(
-                    settings.local.model.clone(),
-                    model_dir,
-                    &settings.local,
-                    cancel_flag,
-                )
-                .await
-                {
-                    Ok(backend) => Ok(Arc::new(backend)),
-                    Err(error) => {
-                        tracing::warn!(%error, "local bge backend unavailable; using deterministic mock until model is ready");
-                        Ok(Arc::new(MockEmbeddingBackend::new(
-                            EmbeddingBackendKind::Local,
-                            settings.local.model.clone(),
-                            512,
-                        )))
-                    }
-                }
+                Ok(Arc::new(
+                    LocalBgeBackend::open(
+                        settings.local.model.clone(),
+                        model_dir,
+                        &settings.local,
+                        cancel_flag,
+                    )
+                    .await?,
+                ))
             } else {
                 match LocalHarrierBackend::open(
                     settings.local.model.clone(),
