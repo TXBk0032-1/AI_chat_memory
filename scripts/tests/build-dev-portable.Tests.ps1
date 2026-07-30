@@ -27,13 +27,25 @@ if ($defaultPlan.frontend_action -notin "reuse", "build") {
     throw "Unexpected default frontend action: $($defaultPlan.frontend_action)"
 }
 Assert-Equal "debug" $defaultPlan.cargo_profile "Cargo profile"
+Assert-Equal "embedded" $defaultPlan.frontend_runtime "frontend runtime"
 Assert-Equal "AI-Chat-Memory_0.1.0_x64_dev.exe" $defaultPlan.output_name "output name"
 Assert-Equal "1" $defaultPlan.output_file_count "output file count"
 
 $rebuildPlan = & $Builder -PlanOnly -RebuildFrontend | ConvertFrom-Json
 Assert-Equal "build" $rebuildPlan.frontend_action "forced frontend action"
+Assert-Equal "embedded" $rebuildPlan.frontend_runtime "rebuilt frontend runtime"
 
 $source = Get-Content -LiteralPath $Builder -Raw
+$embeddedRuntimeFragments = @(
+    '$PreviousTauriConfig = $env:TAURI_CONFIG',
+    '$env:TAURI_CONFIG = ''{"build":{"devUrl":null}}''',
+    '$env:TAURI_CONFIG = $PreviousTauriConfig'
+)
+foreach ($fragment in $embeddedRuntimeFragments) {
+    if (-not $source.Contains($fragment)) {
+        throw "Development builder does not enforce embedded frontend runtime: $fragment"
+    }
+}
 if ($source -match 'tauri\s+build') {
     throw "Development builder must not invoke tauri build"
 }

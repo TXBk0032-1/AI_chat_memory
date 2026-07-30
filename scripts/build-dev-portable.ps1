@@ -41,6 +41,7 @@ $FrontendAction = if ($RebuildFrontend -or -not (Test-Path -LiteralPath $Fronten
 $Plan = [ordered]@{
     frontend_preference = "reuse"
     frontend_action = $FrontendAction
+    frontend_runtime = "embedded"
     cargo_profile = "debug"
     output_name = $OutputName
     output_path = Join-Path $OutputDirectory $OutputName
@@ -106,10 +107,13 @@ if ($FrontendAction -eq "build") {
 
 Write-Host "==> Build incremental debug executable" -ForegroundColor Cyan
 Push-Location $Rust
+$PreviousTauriConfig = $env:TAURI_CONFIG
 try {
+    $env:TAURI_CONFIG = '{"build":{"devUrl":null}}'
     & cargo build --all-features --bin ai-chat-memory-desktop
     if ($LASTEXITCODE -ne 0) { throw "Cargo build failed with exit code $LASTEXITCODE" }
 } finally {
+    $env:TAURI_CONFIG = $PreviousTauriConfig
     Pop-Location
 }
 
