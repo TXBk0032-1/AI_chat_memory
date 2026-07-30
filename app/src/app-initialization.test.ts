@@ -40,4 +40,3 @@ describe('App setup initialization order', () => {
     expect(appSource).toContain('@preview-language="previewLanguage"')
   })
 })
-
