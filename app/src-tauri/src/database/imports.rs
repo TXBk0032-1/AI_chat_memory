@@ -1,9 +1,24 @@
 use sqlx::SqlitePool;
 
-use crate::{error::Result, models::NormalizedSession};
+use crate::{
+    error::Result,
+    models::NormalizedSession,
+    sync::store::{SyncStore, current_time_millis, snapshot_from_normalized_session},
+};
 
-pub async fn import_sessions(pool: &SqlitePool, sessions: &[NormalizedSession]) -> Result<usize> {
+pub async fn import_sessions(
+    pool: &SqlitePool,
+    sessions: &[NormalizedSession],
+    record_sync: bool,
+) -> Result<usize> {
+    let store = SyncStore::new(pool.clone());
     let mut tx = pool.begin().await?;
+    let record_sync = if record_sync {
+        SyncStore::lock_device_state_in(&mut tx).await?.is_some()
+    } else {
+        false
+    };
+    let now_ms = current_time_millis();
     for session in sessions {
         let existing: Option<String> = sqlx::query_scalar(
             "SELECT id FROM sessions WHERE platform = ? AND platform_session_id = ?",
@@ -56,6 +71,11 @@ pub async fn import_sessions(pool: &SqlitePool, sessions: &[NormalizedSession]) 
         .bind(content)
         .execute(&mut *tx)
         .await?;
+        if record_sync {
+            store
+                .queue_local_upsert_in(&mut tx, snapshot_from_normalized_session(session), now_ms)
+                .await?;
+        }
     }
     tx.commit().await?;
     Ok(sessions.len())

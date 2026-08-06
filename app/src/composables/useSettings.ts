@@ -4,6 +4,7 @@ import { ref, type Ref } from 'vue'
 import {
   desktopApi,
   type ApiStatus,
+  type CloudCredentialInput,
   type DesktopApi,
   type ModelDownloadProgress,
   type ReindexProgress,
@@ -66,7 +67,7 @@ export function useSettings(
     showSettings.value = false
   }
 
-  async function saveSettings() {
+  async function saveSettings(cloudSyncCredentials: CloudCredentialInput | null = null) {
     settings.value.allowed_origins = originText.value.split('\n').map((value) => value.trim()).filter(Boolean)
     settings.value.setup_complete = true
     for (const backend of ['ollama', 'llama_cpp', 'openai_compatible'] as const) {
@@ -76,7 +77,7 @@ export function useSettings(
       }
     }
     try {
-      settings.value = await api.saveSettings(settings.value)
+      settings.value = await api.saveSettings(settings.value, cloudSyncCredentials)
       theme.accept()
       closeSettings(true)
     } catch (reason) {

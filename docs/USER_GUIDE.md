@@ -215,7 +215,33 @@ http://127.0.0.1:19821/mcp
 - 当前版本不要求 token；同一台电脑上的其他进程在应用运行且 MCP 开启时，可以读取已同步对话。
 - 关闭 MCP 开关后服务会停止并释放端口。
 
-## 6. 数据与隐私
+## 6. WebDAV / S3 云同步
+
+在“设置 > 云同步”中选择一个活动后端。WebDAV 与 S3 不会同时镜像；切换后端会创建独立的 vault、generation 和完整状态基线，旧后端的远端存档不会被删除。
+
+- WebDAV：填写地址、远端目录、用户名和密码。服务器必须支持 `PROPFIND`、`MKCOL`、`GET`、`PUT`、`DELETE`、ETag、`If-Match` 和 `If-None-Match`。应用不依赖 WebDAV `LOCK` 或服务端脚本。
+- S3：填写 Region、Bucket、可选 Endpoint 和对象前缀。AWS S3 的 Endpoint 可留空；MinIO 等兼容服务通常需要填写 Endpoint 并启用 Path-style。Bucket 必须预先创建。
+- S3 服务必须支持 SigV4、`ListObjectsV2`、ETag、`If-Match`、`If-None-Match` 和批量删除。单个 `.acmb` 包直接上传，不使用 multipart upload。
+- 启用前先执行“测试连接”。应用会在随机临时前缀中验证列表、读写、条件创建、错误 ETag、正确 ETag 更新和清理；任一能力缺失时测试失败。
+- 首台设备会以条件写创建 `v1/vault.json`；后续设备读取并采用其中的 vault 和 generation 身份，从而在同一远端首次汇合。
+
+- 首次启用会为现有会话建立本地基线。之后应用启动、本地导入或删除、15 分钟周期以及“立即同步”都会触发同步。
+- 同一实体使用最后变更胜出；删除以墓碑传播，离线设备恢复后不会用旧内容覆盖较新的删除。
+- 多条变更会打包为 TAR 并使用 Zstandard 压缩，再保存为不可变 `.acmb` 包。
+- 明文模式仅校验包完整性。启用加密后，新包使用 Argon2id 和 XChaCha20-Poly1305；历史包保持原有模式。
+- 从已发布旧版升级时，如果远端已有 `default/generation-1` 存档但没有 `v1/vault.json`，应用会按旧版实际能力建立明文兼容 vault；旧设置中残留的“启用加密”不会被当成历史包已经加密。兼容期间禁止切换加密或普通 generation 轮换。
+- 旧版无链存档允许 outbox 合并造成的序号空洞。恢复时会校验并扫描相关不可变包：完全相同的重复事件会去重；同一设备同一序号出现不同事件时停止同步，不猜测分支。
+- WebDAV 密码、S3 Access Key ID、Secret Access Key、Session Token 和同步密码存入系统凭据存储，不写入 `settings.json`。同步密码丢失后，加密包中的历史内容不可恢复。
+- “重写云端存档”会创建新的 generation 并重建状态基线，用于清理历史包或更换同步密码。它也是结束旧版兼容的显式操作：执行前必须先升级所有仍在使用旧版的设备并确认其已完成同步；重写后旧客户端仍会停留在 `generation-1`，其后续写入不会再汇入新 generation。旧 generation 不会自动删除。
+- 删除远端设备记录只清理同步元数据，不撤销该设备已经获得的后端凭据。WebDAV 需要在服务端更换密码，S3 需要在服务商侧撤销或轮换 Access Key/Session Token；加密模式还应更换同步密码并重写存档。
+
+状态含义：`idle` 表示等待触发，`syncing` 表示正在同步，`offline` 表示网络不可达，`auth_error` 表示凭据错误，`needs_unlock` 表示缺少同步密码，`protocol_error` 表示服务器能力、ETag 或包格式不兼容。
+
+排查顺序：先重新测试连接，再确认地址、Endpoint 和远端目录没有嵌入用户名或密码；认证错误时重新保存凭据；S3 兼容服务还需确认 Region 与 Path-style 设置；ETag 错误时检查服务器或代理是否保留条件请求头；包损坏时保留远端文件并查看应用日志，不要手工修改 `.acmb` 或 `head.json`。
+
+兼容性记录：自动化协议夹具已覆盖 SigV4、分页、delimiter、条件写、错误映射、128 MiB 限制和递归清理。当前发布流程未配置外部服务凭据，MinIO 与 AWS S3、Cloudflare R2、Backblaze B2 的真实服务人工验证均标记为“未执行”。
+
+## 7. 数据与隐私
 
 - 桌面端 userscript API 只监听本机地址 `127.0.0.1:19820`。
 - MCP 只读服务（若启用）监听本机地址 `127.0.0.1:19821`。
@@ -226,7 +252,7 @@ http://127.0.0.1:19821/mcp
 
 建议定期备份 `chat_memory.db`，尤其是在更改数据目录或重装系统之前。
 
-## 7. 常见问题
+## 8. 常见问题
 
 ### 网页面板显示“连接失败”
 

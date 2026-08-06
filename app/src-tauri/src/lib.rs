@@ -13,6 +13,7 @@ mod normalizer;
 mod semantic;
 mod service;
 mod settings;
+pub mod sync;
 mod tray;
 mod window_lifecycle;
 
@@ -133,6 +134,11 @@ pub fn run() {
             commands::get_settings,
             commands::save_settings,
             commands::rotate_secret,
+            commands::get_cloud_sync_status,
+            commands::test_cloud_sync_connection,
+            commands::sync_now,
+            commands::rewrite_cloud_archive,
+            commands::remove_cloud_device_record,
             commands::get_api_status,
             commands::get_semantic_status,
             commands::check_embedding_backend,

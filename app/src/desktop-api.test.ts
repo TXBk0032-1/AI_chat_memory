@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import type { SettingsModel } from './desktop-api'
 
 const invoke = vi.fn()
 vi.mock('@tauri-apps/api/core', () => ({ invoke }))
@@ -32,5 +33,99 @@ describe('desktopApi', () => {
     expect(invoke).toHaveBeenLastCalledWith('move_data_directory', { path: 'D:/archive' })
     await desktopApi.confirmCloseBehavior('hide_to_tray')
     expect(invoke).toHaveBeenLastCalledWith('confirm_close_behavior', { behavior: 'hide_to_tray' })
+  })
+
+  it('tests cloud sync with draft S3 settings and tagged credentials', async () => {
+    invoke.mockResolvedValue({ ok: true })
+    const { desktopApi } = await import('./desktop-api')
+    const cloudSync = {
+      backend: 's3' as const,
+      enabled: true,
+      connection_verified: false,
+      base_url: '',
+      root_path: '',
+      username: '',
+      encryption_enabled: true,
+      s3: {
+        endpoint_url: 'http://127.0.0.1:9000',
+        region: 'us-east-1',
+        bucket: 'archive',
+        prefix: 'team/chat',
+        force_path_style: true,
+      },
+      remote_id: 'remote-a',
+      vault_id: 'vault-a',
+      generation_id: 'generation-a',
+    }
+    const credentials = {
+      backend: 's3' as const,
+      access_key_id: 'AKID',
+      secret_access_key: 'secret',
+      session_token: 'token',
+      sync_password: 'sync',
+    }
+
+    await desktopApi.testCloudSyncConnection(cloudSync, credentials)
+
+    expect(invoke).toHaveBeenLastCalledWith('test_cloud_sync_connection', {
+      cloudSync,
+      credentials,
+    })
+  })
+
+  it('saves settings and cloud credentials in one typed command', async () => {
+    invoke.mockResolvedValue({ setup_complete: true })
+    const { desktopApi } = await import('./desktop-api')
+    const settings: SettingsModel = {
+      setup_complete: true,
+      secret_enabled: false,
+      allowed_origins: [],
+      close_behavior: 'ask',
+      tray_click_behavior: 'show_menu',
+      theme: 'system',
+      semantic_search: {
+        enabled: true,
+        default_mode: 'hybrid',
+        backend: 'local',
+        local: { model: 'test', device: 'auto', dtype: 'auto' },
+        ollama: { base_url: 'http://127.0.0.1:11434', model: 'test' },
+        llama_cpp: { base_url: 'http://127.0.0.1:8080/v1', model: 'test' },
+        openai_compatible: { base_url: 'https://example.test/v1', model: 'test' },
+      },
+      mcp_enabled: true,
+      cloud_sync: {
+        backend: 's3',
+        enabled: true,
+        connection_verified: true,
+        base_url: '',
+        root_path: '',
+        username: '',
+        encryption_enabled: true,
+        s3: {
+          endpoint_url: 'http://127.0.0.1:9000',
+          region: 'us-east-1',
+          bucket: 'archive',
+          prefix: 'team/chat',
+          force_path_style: true,
+        },
+        remote_id: 'remote-a',
+        vault_id: 'vault-a',
+        generation_id: 'generation-a',
+      },
+    }
+    const credentials = {
+      backend: 's3' as const,
+      access_key_id: 'AKID',
+      secret_access_key: 'secret',
+      session_token: null,
+      sync_password: 'sync',
+    }
+
+    await desktopApi.saveSettings(settings, credentials)
+
+    expect(invoke).toHaveBeenLastCalledWith('save_settings', {
+      settings,
+      cloudSyncCredentials: credentials,
+    })
   })
 })

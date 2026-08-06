@@ -34,7 +34,7 @@ pub struct SessionOpen {
     pub references: Vec<Reference>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct Reference {
     pub cite_index: i64,
     pub url: String,
@@ -340,6 +340,202 @@ pub struct AppSettings {
     pub semantic_search: SemanticSearchSettings,
     #[serde(default = "default_true")]
     pub mcp_enabled: bool,
+    #[serde(default)]
+    pub cloud_sync: CloudSyncSettings,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CloudBackendKind {
+    #[default]
+    Webdav,
+    S3,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct S3CloudSyncSettings {
+    #[serde(default)]
+    pub endpoint_url: String,
+    #[serde(default = "default_s3_region")]
+    pub region: String,
+    #[serde(default)]
+    pub bucket: String,
+    #[serde(default)]
+    pub prefix: String,
+    #[serde(default)]
+    pub force_path_style: bool,
+}
+
+impl Default for S3CloudSyncSettings {
+    fn default() -> Self {
+        Self {
+            endpoint_url: String::new(),
+            region: default_s3_region(),
+            bucket: String::new(),
+            prefix: String::new(),
+            force_path_style: false,
+        }
+    }
+}
+
+fn default_s3_region() -> String {
+    "us-east-1".into()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CloudSyncSettings {
+    #[serde(default)]
+    pub backend: CloudBackendKind,
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub connection_verified: bool,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub root_path: String,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub encryption_enabled: bool,
+    #[serde(default)]
+    pub s3: S3CloudSyncSettings,
+    #[serde(default = "default_remote_id")]
+    pub remote_id: String,
+    #[serde(default = "default_vault_id")]
+    pub vault_id: String,
+    #[serde(default = "default_generation_id")]
+    pub generation_id: String,
+}
+
+impl Default for CloudSyncSettings {
+    fn default() -> Self {
+        Self {
+            backend: CloudBackendKind::Webdav,
+            enabled: false,
+            connection_verified: false,
+            base_url: String::new(),
+            root_path: String::new(),
+            username: String::new(),
+            encryption_enabled: false,
+            s3: S3CloudSyncSettings::default(),
+            remote_id: default_remote_id(),
+            vault_id: default_vault_id(),
+            generation_id: default_generation_id(),
+        }
+    }
+}
+
+impl CloudSyncSettings {
+    pub fn normalize(&mut self) {
+        self.s3.endpoint_url = self.s3.endpoint_url.trim().trim_end_matches('/').to_owned();
+        self.s3.region = self.s3.region.trim().to_owned();
+        if self.s3.region.is_empty() {
+            self.s3.region = default_s3_region();
+        }
+        self.s3.bucket = self.s3.bucket.trim().to_owned();
+        self.s3.prefix = self.s3.prefix.trim().trim_matches('/').to_owned();
+        self.remote_id = self.remote_id.trim().to_owned();
+        self.vault_id = self.vault_id.trim().to_owned();
+        self.generation_id = self.generation_id.trim().to_owned();
+        if self.remote_id.is_empty() {
+            self.remote_id = default_remote_id();
+        }
+        if self.vault_id.is_empty() {
+            self.vault_id = default_vault_id();
+        }
+        if self.generation_id.is_empty() {
+            self.generation_id = default_generation_id();
+        }
+    }
+
+    pub fn rotate_remote_identity(&mut self) {
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        self.remote_id = format!("remote-{id}");
+        self.vault_id = format!("vault-{id}");
+        self.generation_id = format!("generation-{id}");
+    }
+}
+
+fn default_remote_id() -> String {
+    "default".into()
+}
+
+fn default_vault_id() -> String {
+    "default".into()
+}
+
+fn default_generation_id() -> String {
+    "generation-1".into()
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
+pub enum CloudSyncState {
+    #[default]
+    Disabled,
+    Idle,
+    Syncing,
+    Offline,
+    NeedsUnlock,
+    AuthError,
+    ProtocolError,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RemoteDeviceStatus {
+    pub device_id: String,
+    pub display_name: String,
+    pub last_seen_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CloudSyncStatus {
+    pub state: CloudSyncState,
+    pub last_success_at: Option<String>,
+    pub pending_mutations: i64,
+    pub last_error_code: Option<String>,
+    pub last_error_message: Option<String>,
+    pub devices: Vec<RemoteDeviceStatus>,
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(tag = "backend", rename_all = "snake_case")]
+pub enum CloudCredentialInput {
+    Webdav {
+        password: String,
+        sync_password: Option<String>,
+    },
+    S3 {
+        access_key_id: String,
+        secret_access_key: String,
+        session_token: Option<String>,
+        sync_password: Option<String>,
+    },
+}
+
+impl std::fmt::Debug for CloudCredentialInput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Webdav { .. } => formatter
+                .debug_struct("Webdav")
+                .field("credentials", &"[REDACTED]")
+                .finish(),
+            Self::S3 { .. } => formatter
+                .debug_struct("S3")
+                .field("credentials", &"[REDACTED]")
+                .finish(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CloudConnectionTestResult {
+    pub ok: bool,
+    pub message: String,
+    pub supports_conditional_write: bool,
+    pub cloud_sync: CloudSyncSettings,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -387,6 +583,7 @@ impl Default for AppSettings {
             theme: ThemePreference::System,
             semantic_search: SemanticSearchSettings::default(),
             mcp_enabled: true,
+            cloud_sync: CloudSyncSettings::default(),
         }
     }
 }
@@ -421,6 +618,142 @@ pub struct SemanticRuntimeStatus {
     pub dtype: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reindex: Option<ReindexProgress>,
+}
+
+#[cfg(test)]
+mod cloud_sync_tests {
+    use super::{
+        AppSettings, CloudBackendKind, CloudCredentialInput, CloudSyncSettings, S3CloudSyncSettings,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn legacy_cloud_sync_settings_default_to_webdav() {
+        let settings: AppSettings = serde_json::from_value(json!({
+            "setup_complete": true,
+            "secret_enabled": false,
+            "secret": null,
+            "allowed_origins": [],
+            "cloud_sync": {
+                "enabled": true,
+                "base_url": "https://dav.example.test/archive",
+                "root_path": "chat-memory",
+                "username": "alice",
+                "encryption_enabled": false
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(settings.cloud_sync.backend, CloudBackendKind::Webdav);
+        assert_eq!(settings.cloud_sync.s3.region, "us-east-1");
+        assert!(settings.cloud_sync.s3.endpoint_url.is_empty());
+    }
+
+    #[test]
+    fn s3_prefix_is_normalized_without_leading_or_trailing_slashes() {
+        let mut settings = CloudSyncSettings {
+            backend: CloudBackendKind::S3,
+            s3: S3CloudSyncSettings {
+                prefix: "//team/archive///".into(),
+                ..S3CloudSyncSettings::default()
+            },
+            ..CloudSyncSettings::default()
+        };
+
+        settings.normalize();
+
+        assert_eq!(settings.s3.prefix, "team/archive");
+    }
+
+    #[test]
+    fn s3_settings_serialization_never_contains_credentials() {
+        let settings = CloudSyncSettings {
+            backend: CloudBackendKind::S3,
+            s3: S3CloudSyncSettings {
+                endpoint_url: "https://s3.example.test".into(),
+                region: "auto".into(),
+                bucket: "archive".into(),
+                prefix: "team/chat".into(),
+                force_path_style: true,
+            },
+            ..CloudSyncSettings::default()
+        };
+        let wire = serde_json::to_string(&settings).unwrap();
+
+        assert!(wire.contains("s3.example.test"));
+        for secret in [
+            "access_key_id",
+            "secret_access_key",
+            "session_token",
+            "sync_password",
+        ] {
+            assert!(!wire.contains(secret));
+        }
+    }
+
+    #[test]
+    fn cloud_credentials_are_a_backend_tagged_union() {
+        let webdav: CloudCredentialInput = serde_json::from_value(json!({
+            "backend": "webdav",
+            "password": "dav-secret",
+            "sync_password": "sync-secret"
+        }))
+        .unwrap();
+        let s3: CloudCredentialInput = serde_json::from_value(json!({
+            "backend": "s3",
+            "access_key_id": "AKID",
+            "secret_access_key": "secret",
+            "session_token": "token",
+            "sync_password": null
+        }))
+        .unwrap();
+
+        assert!(matches!(webdav, CloudCredentialInput::Webdav { .. }));
+        assert!(matches!(s3, CloudCredentialInput::S3 { .. }));
+    }
+
+    #[test]
+    fn cloud_credential_debug_output_is_redacted() {
+        let credentials: CloudCredentialInput = serde_json::from_value(json!({
+            "backend": "s3",
+            "access_key_id": "AKID-SENSITIVE",
+            "secret_access_key": "SECRET-SENSITIVE",
+            "session_token": "TOKEN-SENSITIVE",
+            "sync_password": "SYNC-SENSITIVE"
+        }))
+        .unwrap();
+
+        let debug = format!("{credentials:?}");
+
+        assert!(debug.contains("REDACTED"));
+        for value in [
+            "AKID-SENSITIVE",
+            "SECRET-SENSITIVE",
+            "TOKEN-SENSITIVE",
+            "SYNC-SENSITIVE",
+        ] {
+            assert!(!debug.contains(value));
+        }
+    }
+
+    #[test]
+    fn rotating_remote_identity_replaces_vault_and_generation() {
+        let mut settings = CloudSyncSettings::default();
+        let previous = (
+            settings.remote_id.clone(),
+            settings.vault_id.clone(),
+            settings.generation_id.clone(),
+        );
+
+        settings.rotate_remote_identity();
+
+        assert_ne!(settings.remote_id, previous.0);
+        assert_ne!(settings.vault_id, previous.1);
+        assert_ne!(settings.generation_id, previous.2);
+        assert!(settings.remote_id.starts_with("remote-"));
+        assert!(settings.vault_id.starts_with("vault-"));
+        assert!(settings.generation_id.starts_with("generation-"));
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

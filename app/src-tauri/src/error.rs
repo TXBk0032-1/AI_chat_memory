@@ -8,6 +8,14 @@ pub enum AppError {
     Json(#[from] serde_json::Error),
     #[error("ZIP error: {0}")]
     Zip(#[from] zip::result::ZipError),
+    #[error("cryptography error: {0}")]
+    Crypto(String),
+    #[error("credential storage error: {0}")]
+    Credential(String),
+    #[error("cloud sync error: {0}")]
+    Cloud(#[from] crate::sync::backend::CloudError),
+    #[error("cloud sync protocol error: {0}")]
+    SyncProtocol(String),
     #[error("invalid data: {0}")]
     InvalidData(String),
     #[error("not found: {0}")]

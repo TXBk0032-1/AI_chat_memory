@@ -4,8 +4,10 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::{
     models::{
-        AppSettings, BranchOverview, DesktopApiStatus, EmbeddingHealth, ImportResponse, Message,
-        SearchMode, SearchQuery, SemanticRuntimeStatus, SessionList, SessionOpen, SessionSearchHit,
+        AppSettings, BranchOverview, CloudConnectionTestResult, CloudCredentialInput,
+        CloudSyncSettings, CloudSyncStatus, DesktopApiStatus, EmbeddingHealth, ImportResponse,
+        Message, SearchMode, SearchQuery, SemanticRuntimeStatus, SessionList, SessionOpen,
+        SessionSearchHit,
     },
     service::AppService,
 };
@@ -113,9 +115,13 @@ pub async fn save_settings(
     service: State<'_, AppService>,
     manager: State<'_, std::sync::Arc<crate::local_services::LocalServiceManager>>,
     settings: AppSettings,
+    cloud_sync_credentials: Option<CloudCredentialInput>,
 ) -> Result<AppSettings, String> {
     let previous = service.settings().await;
-    let settings = service.update_settings(settings).await.map_err(message)?;
+    let settings = service
+        .update_settings_with_cloud_credentials(settings, cloud_sync_credentials)
+        .await
+        .map_err(message)?;
     if previous.mcp_enabled != settings.mcp_enabled {
         manager
             .apply_desired(
@@ -137,6 +143,48 @@ pub async fn save_settings(
 #[tauri::command]
 pub async fn rotate_secret(service: State<'_, AppService>) -> Result<AppSettings, String> {
     service.rotate_secret().await.map_err(message)
+}
+
+#[tauri::command]
+pub async fn get_cloud_sync_status(
+    service: State<'_, AppService>,
+) -> Result<CloudSyncStatus, String> {
+    Ok(service.cloud_sync_status().await)
+}
+
+#[tauri::command]
+pub async fn test_cloud_sync_connection(
+    service: State<'_, AppService>,
+    cloud_sync: CloudSyncSettings,
+    credentials: CloudCredentialInput,
+) -> Result<CloudConnectionTestResult, String> {
+    service
+        .test_cloud_sync_connection(cloud_sync, credentials)
+        .await
+        .map_err(message)
+}
+
+#[tauri::command]
+pub async fn sync_now(service: State<'_, AppService>) -> Result<CloudSyncStatus, String> {
+    service.sync_now().await.map_err(message)
+}
+
+#[tauri::command]
+pub async fn rewrite_cloud_archive(
+    service: State<'_, AppService>,
+) -> Result<CloudSyncStatus, String> {
+    service.rewrite_cloud_archive().await.map_err(message)
+}
+
+#[tauri::command]
+pub async fn remove_cloud_device_record(
+    service: State<'_, AppService>,
+    device_id: String,
+) -> Result<CloudSyncStatus, String> {
+    service
+        .remove_cloud_device_record(device_id)
+        .await
+        .map_err(message)
 }
 
 #[tauri::command]

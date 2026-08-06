@@ -33,6 +33,7 @@ impl SettingsStore {
             value.semantic_search.local.model_path = None;
             tracing::info!("migrated default local embedding model to bge-small-zh-v1.5");
         }
+        value.cloud_sync.normalize();
         Ok(Self {
             path,
             value: RwLock::new(value),
@@ -43,6 +44,7 @@ impl SettingsStore {
     }
     pub async fn update(&self, mut value: AppSettings) -> Result<AppSettings> {
         validate_origins(&value.allowed_origins)?;
+        value.cloud_sync.normalize();
         if value.secret_enabled && value.secret.as_deref().is_none_or(str::is_empty) {
             value.secret = Some(generate_secret());
         }

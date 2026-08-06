@@ -629,6 +629,17 @@ html[data-theme="dark"] .export-document .mermaid-diagram { border-color: #d7ddd
 .semantic-settings label { display: grid; gap: 6px; color: #5c666b; font-size: 11px; }
 .semantic-settings input, .semantic-settings select { height: 34px; border: 1px solid #cbd1d4; border-radius: 12px; padding: 0 10px; color: #31373a; background: #fff; }
 .setting-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.cloud-sync-settings { display: grid; gap: 12px; }
+.cloud-sync-settings > label { display: grid; gap: 6px; color: #5c666b; font-size: 11px; }
+.cloud-sync-settings > label input:not([type="checkbox"]) { min-width: 0; height: 34px; border: 1px solid #cbd1d4; border-radius: 8px; padding: 0 10px; color: #31373a; background: #fff; }
+.cloud-backend-selector { width: min(260px, 100%); display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 3px; padding: 3px; border: 1px solid #d5dade; border-radius: 8px; background: #f3f5f5; }
+.cloud-backend-selector button { min-width: 0; height: 32px; border: 0; border-radius: 6px; color: #68736f; background: transparent; font-size: 11px; }
+.cloud-backend-selector button.active { color: #176b58; background: #fff; box-shadow: 0 1px 4px #17231f17; font-weight: 700; }
+html[data-theme="dark"] .cloud-sync-settings > label { color: #aeb8bc; }
+html[data-theme="dark"] .cloud-sync-settings > label input:not([type="checkbox"]) { color: #e7ecef; border-color: #4a5358; background: #20272c; }
+html[data-theme="dark"] .cloud-backend-selector { border-color: #464f53; background: #191e21; }
+html[data-theme="dark"] .cloud-backend-selector button { color: #9fa9ad; }
+html[data-theme="dark"] .cloud-backend-selector button.active { color: #82d2ba; background: #353c40; box-shadow: 0 1px 4px #06080966; }
 .mcp-copy-button { position: relative; width: 136px; max-width: 136px; padding-right: 10px; overflow: hidden; gap: 8px; transition: width .28s cubic-bezier(.2, .9, .25, 1), max-width .28s cubic-bezier(.2, .9, .25, 1), padding .28s cubic-bezier(.2, .9, .25, 1), border-color .18s ease, background-color .18s ease, color .18s ease; }
 .mcp-copy-button.copied { width: 152px; max-width: 152px; padding-right: 12px; }
 .mcp-copy-button__icon { position: relative; width: 14px; height: 14px; flex: 0 0 14px; }
@@ -668,7 +679,7 @@ html[data-theme="dark"] .download-progress-track { background: #2b3439; }
   .settings-dialog-backdrop { padding: 12px; }
   .settings-dialog { width: min(650px, 96vw); height: min(760px, 94vh); }
   .settings-layout { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
-  .settings-navigation { display: grid; grid-template-columns: repeat(3, minmax(120px, 1fr)); gap: 5px; padding: 8px 10px; overflow-x: auto; overflow-y: hidden; border-right: 0; border-bottom: 1px solid #e0e4e5; }
+  .settings-navigation { display: grid; grid-template-columns: repeat(4, minmax(110px, 1fr)); gap: 5px; padding: 8px 10px; overflow-x: auto; overflow-y: hidden; border-right: 0; border-bottom: 1px solid #e0e4e5; }
   .settings-navigation__button { justify-content: center; white-space: nowrap; }
   .settings-navigation__button.active { box-shadow: inset 0 -3px 0 #198169; }
   .behavior-settings { grid-template-columns: 1fr; }

@@ -44,7 +44,37 @@ export type SettingsModel = {
   theme: ThemePreference
   semantic_search: SemanticSearchSettings
   mcp_enabled: boolean
+  cloud_sync: CloudSyncSettings
 }
+
+export type CloudBackendKind = 'webdav' | 's3'
+export type S3CloudSyncSettings = {
+  endpoint_url: string
+  region: string
+  bucket: string
+  prefix: string
+  force_path_style: boolean
+}
+export type CloudSyncSettings = {
+  backend: CloudBackendKind
+  enabled: boolean
+  connection_verified: boolean
+  base_url: string
+  root_path: string
+  username: string
+  encryption_enabled: boolean
+  s3: S3CloudSyncSettings
+  remote_id: string
+  vault_id: string
+  generation_id: string
+}
+export type CloudSyncState = 'disabled' | 'idle' | 'syncing' | 'offline' | 'needs_unlock' | 'auth_error' | 'protocol_error'
+export type RemoteDeviceStatus = { device_id: string; display_name: string; last_seen_at?: string | null }
+export type CloudSyncStatus = { state: CloudSyncState; last_success_at?: string | null; pending_mutations: number; last_error_code?: string | null; last_error_message?: string | null; devices: RemoteDeviceStatus[] }
+export type CloudCredentialInput =
+  | { backend: 'webdav'; password: string; sync_password?: string | null }
+  | { backend: 's3'; access_key_id: string; secret_access_key: string; session_token?: string | null; sync_password?: string | null }
+export type CloudConnectionTestResult = { ok: boolean; message: string; supports_conditional_write: boolean; cloud_sync: CloudSyncSettings }
 
 export type LocalServiceStatus =
   | { state: 'starting' }
@@ -134,7 +164,7 @@ export interface DesktopApi {
   deleteSession(id: string): Promise<void>
   importDeepseekZip(path: string): Promise<void>
   getSettings(): Promise<SettingsModel>
-  saveSettings(settings: SettingsModel): Promise<SettingsModel>
+  saveSettings(settings: SettingsModel, cloudSyncCredentials?: CloudCredentialInput | null): Promise<SettingsModel>
   rotateSecret(): Promise<SettingsModel>
   getApiStatus(): Promise<ApiStatus>
   getSemanticStatus(): Promise<SemanticRuntimeStatus>
@@ -146,6 +176,11 @@ export interface DesktopApi {
   moveDataDirectory(path: string): Promise<void>
   confirmCloseBehavior(behavior: Exclude<CloseBehavior, 'ask'>): Promise<void>
   writeExportFile(path: string, payload: ExportFilePayload): Promise<void>
+  getCloudSyncStatus(): Promise<CloudSyncStatus>
+  testCloudSyncConnection(cloudSync: CloudSyncSettings, credentials: CloudCredentialInput): Promise<CloudConnectionTestResult>
+  syncNow(): Promise<CloudSyncStatus>
+  rewriteCloudArchive(): Promise<CloudSyncStatus>
+  removeCloudDeviceRecord(deviceId: string): Promise<CloudSyncStatus>
 }
 
 export const desktopApi: DesktopApi = {
@@ -157,7 +192,7 @@ export const desktopApi: DesktopApi = {
   deleteSession: (id) => invoke('delete_session', { id }),
   importDeepseekZip: (path) => invoke('import_deepseek_zip', { path }),
   getSettings: () => invoke('get_settings'),
-  saveSettings: (settings) => invoke('save_settings', { settings }),
+  saveSettings: (settings, cloudSyncCredentials = null) => invoke('save_settings', { settings, cloudSyncCredentials }),
   rotateSecret: () => invoke('rotate_secret'),
   getApiStatus: () => invoke('get_api_status'),
   getSemanticStatus: () => invoke('get_semantic_status'),
@@ -169,4 +204,9 @@ export const desktopApi: DesktopApi = {
   moveDataDirectory: (path) => invoke('move_data_directory', { path }),
   confirmCloseBehavior: (behavior) => invoke('confirm_close_behavior', { behavior }),
   writeExportFile: (path, payload) => invoke('write_export_file', { path, payload }),
+  getCloudSyncStatus: () => invoke('get_cloud_sync_status'),
+  testCloudSyncConnection: (cloudSync, credentials) => invoke('test_cloud_sync_connection', { cloudSync, credentials }),
+  syncNow: () => invoke('sync_now'),
+  rewriteCloudArchive: () => invoke('rewrite_cloud_archive'),
+  removeCloudDeviceRecord: (deviceId) => invoke('remove_cloud_device_record', { deviceId }),
 }
