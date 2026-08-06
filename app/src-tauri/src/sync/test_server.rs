@@ -67,6 +67,10 @@ impl TestWebDav {
         WebDavBackend::new(&self.base_url, username, password)
     }
 
+    pub fn endpoint(&self) -> &str {
+        &self.base_url
+    }
+
     pub async fn methods(&self) -> Vec<String> {
         self.state.methods.lock().await.clone()
     }

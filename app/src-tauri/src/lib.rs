@@ -136,7 +136,6 @@ pub fn run() {
             commands::rotate_secret,
             commands::get_cloud_sync_status,
             commands::test_cloud_sync_connection,
-            commands::save_cloud_sync_credentials,
             commands::sync_now,
             commands::rewrite_cloud_archive,
             commands::remove_cloud_device_record,

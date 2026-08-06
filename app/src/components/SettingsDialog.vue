@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import {
   Cable,
   Cloud,
@@ -15,6 +15,7 @@ import {
   Sun,
 } from 'lucide-vue-next'
 import CloudSyncSettings from './CloudSyncSettings.vue'
+import { cloudSyncProfileSnapshot, cloudSyncProfilesEqual } from '../cloud-sync-profile'
 import type {
   ApiStatus,
   EmbeddingBackendKind,
@@ -27,7 +28,17 @@ import type {
   SettingsModel,
   ThemePreference,
   CloudSyncStatus,
+  CloudCredentialInput,
+  CloudSyncSettings as CloudSyncSettingsModel,
+  CloudConnectionTestResult,
 } from '../desktop-api'
+
+type ConnectionTestState = 'idle' | 'pending' | 'passed' | 'failed'
+type CloudConnectionTestHandler = (
+  settings: CloudSyncSettingsModel,
+  credentials: CloudCredentialInput,
+  requestId: number,
+) => Promise<CloudConnectionTestResult>
 
 const props = defineProps<{
   visible: boolean
@@ -40,6 +51,8 @@ const props = defineProps<{
   reindexProgress?: ReindexProgress | null
   cloudSyncStatus?: CloudSyncStatus | null
   cloudSyncBusy?: boolean
+  activeCloudSyncProfile?: CloudSyncSettingsModel | null
+  onCloudSyncTest?: CloudConnectionTestHandler
 }>()
 const settings = defineModel<SettingsModel>('settings', { required: true })
 const originText = defineModel<string>('originText', { required: true })
@@ -48,14 +61,36 @@ type SettingsPage = 'general' | 'semantic' | 'connections' | 'cloud-sync'
 const activePage = ref<SettingsPage>('general')
 const cloudPassword = ref('')
 const syncPassword = ref('')
+const s3AccessKeyId = ref('')
+const s3SecretAccessKey = ref('')
+const s3SessionToken = ref('')
+const connectionTestState = ref<ConnectionTestState>('idle')
+const connectionTestMessage = ref('')
+const testedConnectionFingerprint = ref<string | null>(null)
+let latestConnectionTestRequestId = 0
 
 watch(() => props.visible, (visible) => {
-  if (visible) activePage.value = 'general'
+  if (visible) {
+    activePage.value = 'general'
+    connectionTestState.value = 'idle'
+    connectionTestMessage.value = ''
+    testedConnectionFingerprint.value = null
+  } else {
+    cloudPassword.value = ''
+    syncPassword.value = ''
+    s3AccessKeyId.value = ''
+    s3SecretAccessKey.value = ''
+    s3SessionToken.value = ''
+    latestConnectionTestRequestId += 1
+    connectionTestState.value = 'idle'
+    connectionTestMessage.value = ''
+    testedConnectionFingerprint.value = null
+  }
 })
 
 const emit = defineEmits<{
   close: []
-  save: []
+  save: [credentials: CloudCredentialInput | null]
   previewTheme: [theme: ThemePreference]
   changeDataDirectory: []
   copySecret: []
@@ -66,10 +101,128 @@ const emit = defineEmits<{
   downloadLocalModel: []
   importLocalModel: []
   cancelSemanticWork: []
-  cloudSyncTest: [password: string, syncPassword: string]
-  cloudSyncNow: [password: string, syncPassword: string]
+  cloudSyncNow: []
   cloudSyncRewrite: []
+  cloudSyncRemoveDevice: [deviceId: string]
 }>()
+
+function cloudCredentials(): CloudCredentialInput {
+  if (settings.value.cloud_sync.backend === 's3') {
+    return {
+      backend: 's3',
+      access_key_id: s3AccessKeyId.value,
+      secret_access_key: s3SecretAccessKey.value,
+      session_token: s3SessionToken.value || null,
+      sync_password: syncPassword.value || null,
+    }
+  }
+  return {
+    backend: 'webdav',
+    password: cloudPassword.value,
+    sync_password: syncPassword.value || null,
+  }
+}
+
+function currentConnectionFingerprint(): string {
+  const syncPasswordFingerprint = settings.value.cloud_sync.encryption_enabled
+    ? syncPassword.value
+    : ''
+  const credentials = settings.value.cloud_sync.backend === 's3'
+    ? {
+        accessKeyId: s3AccessKeyId.value,
+        secretAccessKey: s3SecretAccessKey.value,
+        sessionToken: s3SessionToken.value,
+        syncPassword: syncPasswordFingerprint,
+      }
+    : {
+        webdavPassword: cloudPassword.value,
+        syncPassword: syncPasswordFingerprint,
+      }
+  return JSON.stringify({
+    settings: cloudSyncProfileSnapshot(settings.value.cloud_sync),
+    credentials,
+  })
+}
+
+const activeCloudProfileMatches = computed(() => {
+  const activeProfile = props.activeCloudSyncProfile
+  return !activeProfile || cloudSyncProfilesEqual(settings.value.cloud_sync, activeProfile)
+})
+
+const hasDraftCredentials = computed(() => {
+  const hasSyncPassword = settings.value.cloud_sync.encryption_enabled && Boolean(syncPassword.value)
+  if (settings.value.cloud_sync.backend === 's3') {
+    return hasSyncPassword
+      || Boolean(s3AccessKeyId.value || s3SecretAccessKey.value || s3SessionToken.value)
+  }
+  return hasSyncPassword || Boolean(cloudPassword.value)
+})
+
+const canSave = computed(() => {
+  if (!settings.value.cloud_sync.enabled) return true
+  if (connectionTestState.value === 'pending' || connectionTestState.value === 'failed') return false
+  if (connectionTestState.value === 'passed') {
+    return testedConnectionFingerprint.value === currentConnectionFingerprint()
+  }
+  return activeCloudProfileMatches.value
+    && settings.value.cloud_sync.connection_verified
+    && !hasDraftCredentials.value
+})
+
+function cloneCloudSettings(value: CloudSyncSettingsModel): CloudSyncSettingsModel {
+  return { ...value, s3: { ...value.s3 } }
+}
+
+async function testCloudConnection() {
+  if (connectionTestState.value === 'pending') return
+  const testHandler = props.onCloudSyncTest
+  if (!testHandler) {
+    connectionTestState.value = 'failed'
+    connectionTestMessage.value = '未配置测试连接处理器'
+    testedConnectionFingerprint.value = null
+    return
+  }
+
+  const requestId = ++latestConnectionTestRequestId
+  const requestFingerprint = currentConnectionFingerprint()
+  connectionTestState.value = 'pending'
+  connectionTestMessage.value = ''
+  testedConnectionFingerprint.value = null
+  try {
+    const result = await testHandler(
+      cloneCloudSettings(settings.value.cloud_sync),
+      cloudCredentials(),
+      requestId,
+    )
+    if (requestId !== latestConnectionTestRequestId || requestFingerprint !== currentConnectionFingerprint()) return
+    if (!result.ok) {
+      connectionTestState.value = 'failed'
+      connectionTestMessage.value = result.message
+      return
+    }
+    settings.value.cloud_sync = cloneCloudSettings(result.cloud_sync)
+    testedConnectionFingerprint.value = currentConnectionFingerprint()
+    connectionTestState.value = 'passed'
+    connectionTestMessage.value = result.message
+  } catch (reason) {
+    if (requestId !== latestConnectionTestRequestId || requestFingerprint !== currentConnectionFingerprint()) return
+    connectionTestState.value = 'failed'
+    connectionTestMessage.value = String(reason)
+    testedConnectionFingerprint.value = null
+  }
+}
+
+watch(currentConnectionFingerprint, (currentFingerprint) => {
+  if (connectionTestState.value === 'idle') return
+  if (
+    connectionTestState.value === 'passed'
+    && testedConnectionFingerprint.value === currentFingerprint
+  ) return
+  latestConnectionTestRequestId += 1
+  connectionTestState.value = 'idle'
+  connectionTestMessage.value = ''
+  testedConnectionFingerprint.value = null
+})
 
 function mcpStateLabel(status: ApiStatus | null | undefined): string {
   const state = status?.mcp?.state
@@ -343,16 +496,23 @@ if (!settings.value.semantic_search.local.dtype) {
                 v-model:settings="settings.cloud_sync"
                 v-model:password="cloudPassword"
                 v-model:sync-password="syncPassword"
+                v-model:access-key-id="s3AccessKeyId"
+                v-model:secret-access-key="s3SecretAccessKey"
+                v-model:session-token="s3SessionToken"
                 :status="cloudSyncStatus || { state: 'disabled', pending_mutations: 0, devices: [] }"
                 :busy="cloudSyncBusy"
-                @test="emit('cloudSyncTest', cloudPassword, syncPassword)"
-                @sync="emit('cloudSyncNow', cloudPassword, syncPassword)"
+                :active-profile="activeCloudSyncProfile"
+                :connection-test-state="connectionTestState"
+                :connection-test-message="connectionTestMessage"
+                @test="testCloudConnection"
+                @sync="emit('cloudSyncNow')"
                 @rewrite="emit('cloudSyncRewrite')"
+                @remove-device="emit('cloudSyncRemoveDevice', $event)"
               />
             </section>
           </div>
         </div>
-        <footer><button class="secondary-button" @click="emit('close')">取消</button><button class="primary-button" @click="emit('save')">保存设置</button></footer>
+        <footer><button class="secondary-button" @click="emit('close')">取消</button><button class="primary-button" :disabled="!canSave || cloudSyncBusy" @click="emit('save', connectionTestState === 'passed' ? cloudCredentials() : null)">保存设置</button></footer>
       </section>
     </div>
   </Transition>

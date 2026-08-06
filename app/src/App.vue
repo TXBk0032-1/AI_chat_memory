@@ -59,7 +59,7 @@ import {
 } from './conversation-export'
 import { branchMessageSeqs, branchReadingIndex, filterBranchMatches } from './branch-overview'
 import { loadSidebarCollapsed, saveSidebarCollapsed } from './sidebar'
-import { desktopApi, type ApiStatus, type SettingsModel } from './desktop-api'
+import { desktopApi, type ApiStatus, type CloudConnectionTestResult, type CloudCredentialInput, type CloudSyncSettings, type SettingsModel } from './desktop-api'
 import { useSessionCatalog } from './composables/useSessionCatalog'
 import { usePaneResize } from './composables/usePaneResize'
 import { useTheme } from './composables/useTheme'
@@ -95,7 +95,12 @@ const exportRenderModel = ref<ConversationExport | null>(null)
 const exportDocumentRef = ref<InstanceType<typeof ExportDocument> | null>(null)
 const pendingCloseBehavior = ref<'hide_to_tray' | 'exit' | null>(null)
 const expandedThinking = ref(new Set<string>())
-const settings = ref<SettingsModel>({ setup_complete: false, secret_enabled: false, allowed_origins: [], close_behavior: 'ask', tray_click_behavior: 'show_menu', theme: 'system', semantic_search: { enabled: true, default_mode: 'hybrid', backend: 'local', local: { model: 'BAAI/bge-small-zh-v1.5', device: 'auto', dtype: 'auto' }, ollama: { base_url: 'http://127.0.0.1:11434', model: 'nomic-embed-text' }, llama_cpp: { base_url: 'http://127.0.0.1:8080/v1', model: 'bge-small-zh-v1.5' }, openai_compatible: { base_url: 'https://api.openai.com/v1', model: 'text-embedding-3-small' } }, mcp_enabled: true, cloud_sync: { enabled: false, base_url: '', root_path: '', username: '', encryption_enabled: false } })
+const settings = ref<SettingsModel>({ setup_complete: false, secret_enabled: false, allowed_origins: [], close_behavior: 'ask', tray_click_behavior: 'show_menu', theme: 'system', semantic_search: { enabled: true, default_mode: 'hybrid', backend: 'local', local: { model: 'BAAI/bge-small-zh-v1.5', device: 'auto', dtype: 'auto' }, ollama: { base_url: 'http://127.0.0.1:11434', model: 'nomic-embed-text' }, llama_cpp: { base_url: 'http://127.0.0.1:8080/v1', model: 'bge-small-zh-v1.5' }, openai_compatible: { base_url: 'https://api.openai.com/v1', model: 'text-embedding-3-small' } }, mcp_enabled: true, cloud_sync: { backend: 'webdav', enabled: false, connection_verified: false, base_url: '', root_path: '', username: '', encryption_enabled: false, s3: { endpoint_url: '', region: 'us-east-1', bucket: '', prefix: '', force_path_style: false }, remote_id: 'default', vault_id: 'default', generation_id: 'generation-1' } })
+const cloudSyncActiveProfile = ref<CloudSyncSettings | null>(null)
+
+function cloneCloudSyncSettings(value: CloudSyncSettings): CloudSyncSettings {
+  return { ...value, s3: { ...value.s3 } }
+}
 const apiStatus = ref<ApiStatus>({ service: { state: 'starting' }, userscript_connected: false, mcp: { state: 'stopped' }, mcp_url: 'http://127.0.0.1:19821/mcp' })
 const contextMenu = ref({ visible: false, x: 0, y: 0, selectedText: '' })
 const sidebarCollapsed = ref(loadSidebarCollapsed())
@@ -212,28 +217,53 @@ const { hits: sessionSearchHits, index: searchHitIndex, loop: loopSearch } = con
 const loadSearchHits = conversationSearch.load
 const {
   showSettings, originText, secretCopied, mcpConfigCopied, settingsApiStatus, semanticStatus: settingsSemanticStatus, semanticBusy, downloadProgress, reindexProgress,
-  openSettings, closeSettings, saveSettings, rotateSecret, copySecret, copyMcpConfig, changeDataDirectory,
+  openSettings, closeSettings, saveSettings: saveSettingsBase, rotateSecret, copySecret, copyMcpConfig, changeDataDirectory,
   checkEmbedding, reindexSemantic, downloadLocalModel, importLocalModel, cancelSemanticWork,
 } = useSettings(settings, error, {
   begin: theme.beginPreview,
   accept: theme.acceptPreview,
   cancel: theme.cancelPreview,
 })
+watch(
+  [showSettings, () => settings.value.cloud_sync.enabled, () => cloudSync.status.value.state],
+  ([settingsVisible, syncEnabled, syncState]) => {
+    if (settingsVisible || syncEnabled) {
+      cloudSync.startPolling(settingsVisible || syncState === 'syncing' ? 2_000 : 15_000)
+    } else cloudSync.dispose()
+  },
+  { immediate: true },
+)
 
-async function cloudSyncTest(password: string, syncPassword: string) {
+watch(showSettings, (visible) => {
+  if (visible) cloudSyncActiveProfile.value = cloneCloudSyncSettings(settings.value.cloud_sync)
+})
+
+async function cloudSyncTest(cloudSettings: CloudSyncSettings, credentials: CloudCredentialInput, _requestId: number): Promise<CloudConnectionTestResult> {
   try {
-    if (password) await desktopApi.saveCloudSyncCredentials({ webdav_password: password, sync_password: syncPassword || null })
-    await desktopApi.testCloudSyncConnection()
+    const result = await desktopApi.testCloudSyncConnection(cloudSettings, credentials)
     await cloudSync.refreshStatus()
-  } catch (reason) { error.value = String(reason) }
+    return result
+  } catch (reason) {
+    error.value = String(reason)
+    throw reason
+  }
 }
-async function cloudSyncNow(password: string, syncPassword: string) {
+
+async function saveSettings(credentials: CloudCredentialInput | null) {
+  await saveSettingsBase(credentials)
+  if (!showSettings.value) cloudSyncActiveProfile.value = cloneCloudSyncSettings(settings.value.cloud_sync)
+}
+async function cloudSyncNow() {
   try {
-    if (password) await desktopApi.saveCloudSyncCredentials({ webdav_password: password, sync_password: syncPassword || null })
     await cloudSync.syncNow()
   } catch (reason) { error.value = String(reason) }
 }
 async function cloudSyncRewrite() { try { await cloudSync.rewriteArchive() } catch (reason) { error.value = String(reason) } }
+async function cloudSyncRemoveDevice(deviceId: string) {
+  try {
+    await cloudSync.removeDeviceRecord(deviceId)
+  } catch (reason) { error.value = String(reason) }
+}
 
 function setSidebarCollapsed(collapsed: boolean) {
   sidebarCollapsed.value = collapsed
@@ -746,6 +776,7 @@ onBeforeUnmount(() => {
   document.removeEventListener('click', preventRapidControlClick, true)
   document.removeEventListener('scroll', hideContextMenu, true)
   window.clearInterval(statusTimer)
+  cloudSync.dispose()
   disposeToasts()
   window.clearTimeout(readingPositionTimer)
   unlistenCloseRequest?.()
@@ -912,6 +943,8 @@ onBeforeUnmount(() => {
       :reindex-progress="reindexProgress"
       :cloud-sync-status="cloudSync.status.value"
       :cloud-sync-busy="cloudSync.busy.value"
+      :active-cloud-sync-profile="cloudSyncActiveProfile"
+      :on-cloud-sync-test="cloudSyncTest"
       @close="closeSettings"
       @save="saveSettings"
       @preview-theme="previewTheme"
@@ -924,9 +957,9 @@ onBeforeUnmount(() => {
       @download-local-model="downloadLocalModel"
       @import-local-model="importLocalModel"
       @cancel-semantic-work="cancelSemanticWork"
-      @cloud-sync-test="cloudSyncTest"
       @cloud-sync-now="cloudSyncNow"
       @cloud-sync-rewrite="cloudSyncRewrite"
+      @cloud-sync-remove-device="cloudSyncRemoveDevice"
     />
 
     <SessionDialogs

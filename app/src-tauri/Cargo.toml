@@ -47,12 +47,13 @@ tar = "0.4"
 zstd = "0.13"
 argon2 = "0.5"
 chacha20poly1305 = "0.10"
-keyring = "3"
+keyring = { version = "3", features = ["windows-native"] }
 zeroize = { version = "1", features = ["derive"] }
 quick-xml = { version = "0.38", features = ["serialize"] }
 url = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 futures = "0.3"
+aws-sdk-s3 = { version = "1.140.0", default-features = false, features = ["behavior-version-latest", "default-https-client", "http-1x", "rt-tokio", "rustls"] }
     async-trait = "0.1"
     rmcp = { version = "2.2", default-features = false, features = [
       "server",
@@ -69,3 +70,7 @@ tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 # GTK3 pins Tauri's Linux stack to glib 0.18. Keep the compatible release and
 # backport the fix for RUSTSEC-2024-0429 until the upstream stack can use 0.20.
 glib = { path = "vendor/glib" }
+
+[dev-dependencies]
+aws-sigv4 = { version = "=1.5.1", default-features = false, features = ["sign-http", "http1"] }
+aws-smithy-http-client = { version = "=1.2.0", features = ["test-util"] }

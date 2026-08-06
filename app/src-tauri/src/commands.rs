@@ -5,8 +5,9 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::{
     models::{
         AppSettings, BranchOverview, CloudConnectionTestResult, CloudCredentialInput,
-        CloudSyncStatus, DesktopApiStatus, EmbeddingHealth, ImportResponse, Message, SearchMode,
-        SearchQuery, SemanticRuntimeStatus, SessionList, SessionOpen, SessionSearchHit,
+        CloudSyncSettings, CloudSyncStatus, DesktopApiStatus, EmbeddingHealth, ImportResponse,
+        Message, SearchMode, SearchQuery, SemanticRuntimeStatus, SessionList, SessionOpen,
+        SessionSearchHit,
     },
     service::AppService,
 };
@@ -114,9 +115,13 @@ pub async fn save_settings(
     service: State<'_, AppService>,
     manager: State<'_, std::sync::Arc<crate::local_services::LocalServiceManager>>,
     settings: AppSettings,
+    cloud_sync_credentials: Option<CloudCredentialInput>,
 ) -> Result<AppSettings, String> {
     let previous = service.settings().await;
-    let settings = service.update_settings(settings).await.map_err(message)?;
+    let settings = service
+        .update_settings_with_cloud_credentials(settings, cloud_sync_credentials)
+        .await
+        .map_err(message)?;
     if previous.mcp_enabled != settings.mcp_enabled {
         manager
             .apply_desired(
@@ -150,17 +155,11 @@ pub async fn get_cloud_sync_status(
 #[tauri::command]
 pub async fn test_cloud_sync_connection(
     service: State<'_, AppService>,
-) -> Result<CloudConnectionTestResult, String> {
-    service.test_cloud_sync_connection().await.map_err(message)
-}
-
-#[tauri::command]
-pub async fn save_cloud_sync_credentials(
-    service: State<'_, AppService>,
+    cloud_sync: CloudSyncSettings,
     credentials: CloudCredentialInput,
-) -> Result<(), String> {
+) -> Result<CloudConnectionTestResult, String> {
     service
-        .save_cloud_sync_credentials(credentials)
+        .test_cloud_sync_connection(cloud_sync, credentials)
         .await
         .map_err(message)
 }

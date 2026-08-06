@@ -38,7 +38,7 @@ function settingsFixture(): SettingsModel {
       openai_compatible: { base_url: 'https://example.test/v1', model: 'test-model' },
     },
     mcp_enabled: true,
-    cloud_sync: { enabled: false, base_url: '', root_path: '', username: '', encryption_enabled: false },
+    cloud_sync: { backend: 'webdav', enabled: false, connection_verified: false, base_url: '', root_path: '', username: '', encryption_enabled: false, s3: { endpoint_url: '', region: 'us-east-1', bucket: '', prefix: '', force_path_style: false }, remote_id: 'default', vault_id: 'default', generation_id: 'generation-1' },
   }
 }
 
@@ -161,7 +161,7 @@ describe('settings dialog pagination', () => {
     }
   })
 
-  it('uses a scalable side navigation and folds it above content at the app minimum width', () => {
+  it('uses a scalable side navigation and folds four pages above content at the app minimum width', () => {
     const dialog = ruleFor('.settings-dialog')
     const layout = ruleFor('.settings-layout')
     const navigation = ruleFor('.settings-navigation')
@@ -178,9 +178,10 @@ describe('settings dialog pagination', () => {
     const responsive = styleSource.slice(responsiveStart, responsiveStart + 1800)
     expect(responsive).toMatch(/\.settings-dialog-backdrop\s*\{[^}]*padding:\s*12px\s*;/s)
     expect(responsive).toMatch(/\.settings-layout\s*\{[^}]*grid-template-columns:\s*1fr\s*;/s)
-    expect(responsive).toMatch(/\.settings-navigation\s*\{[^}]*overflow-x:\s*auto\s*;/s)
+    expect(responsive).toMatch(/\.settings-navigation\s*\{[^}]*grid-template-columns:\s*repeat\(4,\s*minmax\(110px,\s*1fr\)\)\s*;[^}]*overflow-x:\s*auto\s*;/s)
     expect(styleSource).toContain('html[data-theme="dark"] .settings-navigation')
     expect(styleSource).toContain('html[data-theme="dark"] .settings-navigation__button.active')
     expect(styleSource).toMatch(/@media \(prefers-reduced-motion: reduce\)[\s\S]*settings-navigation__button/)
   })
+
 })

@@ -12,6 +12,10 @@ pub enum AppError {
     Crypto(String),
     #[error("credential storage error: {0}")]
     Credential(String),
+    #[error("cloud sync error: {0}")]
+    Cloud(#[from] crate::sync::backend::CloudError),
+    #[error("cloud sync protocol error: {0}")]
+    SyncProtocol(String),
     #[error("invalid data: {0}")]
     InvalidData(String),
     #[error("not found: {0}")]

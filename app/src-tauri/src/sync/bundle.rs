@@ -16,6 +16,13 @@ use std::{
 const MAGIC: &[u8; 4] = b"ACMB";
 const ENVELOPE_VERSION: u8 = 1;
 const PREFIX_LENGTH: usize = 9;
+const LIMIT_ERROR_PREFIX: &str = "bundle exceeds configured limits: ";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreviousValidation {
+    StrictChain,
+    ReleasedV1Unchained,
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -139,14 +146,32 @@ struct AuthenticatedHeader<'a> {
 }
 
 pub fn seal_bundle(contents: &BundleContents) -> Result<SealedBundle> {
+    seal_bundle_with_limits(contents, &BundleLimits::default())
+}
+
+pub fn seal_bundle_with_limits(
+    contents: &BundleContents,
+    limits: &BundleLimits,
+) -> Result<SealedBundle> {
     let payload = build_payload(contents)?;
-    seal_payload(contents, payload, ProtectionAlgorithm::Plain, None)
+    let sealed = seal_payload(contents, payload, ProtectionAlgorithm::Plain, None)?;
+    validate_sealed_bundle(&sealed, limits, None)?;
+    Ok(sealed)
 }
 
 pub fn seal_bundle_protected(
     contents: &BundleContents,
     protector: &dyn PayloadProtector,
     nonce: [u8; 24],
+) -> Result<SealedBundle> {
+    seal_bundle_protected_with_limits(contents, protector, nonce, &BundleLimits::default())
+}
+
+pub fn seal_bundle_protected_with_limits(
+    contents: &BundleContents,
+    protector: &dyn PayloadProtector,
+    nonce: [u8; 24],
+    limits: &BundleLimits,
 ) -> Result<SealedBundle> {
     if protector.algorithm() == ProtectionAlgorithm::Plain {
         return Err(AppError::Crypto(
@@ -158,7 +183,9 @@ pub fn seal_bundle_protected(
     let aad =
         authenticated_header_bytes(contents, protector.algorithm(), Some(nonce_hex.as_str()))?;
     let payload = protector.seal(&aad, &plaintext, nonce)?;
-    seal_payload(contents, payload, protector.algorithm(), Some(nonce_hex))
+    let sealed = seal_payload(contents, payload, protector.algorithm(), Some(nonce_hex))?;
+    validate_sealed_bundle(&sealed, limits, Some(protector))?;
+    Ok(sealed)
 }
 
 fn build_payload(contents: &BundleContents) -> Result<Vec<u8>> {
@@ -217,6 +244,33 @@ pub fn open_bundle_protected(
     limits: &BundleLimits,
     protector: Option<&dyn PayloadProtector>,
 ) -> Result<DecodedBundle> {
+    open_bundle_protected_with_previous_validation(
+        bytes,
+        limits,
+        protector,
+        PreviousValidation::StrictChain,
+    )
+}
+
+pub(crate) fn open_released_v1_unchained_bundle_protected(
+    bytes: &[u8],
+    limits: &BundleLimits,
+    protector: Option<&dyn PayloadProtector>,
+) -> Result<DecodedBundle> {
+    open_bundle_protected_with_previous_validation(
+        bytes,
+        limits,
+        protector,
+        PreviousValidation::ReleasedV1Unchained,
+    )
+}
+
+fn open_bundle_protected_with_previous_validation(
+    bytes: &[u8],
+    limits: &BundleLimits,
+    protector: Option<&dyn PayloadProtector>,
+    previous_validation: PreviousValidation,
+) -> Result<DecodedBundle> {
     if bytes.len() > limits.max_envelope_bytes || bytes.len() < PREFIX_LENGTH {
         return invalid("bundle envelope size is invalid");
     }
@@ -235,7 +289,15 @@ pub fn open_bundle_protected(
     }
     let header: BundleHeader = serde_json::from_slice(&bytes[PREFIX_LENGTH..payload_offset])
         .map_err(|error| AppError::InvalidData(format!("invalid bundle header: {error}")))?;
-    validate_header(&header)?;
+    validate_header(&header, previous_validation)?;
+    let expected_protection = protector
+        .map(PayloadProtector::algorithm)
+        .unwrap_or(ProtectionAlgorithm::Plain);
+    if header.protection != expected_protection {
+        return Err(AppError::Crypto(
+            "bundle protection does not match the expected vault policy".into(),
+        ));
+    }
     let payload = &bytes[payload_offset..];
     if usize::try_from(header.payload_length).ok() != Some(payload.len())
         || sha256_hex(payload) != header.payload_sha256
@@ -272,10 +334,39 @@ pub fn open_bundle_protected(
     };
     let decompressed = decompress_limited(&plaintext, limits.max_decompressed_bytes)?;
     let files = read_tar(&decompressed, limits)?;
-    decode_contents(header, files, limits)
+    decode_contents(header, files, limits, previous_validation)
+}
+
+fn validate_sealed_bundle(
+    sealed: &SealedBundle,
+    limits: &BundleLimits,
+    protector: Option<&dyn PayloadProtector>,
+) -> Result<()> {
+    open_bundle_protected(&sealed.bytes, limits, protector)
+        .map(|_| ())
+        .map_err(|error| match error {
+            AppError::InvalidData(message) => {
+                AppError::InvalidData(format!("{LIMIT_ERROR_PREFIX}{message}"))
+            }
+            other => other,
+        })
+}
+
+pub(crate) fn is_bundle_limit_error(error: &AppError) -> bool {
+    matches!(
+        error,
+        AppError::InvalidData(message) if message.starts_with(LIMIT_ERROR_PREFIX)
+    )
 }
 
 fn validate_contents(contents: &BundleContents) -> Result<()> {
+    validate_contents_with_previous_validation(contents, PreviousValidation::StrictChain)
+}
+
+fn validate_contents_with_previous_validation(
+    contents: &BundleContents,
+    previous_validation: PreviousValidation,
+) -> Result<()> {
     if contents.vault_id.is_empty()
         || contents.generation_id.is_empty()
         || contents.device_id.is_empty()
@@ -289,8 +380,9 @@ fn validate_contents(contents: &BundleContents) -> Result<()> {
         contents.previous_path.as_deref(),
         contents.previous_sha256.as_deref(),
         contents.previous_end_seq,
+        previous_validation,
     )?;
-    if contents.changes.first().map(|change| change.local_seq) != Some(contents.start_seq)
+    if contents.changes.is_empty()
         || contents.changes.last().map(|change| change.local_seq) != Some(contents.end_seq)
     {
         return invalid("bundle changes do not match the sequence range");
@@ -328,7 +420,7 @@ fn validate_contents(contents: &BundleContents) -> Result<()> {
     Ok(())
 }
 
-fn validate_header(header: &BundleHeader) -> Result<()> {
+fn validate_header(header: &BundleHeader, previous_validation: PreviousValidation) -> Result<()> {
     if header.vault_id.is_empty()
         || header.generation_id.is_empty()
         || header.device_id.is_empty()
@@ -351,6 +443,7 @@ fn validate_header(header: &BundleHeader) -> Result<()> {
         header.previous_path.as_deref(),
         header.previous_sha256.as_deref(),
         header.previous_end_seq,
+        previous_validation,
     )?;
     Ok(())
 }
@@ -360,11 +453,18 @@ fn validate_previous(
     path: Option<&str>,
     sha256: Option<&str>,
     end_seq: Option<i64>,
+    validation: PreviousValidation,
 ) -> Result<()> {
     match (path, sha256, end_seq) {
-        (None, None, None) => Ok(()),
+        (None, None, None)
+            if start_seq == 1
+                || (validation == PreviousValidation::ReleasedV1Unchained && start_seq > 1) =>
+        {
+            Ok(())
+        }
         (Some(path), Some(sha256), Some(end_seq))
-            if is_safe_relative_path(path)
+            if validation == PreviousValidation::StrictChain
+                && is_safe_relative_path(path)
                 && path.ends_with(".acmb")
                 && is_sha256(sha256)
                 && end_seq >= 0
@@ -537,6 +637,7 @@ fn decode_contents(
     header: BundleHeader,
     mut files: HashMap<String, Vec<u8>>,
     limits: &BundleLimits,
+    previous_validation: PreviousValidation,
 ) -> Result<DecodedBundle> {
     let manifest_bytes = files
         .remove("bundle.json")
@@ -609,7 +710,7 @@ fn decode_contents(
         previous_end_seq: header.previous_end_seq,
         changes,
     };
-    validate_contents(&contents)?;
+    validate_contents_with_previous_validation(&contents, previous_validation)?;
     Ok(DecodedBundle { header, contents })
 }
 
@@ -736,6 +837,52 @@ mod tests {
             .unwrap();
         header[offset..offset + b"vault-a".len()].copy_from_slice(b"vault-b");
         assert!(open_bundle_protected(&tampered, &BundleLimits::test(), Some(&protector)).is_err());
+    }
+
+    #[test]
+    fn protected_reader_rejects_a_plain_bundle() {
+        let protector = XChaChaProtector::derive(
+            "sync passphrase",
+            &Argon2idConfig {
+                salt: [4; 16],
+                memory_kib: 8 * 1024,
+                iterations: 2,
+                parallelism: 1,
+            },
+        )
+        .unwrap();
+        let sealed = seal_bundle(&fixture()).unwrap();
+
+        let error = open_bundle_protected(&sealed.bytes, &BundleLimits::test(), Some(&protector))
+            .unwrap_err();
+
+        assert!(matches!(error, AppError::Crypto(_)), "{error:?}");
+    }
+
+    #[test]
+    fn bounded_seal_rejects_every_reader_limit_before_publication() {
+        let contents = fixture();
+        let sealed = seal_bundle(&contents).unwrap();
+
+        let mut envelope_limits = BundleLimits::test();
+        envelope_limits.max_envelope_bytes = sealed.bytes.len() - 1;
+        assert!(seal_bundle_with_limits(&contents, &envelope_limits).is_err());
+
+        let mut decompressed_limits = BundleLimits::test();
+        decompressed_limits.max_decompressed_bytes = 16;
+        assert!(seal_bundle_with_limits(&contents, &decompressed_limits).is_err());
+
+        let mut entry_limits = BundleLimits::test();
+        entry_limits.max_entries = 2;
+        assert!(seal_bundle_with_limits(&contents, &entry_limits).is_err());
+
+        let mut file_limits = BundleLimits::test();
+        file_limits.max_file_bytes = 8;
+        assert!(seal_bundle_with_limits(&contents, &file_limits).is_err());
+
+        let mut line_limits = BundleLimits::test();
+        line_limits.max_ndjson_line_bytes = 8;
+        assert!(seal_bundle_with_limits(&contents, &line_limits).is_err());
     }
 
     #[test]

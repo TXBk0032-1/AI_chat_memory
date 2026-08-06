@@ -397,6 +397,8 @@ fn format_app_error(err: &AppError) -> String {
         AppError::Zip(e) => format!("ZIP 错误：{e}"),
         AppError::Crypto(msg) => format!("数据错误：{msg}"),
         AppError::Credential(msg) => format!("配置错误：{msg}"),
+        AppError::Cloud(error) => format!("云同步错误：{error}"),
+        AppError::SyncProtocol(msg) => format!("云同步协议错误：{msg}"),
     }
 }
 

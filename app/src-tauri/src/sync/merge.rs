@@ -5,7 +5,7 @@ mod tests {
         database::connection::{initialize_schema, register_sqlite_vec},
         sync::{
             bundle::{BundleHeader, CompressionAlgorithm, DecodedBundle, ProtectionAlgorithm},
-            store::SyncStore,
+            store::{RemoteObjectAnchor, SyncStore},
             types::{
                 BundleChange, BundleContents, EntityKey, EntityVersion, MutationOperation,
                 NormalizedSessionSnapshot,
@@ -88,6 +88,17 @@ mod tests {
         }
     }
 
+    fn anchor(seq: i64) -> RemoteObjectAnchor {
+        RemoteObjectAnchor {
+            end_seq: seq,
+            path: format!(
+                "v1/generations/generation/devices/remote/bundles/{seq}-{seq}-{}.acmb",
+                "ab".repeat(32)
+            ),
+            sha256: "ab".repeat(32),
+        }
+    }
+
     #[tokio::test]
     async fn newer_delete_wins_older_update_is_ignored_without_outbox_echo() {
         let pool = pool().await;
@@ -98,7 +109,8 @@ mod tests {
                     "generation",
                     "remote",
                     0,
-                    &bundle(1, 10, MutationOperation::Upsert)
+                    &bundle(1, 10, MutationOperation::Upsert),
+                    &anchor(1),
                 )
                 .await
                 .unwrap()
@@ -111,7 +123,8 @@ mod tests {
                     "generation",
                     "remote",
                     1,
-                    &bundle(2, 11, MutationOperation::Delete)
+                    &bundle(2, 11, MutationOperation::Delete),
+                    &anchor(2),
                 )
                 .await
                 .unwrap()
@@ -124,7 +137,8 @@ mod tests {
                     "generation",
                     "remote",
                     2,
-                    &bundle(3, 9, MutationOperation::Upsert)
+                    &bundle(3, 9, MutationOperation::Upsert),
+                    &anchor(3),
                 )
                 .await
                 .unwrap()
@@ -148,12 +162,12 @@ mod tests {
         let engine = MergeEngine::new(pool.clone(), None);
         let first = bundle(1, 10, MutationOperation::Upsert);
         engine
-            .apply_bundle("generation", "remote", 0, &first)
+            .apply_bundle("generation", "remote", 0, &first, &anchor(1))
             .await
             .unwrap();
         assert_eq!(
             engine
-                .apply_bundle("generation", "remote", 1, &first)
+                .apply_bundle("generation", "remote", 1, &first, &anchor(1))
                 .await
                 .unwrap()
                 .ignored,
@@ -168,7 +182,7 @@ mod tests {
         conflicting.contents.changes[0].content_hash = Some("ef".repeat(32));
         assert!(
             engine
-                .apply_bundle("generation", "remote", 1, &conflicting)
+                .apply_bundle("generation", "remote", 1, &conflicting, &anchor(2))
                 .await
                 .is_err()
         );
@@ -180,7 +194,7 @@ use crate::{
     sync::{
         bundle::DecodedBundle,
         hlc::HybridClock,
-        store::{SyncStore, current_time_millis},
+        store::{RemoteObjectAnchor, SyncStore, current_time_millis},
         types::{
             BundleChange, EntityKey, EntityVersion, MutationOperation, NormalizedSessionSnapshot,
         },
@@ -213,6 +227,7 @@ impl MergeEngine {
         source_device_id: &str,
         expected_cursor: i64,
         bundle: &DecodedBundle,
+        anchor: &RemoteObjectAnchor,
     ) -> Result<MergeOutcome> {
         if bundle.header.generation_id != generation_id
             || bundle.header.device_id != source_device_id
@@ -221,6 +236,15 @@ impl MergeEngine {
         {
             return Err(AppError::InvalidData(
                 "remote bundle identity mismatch".into(),
+            ));
+        }
+        if anchor.end_seq != bundle.header.end_seq
+            || anchor.path.is_empty()
+            || anchor.sha256.len() != 64
+            || !anchor.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(AppError::InvalidData(
+                "remote bundle object anchor is invalid".into(),
             ));
         }
         let mut tx = self.pool.begin().await?;
@@ -309,15 +333,24 @@ impl MergeEngine {
         .execute(&mut *tx)
         .await?;
         sqlx::query(
-            "INSERT INTO sync_remote_cursors(generation_id, remote_device_id, cursor_seq, updated_at_ms)
-             VALUES (?, ?, ?, ?)
+            "INSERT INTO sync_remote_cursors(
+               generation_id, remote_device_id, cursor_seq,
+               anchor_end_seq, anchor_path, anchor_sha256, updated_at_ms
+             )
+             VALUES (?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(generation_id, remote_device_id) DO UPDATE SET
-               cursor_seq = MAX(sync_remote_cursors.cursor_seq, excluded.cursor_seq),
+               cursor_seq = excluded.cursor_seq,
+               anchor_end_seq = excluded.anchor_end_seq,
+               anchor_path = excluded.anchor_path,
+               anchor_sha256 = excluded.anchor_sha256,
                updated_at_ms = excluded.updated_at_ms",
         )
         .bind(generation_id)
         .bind(source_device_id)
         .bind(bundle.header.end_seq)
+        .bind(anchor.end_seq)
+        .bind(&anchor.path)
+        .bind(&anchor.sha256)
         .bind(now_ms)
         .execute(&mut *tx)
         .await?;

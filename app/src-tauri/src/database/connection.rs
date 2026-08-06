@@ -149,15 +149,28 @@ pub(crate) async fn initialize_schema(pool: &SqlitePool) -> Result<()> {
             generation_id TEXT NOT NULL,
             remote_device_id TEXT NOT NULL,
             cursor_seq INTEGER NOT NULL,
+            anchor_end_seq INTEGER,
+            anchor_path TEXT,
+            anchor_sha256 TEXT,
             updated_at_ms INTEGER NOT NULL,
             PRIMARY KEY(generation_id, remote_device_id)
         );
         CREATE TABLE IF NOT EXISTS sync_published_bundles (
             bundle_sha256 TEXT PRIMARY KEY,
             generation_id TEXT NOT NULL,
+            device_id TEXT,
+            object_path TEXT,
+            start_seq INTEGER,
+            end_seq INTEGER,
+            bundle_bytes BLOB,
             stage TEXT NOT NULL CHECK(stage IN ('staged', 'published')),
             staged_at_ms INTEGER NOT NULL,
             published_at_ms INTEGER
+        );
+        CREATE TABLE IF NOT EXISTS sync_publication_state (
+            singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+            vault_id TEXT NOT NULL,
+            generation_id TEXT NOT NULL
         );
         CREATE TABLE IF NOT EXISTS sync_runs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -173,7 +186,75 @@ pub(crate) async fn initialize_schema(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await?;
+    ensure_sync_remote_cursor_columns(pool).await?;
+    ensure_sync_published_bundle_columns(pool).await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_sync_bundles_recovery
+         ON sync_published_bundles(generation_id, device_id, stage, start_seq);",
+    )
+    .execute(pool)
+    .await?;
     ensure_embedding_vec_table(pool, None).await?;
+    Ok(())
+}
+
+async fn ensure_sync_remote_cursor_columns(pool: &SqlitePool) -> Result<()> {
+    let existing: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('sync_remote_cursors')")
+            .fetch_all(pool)
+            .await?;
+    let missing = [
+        ("anchor_end_seq", "INTEGER"),
+        ("anchor_path", "TEXT"),
+        ("anchor_sha256", "TEXT"),
+    ]
+    .into_iter()
+    .filter(|(name, _)| !existing.iter().any(|column| column == name))
+    .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    let mut tx = pool.begin().await?;
+    for (name, definition) in missing {
+        sqlx::query(&format!(
+            "ALTER TABLE sync_remote_cursors ADD COLUMN {name} {definition}"
+        ))
+        .execute(&mut *tx)
+        .await?;
+    }
+    // A released database stored only the numeric cursor. Resetting it forces an
+    // idempotent LWW replay so the first new cursor is bound to verified bytes.
+    sqlx::query(
+        "UPDATE sync_remote_cursors
+         SET cursor_seq = 0, anchor_end_seq = NULL, anchor_path = NULL, anchor_sha256 = NULL",
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn ensure_sync_published_bundle_columns(pool: &SqlitePool) -> Result<()> {
+    let existing: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('sync_published_bundles')")
+            .fetch_all(pool)
+            .await?;
+    for (name, definition) in [
+        ("device_id", "TEXT"),
+        ("object_path", "TEXT"),
+        ("start_seq", "INTEGER"),
+        ("end_seq", "INTEGER"),
+        ("bundle_bytes", "BLOB"),
+    ] {
+        if !existing.iter().any(|column| column == name) {
+            sqlx::query(&format!(
+                "ALTER TABLE sync_published_bundles ADD COLUMN {name} {definition}"
+            ))
+            .execute(pool)
+            .await?;
+        }
+    }
     Ok(())
 }
 
@@ -471,6 +552,7 @@ mod tests {
             "sync_entity_versions",
             "sync_remote_cursors",
             "sync_published_bundles",
+            "sync_publication_state",
             "sync_runs",
         ] {
             let exists: i64 = sqlx::query_scalar(
@@ -482,6 +564,101 @@ mod tests {
             .unwrap();
             assert_eq!(exists, 1, "missing sync table {table}");
         }
+    }
+
+    #[tokio::test]
+    async fn upgrades_legacy_published_bundle_table_for_recoverable_staging() {
+        register_sqlite_vec();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE sync_published_bundles (
+                bundle_sha256 TEXT PRIMARY KEY,
+                generation_id TEXT NOT NULL,
+                stage TEXT NOT NULL CHECK(stage IN ('staged', 'published')),
+                staged_at_ms INTEGER NOT NULL,
+                published_at_ms INTEGER
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        initialize_schema(&pool).await.unwrap();
+
+        let columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('sync_published_bundles')")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        for expected in [
+            "device_id",
+            "object_path",
+            "start_seq",
+            "end_seq",
+            "bundle_bytes",
+        ] {
+            assert!(
+                columns.iter().any(|column| column == expected),
+                "missing upgraded column {expected}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn upgrades_unanchored_remote_cursors_by_forcing_safe_replay() {
+        register_sqlite_vec();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE sync_remote_cursors (
+                generation_id TEXT NOT NULL,
+                remote_device_id TEXT NOT NULL,
+                cursor_seq INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY(generation_id, remote_device_id)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO sync_remote_cursors
+             (generation_id, remote_device_id, cursor_seq, updated_at_ms)
+             VALUES ('generation', 'device-old', 7, 42)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        initialize_schema(&pool).await.unwrap();
+
+        let columns: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('sync_remote_cursors')")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        for expected in ["anchor_end_seq", "anchor_path", "anchor_sha256"] {
+            assert!(
+                columns.iter().any(|column| column == expected),
+                "missing upgraded column {expected}"
+            );
+        }
+        let migrated: (i64, Option<i64>, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT cursor_seq, anchor_end_seq, anchor_path, anchor_sha256
+             FROM sync_remote_cursors
+             WHERE generation_id = 'generation' AND remote_device_id = 'device-old'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(migrated, (0, None, None, None));
     }
 
     #[tokio::test]
