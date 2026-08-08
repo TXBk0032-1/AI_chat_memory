@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "对话归档",
+        "title": "AI Chat Memory",
         "width": 1280,
         "height": 820,
         "minWidth": 900,

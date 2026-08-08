@@ -12,12 +12,8 @@ use crate::{
     service::AppService,
 };
 
-pub fn build(app: &tauri::App, service: &AppService) -> tauri::Result<()> {
+pub fn build(app: &tauri::App, service: &AppService, locale: SupportedLocale) -> tauri::Result<()> {
     let settings = tauri::async_runtime::block_on(service.settings());
-    let locale = settings
-        .language
-        .supported_locale()
-        .unwrap_or(SupportedLocale::ZhCn);
     let menu = build_menu(app, locale)?;
     TrayIconBuilder::with_id("main-tray")
         .menu(&menu)

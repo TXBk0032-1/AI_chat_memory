@@ -1,9 +1,22 @@
 /** @vitest-environment happy-dom */
 
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import { initializeLocaleAndMount } from './index'
 
 describe('startup locale initialization', () => {
+  it('keeps the static boot shell language-neutral until locale initialization', () => {
+    const html = readFileSync(resolve(process.cwd(), 'index.html'), 'utf8')
+    const document = new DOMParser().parseFromString(html, 'text/html')
+    expect(document.title).toBe('AI Chat Memory')
+    expect(document.querySelector('[data-i18n="app.title"]')?.textContent).toBe('AI Chat Memory')
+    for (const key of ['boot.heading', 'boot.subtitle', 'boot.status']) {
+      expect(document.querySelector(`[data-i18n="${key}"]`)?.textContent).toBe('')
+    }
+    expect(document.body.textContent).not.toMatch(/[\p{Script=Han}]{2,}/u)
+  })
+
   it('applies the saved language and syncs native UI before mount', async () => {
     const api = {
       getSettings: vi.fn().mockResolvedValue({ language: 'zh-CN' }),

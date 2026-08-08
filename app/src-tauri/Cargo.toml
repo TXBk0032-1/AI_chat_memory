@@ -25,6 +25,7 @@ tauri-plugin-single-instance = "2"
 window-vibrancy = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sys-locale = "0.3.2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync", "fs", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 axum = { version = "0.8", features = ["macros"] }

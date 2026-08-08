@@ -120,7 +120,14 @@ pub fn run() {
                 }
             });
 
-            tray::build(app, &service)?;
+            let initial_locale = tauri::async_runtime::block_on(async {
+                let settings = service.settings().await;
+                crate::i18n::resolve_native_locale(settings.language)
+            });
+            if let Some(window) = app.get_webview_window("main") {
+                window.set_title(crate::i18n::native_text(initial_locale).app_title)?;
+            }
+            tray::build(app, &service, initial_locale)?;
             Ok(())
         })
         .on_window_event(window_lifecycle::handle)
