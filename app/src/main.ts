@@ -1,12 +1,9 @@
 import { createApp } from 'vue'
 import App from './App.vue'
 import { desktopApi } from './desktop-api'
-import { i18n, initializeLocaleAndMount } from './i18n'
+import { i18n } from './i18n'
+import { startDesktopApp } from './desktop-startup'
 
-export async function startDesktopApp() {
-  await initializeLocaleAndMount(desktopApi, (initialSettings) => {
-    createApp(App, { initialSettings }).use(i18n).mount('#app')
-  })
-}
-
-void startDesktopApp()
+void startDesktopApp(desktopApi, (initialSettings) => {
+  createApp(App, { initialSettings }).use(i18n).mount('#app')
+})

@@ -71,6 +71,7 @@ import { useConversationSearch } from './composables/useConversationSearch'
 import { useSessionDetail } from './composables/useSessionDetail'
 import { useMermaidRenderer } from './composables/useMermaidRenderer'
 import { useLocale } from './composables/useLocale'
+import { initializeAppSettings } from './app-settings-initialization'
 import { currentLocale, translate as t } from './i18n'
 import { formatDate as localizedDate } from './i18n/locale'
 import './style.css'
@@ -135,7 +136,7 @@ const theme = useTheme(settings, (animate) => {
 })
 const { effectiveTheme, commitTheme, previewTheme } = theme
 const locale = useLocale((value) => desktopApi.setNativeLocale(value))
-const { previewLanguage } = locale
+const { applyPreference, previewLanguage } = locale
 const {
   renderMermaidDiagrams,
   renderExportMermaidDiagrams,
@@ -750,10 +751,15 @@ onMounted(async () => {
   // Kick off the first session list immediately so the shell is never empty while
   // settings / API status catch up in parallel.
   const sessionsReady = loadSessions()
-  const settingsReady = (props.initialSettings ? Promise.resolve(props.initialSettings) : desktopApi.getSettings()).then((value) => {
-    settings.value = value
-    searchMode.value = value.semantic_search?.default_mode || 'hybrid'
-    commitTheme(value.theme, false)
+  const settingsReady = initializeAppSettings({
+    initialSettings: props.initialSettings,
+    loadSettings: () => desktopApi.getSettings(),
+    applyPreference,
+    applySettings(value) {
+      settings.value = value
+      searchMode.value = value.semantic_search?.default_mode || 'hybrid'
+      commitTheme(value.theme, false)
+    },
   })
   unlistenCloseRequest = await listen('close-behavior-requested', () => {
     pendingCloseBehavior.value = null

@@ -18,10 +18,14 @@ export function useLocale(
     previewOrigin = currentLocale()
   }
 
-  async function previewLanguage(preference: LanguagePreference) {
+  async function applyPreference(preference: LanguagePreference) {
     const locale = setLanguagePreference(preference, languages)
     await syncNative(locale)
     return locale
+  }
+
+  async function previewLanguage(preference: LanguagePreference) {
+    return applyPreference(preference)
   }
 
   async function acceptPreview() {
@@ -40,5 +44,5 @@ export function useLocale(
     return locale
   }
 
-  return { beginPreview, previewLanguage, acceptPreview, cancelPreview }
+  return { beginPreview, applyPreference, previewLanguage, acceptPreview, cancelPreview }
 }
