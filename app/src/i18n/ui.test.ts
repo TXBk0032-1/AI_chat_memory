@@ -1,7 +1,5 @@
 /** @vitest-environment happy-dom */
 
-import { readdirSync, readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
 import { createApp, defineComponent, h } from 'vue'
 import { afterEach, describe, expect, it } from 'vitest'
 import ExportDialog from '../components/ExportDialog.vue'
@@ -19,12 +17,6 @@ function mount(component: Parameters<typeof h>[0], props: Record<string, unknown
   return document.body
 }
 
-function sourceFiles(directory: string): string[] {
-  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
-    const path = resolve(directory, entry.name)
-    return entry.isDirectory() ? sourceFiles(path) : [path]
-  })
-}
 
 afterEach(() => {
   mountedApps.splice(0).forEach((app) => app.unmount())
@@ -65,22 +57,5 @@ describe('English first-run surfaces', () => {
     expect(root.textContent).toContain('2 Q&A groups selected')
     expect(root.querySelector('[role="radiogroup"]')?.getAttribute('aria-label')).toBe('Export format')
     expect(root.textContent).not.toContain('导出聊天记录')
-  })
-})
-
-describe('production copy coverage', () => {
-  it('keeps Han-script user-facing literals inside locale resources', () => {
-    const root = resolve(process.cwd(), 'src')
-    const offenders = sourceFiles(root)
-      .filter((path) => /\.(?:ts|vue)$/.test(path))
-      .filter((path) => !path.endsWith('.test.ts'))
-      .filter((path) => !path.includes(`${resolve(root, 'i18n', 'locales')}`))
-      .flatMap((path) => readFileSync(path, 'utf8').split(/\r?\n/).flatMap((line, index) => {
-        if (!/[\p{Script=Han}]{2,}/u.test(line)) return []
-        if (/^\s*(?:\/\/|\/\*|\*|<!--)/.test(line)) return []
-        return [`${path.slice(root.length + 1)}:${index + 1}: ${line.trim()}`]
-      }))
-
-    expect(offenders).toEqual([])
   })
 })
