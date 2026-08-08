@@ -9,6 +9,7 @@ describe('startup locale initialization', () => {
   it('keeps the static boot shell language-neutral until locale initialization', () => {
     const html = readFileSync(resolve(process.cwd(), 'index.html'), 'utf8')
     const document = new DOMParser().parseFromString(html, 'text/html')
+    expect(document.documentElement.lang).toBe('')
     expect(document.title).toBe('AI Chat Memory')
     expect(document.querySelector('[data-i18n="app.title"]')?.textContent).toBe('AI Chat Memory')
     for (const key of ['boot.heading', 'boot.subtitle', 'boot.status']) {
@@ -47,5 +48,6 @@ describe('startup locale initialization', () => {
     expect(mount).toHaveBeenCalledWith(undefined)
   })
 })
+
 
 
