@@ -28,7 +28,7 @@ describe('app settings initialization', () => {
     const value = settingsFixture('zh-CN')
     await initializeAppSettings({
       loadSettings: vi.fn().mockResolvedValue(value),
-      applyPreference: vi.fn(async (language) => { order.push(`locale:${language}`); return 'zh-CN' }),
+      applyPreference: vi.fn(async (language) => { order.push(`locale:${language}`); return 'zh-CN' as const }),
       applySettings: vi.fn(() => order.push('settings')),
     })
     expect(order).toEqual(['locale:zh-CN', 'settings'])
@@ -41,3 +41,4 @@ describe('app settings initialization', () => {
     expect(applySettings).toHaveBeenCalledWith(value)
   })
 })
+

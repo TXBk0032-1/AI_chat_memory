@@ -1,6 +1,6 @@
 /** @vitest-environment happy-dom */
 
-import { createApp, nextTick } from 'vue'
+import { createApp } from 'vue'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SettingsModel } from './desktop-api'
 
@@ -67,3 +67,4 @@ describe('desktop locale recovery integration', () => {
     app?.unmount()
   })
 })
+
