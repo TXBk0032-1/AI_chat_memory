@@ -1,6 +1,9 @@
 
 import { invoke } from '@tauri-apps/api/core'
 import type { BranchOverview, Message, SearchHit, SessionOpen, SessionSummary } from './conversation'
+import type { LanguagePreference, SupportedLocale } from './i18n/locale'
+
+export type { LanguagePreference, SupportedLocale } from './i18n/locale'
 
 export type ThemePreference = 'system' | 'light' | 'dark'
 export type CloseBehavior = 'ask' | 'hide_to_tray' | 'exit'
@@ -42,6 +45,7 @@ export type SettingsModel = {
   close_behavior: CloseBehavior
   tray_click_behavior: TrayClickBehavior
   theme: ThemePreference
+  language: LanguagePreference
   semantic_search: SemanticSearchSettings
   mcp_enabled: boolean
   cloud_sync: CloudSyncSettings
@@ -181,6 +185,7 @@ export interface DesktopApi {
   syncNow(): Promise<CloudSyncStatus>
   rewriteCloudArchive(): Promise<CloudSyncStatus>
   removeCloudDeviceRecord(deviceId: string): Promise<CloudSyncStatus>
+  setNativeLocale(locale: SupportedLocale): Promise<void>
 }
 
 export const desktopApi: DesktopApi = {
@@ -209,4 +214,5 @@ export const desktopApi: DesktopApi = {
   syncNow: () => invoke('sync_now'),
   rewriteCloudArchive: () => invoke('rewrite_cloud_archive'),
   removeCloudDeviceRecord: (deviceId) => invoke('remove_cloud_device_record', { deviceId }),
+  setNativeLocale: (locale) => invoke('set_native_locale', { locale }),
 }

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { Braces, FileImage, FileText, LoaderCircle, X } from 'lucide-vue-next'
 import type { ExportFormat } from '../conversation-export'
+import { translate as t } from '../i18n'
 
 defineProps<{
   visible: boolean
@@ -30,11 +31,11 @@ function isImageFormat(value: ExportFormat) {
     <div v-if="visible" class="dialog-backdrop" @click.self="!busy && emit('close')">
       <section class="export-dialog" role="dialog" aria-modal="true" aria-labelledby="export-title">
         <header>
-          <div><h2 id="export-title">导出聊天记录</h2><p>已选择 {{ selectedCount }} 组问答</p></div>
-          <button class="icon-button" title="关闭" :disabled="busy" @click="emit('close')"><X :size="18" /></button>
+          <div><h2 id="export-title">{{ t('export.dialogTitle') }}</h2><p>{{ t('export.selectedCount', { count: selectedCount }) }}</p></div>
+          <button class="icon-button" :title="t('app.close')" :disabled="busy" @click="emit('close')"><X :size="18" /></button>
         </header>
         <div class="export-dialog-body">
-          <div class="export-format-control" role="radiogroup" aria-label="导出格式">
+          <div class="export-format-control" role="radiogroup" :aria-label="t('export.format')">
             <button
               v-for="item in formats"
               :key="item.value"
@@ -51,12 +52,12 @@ function isImageFormat(value: ExportFormat) {
           </div>
           <label class="export-thinking-option">
             <input v-model="includeThinking" type="checkbox" :disabled="busy" />
-            <span><strong>包含思考过程</strong><small>仅导出所选助手消息中已有的思考内容</small></span>
+            <span><strong>{{ t('export.includeThinking') }}</strong><small>{{ t('export.includeThinkingHint') }}</small></span>
           </label>
         </div>
         <footer>
-          <button class="secondary-button" :disabled="busy" @click="emit('close')">取消</button>
-          <button class="primary-button" :disabled="busy" @click="emit('export')"><LoaderCircle v-if="busy" class="spinning" :size="15" />导出</button>
+          <button class="secondary-button" :disabled="busy" @click="emit('close')">{{ t('app.cancel') }}</button>
+          <button class="primary-button" :disabled="busy" @click="emit('export')"><LoaderCircle v-if="busy" class="spinning" :size="15" />{{ t('export.action') }}</button>
         </footer>
       </section>
     </div>

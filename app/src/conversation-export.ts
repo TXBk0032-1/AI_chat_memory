@@ -1,4 +1,5 @@
 import type { Message } from './conversation'
+import { translate as t } from './i18n'
 
 export type ExportFormat = 'png' | 'jpeg' | 'md' | 'json'
 
@@ -77,7 +78,7 @@ function localDate(date: Date): string {
 export function sanitizeExportFilename(title: string, date: string, format: ExportFormat): string {
   const extension = format === 'jpeg' ? 'jpeg' : format
   let stem = title.replace(invalidFilenameCharacters, ' ').replace(/\s+/g, ' ').trim().replace(/[. ]+$/g, '')
-  if (!stem) stem = '未命名对话'
+  if (!stem) stem = t('app.untitledConversation')
   if (reservedWindowsFilename.test(stem)) stem = `_${stem}`
   return `${stem.slice(0, 100)}-${date}.${extension}`
 }
@@ -102,11 +103,11 @@ export function serializeMarkdown(model: ConversationExport): string {
   const blocks = model.messages.map((message) => {
     const role = message.role.toUpperCase()
     const parts: string[] = []
-    if (message.thinking) parts.push(`**${role} 思考过程**：\n${message.thinking}`)
-    parts.push(`**${role}**：\n${message.content}`)
+    if (message.thinking) parts.push(`**${t('export.thinkingLabel', { role })}**${t('export.separator')}\n${message.thinking}`)
+    parts.push(`**${role}**${t('export.separator')}\n${message.content}`)
     return parts.join('\n\n')
   })
-  return `> 时间: ${model.time}\n> 平台: ${model.platform}\n---\n${blocks.join('\n\n')}\n---\n`
+  return `> ${t('export.timeLabel')}: ${model.time}\n> ${t('export.platformLabel')}: ${model.platform}\n---\n${blocks.join('\n\n')}\n---\n`
 }
 
 export function serializeJson(model: ConversationExport): string {

@@ -12,13 +12,16 @@ import {
   type SettingsModel,
 } from '../desktop-api'
 import { buildMcpClientConfig } from '../mcp-config'
+import { translate as t } from '../i18n'
 
 type ThemePreview = { begin(): void; accept(): void; cancel(): void }
+type LocalePreview = { begin(): void; accept(): void | Promise<unknown>; cancel(): void | Promise<unknown> }
 
 export function useSettings(
   settings: Ref<SettingsModel>,
   error: Ref<string>,
   theme: ThemePreview,
+  locale: LocalePreview,
   api: DesktopApi = desktopApi,
 ) {
   const showSettings = ref(false)
@@ -45,6 +48,7 @@ export function useSettings(
   async function openSettings() {
     settings.value = await api.getSettings()
     theme.begin()
+    locale.begin()
     originText.value = settings.value.allowed_origins.join('\n')
     secretCopied.value = false
     mcpConfigCopied.value = false
@@ -62,7 +66,10 @@ export function useSettings(
   }
 
   function closeSettings(save = false) {
-    if (!save) theme.cancel()
+    if (!save) {
+      theme.cancel()
+      void locale.cancel()
+    }
     clearMcpConfigCopiedTimer()
     showSettings.value = false
   }
@@ -79,6 +86,7 @@ export function useSettings(
     try {
       settings.value = await api.saveSettings(settings.value, cloudSyncCredentials)
       theme.accept()
+      await locale.accept()
       closeSettings(true)
     } catch (reason) {
       error.value = String(reason)
@@ -97,9 +105,9 @@ export function useSettings(
   }
 
   async function changeDataDirectory() {
-    const path = await open({ directory: true, multiple: false, title: '选择数据保存目录' })
+    const path = await open({ directory: true, multiple: false, title: t('settings.selectDataDirectory') })
     if (typeof path !== 'string') return
-    if (!confirm('应用将把当前数据库复制到新目录并立即重启。是否继续？')) return
+    if (!confirm(t('settings.moveDataConfirmation'))) return
     try {
       await api.moveDataDirectory(path)
     } catch (reason) {
@@ -142,7 +150,7 @@ export function useSettings(
           ready_chunks: status.ready_chunks,
           pending_chunks: status.pending_chunks,
           fraction: total > 0 ? 0.35 + (status.ready_chunks / total) * 0.65 : reindexProgress.value.fraction,
-          message: status.message || `正在向量化（就绪 ${status.ready_chunks}/${total}，剩余 ${status.pending_chunks}）`,
+          message: status.message || t('progress.vectorizing', { ready: status.ready_chunks, total, pending: status.pending_chunks }),
         }
       } else if (status.pending_chunks === 0 && reindexProgress.value && reindexProgress.value.stage !== 'done') {
         reindexProgress.value = {
@@ -152,7 +160,7 @@ export function useSettings(
           pending_chunks: 0,
           total_chunks: status.ready_chunks,
           fraction: 1,
-          message: status.message || `重建索引完成（就绪 ${status.ready_chunks}）`,
+          message: status.message || t('progress.reindexCompleteReady', { ready: status.ready_chunks }),
         }
         stopReindexPolling()
         semanticBusy.value = false
@@ -184,7 +192,7 @@ export function useSettings(
       ready_chunks: 0,
       pending_chunks: 0,
       fraction: 0,
-      message: '正在启动重建索引…',
+      message: t('progress.startingReindex'),
     }
     try {
       unlistenReindex?.()
@@ -210,13 +218,13 @@ export function useSettings(
             ready_chunks: semanticStatus.value?.ready_chunks ?? 0,
             pending_chunks: 0,
             fraction: 1,
-            message: '重建索引完成',
+            message: t('progress.reindexComplete'),
           }
         }
       }
     } catch (reason) {
       const message = String(reason)
-      const cancelled = message.includes('取消') || message.toLowerCase().includes('cancel')
+      const cancelled = message.includes(t('progress.cancelMarker')) || message.toLowerCase().includes('cancel')
       if (!cancelled) error.value = message
       reindexProgress.value = {
         stage: cancelled ? 'cancelled' : 'error',
@@ -226,7 +234,7 @@ export function useSettings(
         ready_chunks: reindexProgress.value?.ready_chunks ?? 0,
         pending_chunks: reindexProgress.value?.pending_chunks ?? 0,
         fraction: reindexProgress.value?.fraction ?? 0,
-        message: cancelled ? '索引任务已取消' : message,
+        message: cancelled ? t('progress.indexCancelled') : message,
       }
       stopReindexPolling()
       semanticBusy.value = false
@@ -244,7 +252,7 @@ export function useSettings(
       file_count: 3,
       downloaded_bytes: 0,
       fraction: 0,
-      message: '准备下载本地模型…',
+      message: t('progress.preparingDownload'),
     }
     try {
       unlistenDownload?.()
@@ -261,12 +269,12 @@ export function useSettings(
           downloaded_bytes: downloadProgress.value?.downloaded_bytes ?? 0,
           total_bytes: downloadProgress.value?.total_bytes,
           fraction: 1,
-          message: '下载完成',
+          message: t('progress.downloadComplete'),
         }
       }
     } catch (reason) {
       const message = String(reason)
-      const cancelled = message.includes('取消') || message.toLowerCase().includes('cancel')
+      const cancelled = message.includes(t('progress.cancelMarker')) || message.toLowerCase().includes('cancel')
       if (!cancelled) error.value = message
       downloadProgress.value = {
         stage: cancelled ? 'cancelled' : 'error',
@@ -275,7 +283,7 @@ export function useSettings(
         downloaded_bytes: downloadProgress.value?.downloaded_bytes ?? 0,
         total_bytes: downloadProgress.value?.total_bytes,
         fraction: downloadProgress.value?.fraction ?? 0,
-        message: cancelled ? '下载已取消' : message,
+        message: cancelled ? t('progress.downloadCancelled') : message,
       }
     } finally {
       unlistenDownload?.()
@@ -285,7 +293,7 @@ export function useSettings(
   }
 
   async function importLocalModel() {
-    const path = await open({ directory: true, multiple: false, title: '选择本地 embedding 模型目录' })
+    const path = await open({ directory: true, multiple: false, title: t('settings.selectModelDirectory') })
     if (typeof path !== 'string') return
     semanticBusy.value = true
     try {
@@ -311,7 +319,7 @@ export function useSettings(
           downloaded_bytes: downloadProgress.value.downloaded_bytes ?? 0,
           total_bytes: downloadProgress.value.total_bytes,
           fraction: downloadProgress.value.fraction ?? 0,
-          message: '下载已取消',
+          message: t('progress.downloadCancelled'),
         }
       }
       if (reindexProgress.value && reindexProgress.value.stage !== 'done') {
@@ -323,7 +331,7 @@ export function useSettings(
           ready_chunks: reindexProgress.value.ready_chunks ?? 0,
           pending_chunks: reindexProgress.value.pending_chunks ?? 0,
           fraction: reindexProgress.value.fraction ?? 0,
-          message: '索引任务已取消',
+          message: t('progress.indexCancelled'),
         }
       }
       stopReindexPolling()

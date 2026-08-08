@@ -5,7 +5,8 @@ import { resolve } from 'node:path'
 import { createApp, defineComponent, h, nextTick, ref } from 'vue'
 import { describe, expect, it, vi } from 'vitest'
 import SettingsDialog from './components/SettingsDialog.vue'
-import type { SettingsModel } from './desktop-api'
+import type { LanguagePreference, SettingsModel } from './desktop-api'
+import { setLanguagePreference, setLocale } from './i18n'
 
 const styleSource = readFileSync(resolve(process.cwd(), 'src/style.css'), 'utf8')
 const tauriConfig = JSON.parse(
@@ -28,6 +29,7 @@ function settingsFixture(): SettingsModel {
     close_behavior: 'ask',
     tray_click_behavior: 'show_menu',
     theme: 'system',
+    language: 'system',
     semantic_search: {
       enabled: true,
       default_mode: 'hybrid',
@@ -68,7 +70,9 @@ function mountDialog() {
   const visible = ref(true)
   const close = vi.fn()
   const save = vi.fn()
+  const previewLanguage = vi.fn((language: LanguagePreference) => setLanguagePreference(language, ['en-US']))
   const settings = settingsFixture()
+  setLocale('zh-CN')
   const Root = defineComponent({
     setup: () => () => h(SettingsDialog, {
       visible: visible.value,
@@ -77,6 +81,7 @@ function mountDialog() {
       originText: 'https://example.test',
       onClose: close,
       onSave: save,
+      onPreviewLanguage: previewLanguage,
     }),
   })
   const app = createApp(Root)
@@ -87,6 +92,7 @@ function mountDialog() {
     visible,
     close,
     save,
+    previewLanguage,
     settings,
     unmount() {
       app.unmount()
@@ -161,7 +167,22 @@ describe('settings dialog pagination', () => {
     }
   })
 
-  it('uses a scalable side navigation and folds four pages above content at the app minimum width', () => {
+  it('emits an immediate language preview when the language selection changes', async () => {
+    const harness = mountDialog()
+    try {
+      const language = selectWithLabel(harness.root, '界面语言')
+      language.value = 'en-US'
+      language.dispatchEvent(new Event('change'))
+      await nextTick()
+
+      expect(harness.previewLanguage).toHaveBeenCalledWith('en-US')
+      expect(harness.root.textContent).toContain('App settings')
+    } finally {
+      harness.unmount()
+    }
+  })
+
+  it('uses a scalable side navigation and folds it above content at the app minimum width', () => {
     const dialog = ruleFor('.settings-dialog')
     const layout = ruleFor('.settings-layout')
     const navigation = ruleFor('.settings-navigation')

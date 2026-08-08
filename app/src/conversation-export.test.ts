@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { setLocale } from './i18n'
 import {
   exportDate,
   groupConversationTurns,
@@ -10,6 +11,9 @@ import {
   toExportMessages,
   type ConversationExport,
 } from './conversation-export'
+
+beforeEach(() => setLocale('zh-CN'))
+afterEach(() => setLocale('zh-CN'))
 
 describe('conversation export', () => {
   it('groups an adjacent user and assistant while preserving unmatched messages', () => {
@@ -62,6 +66,11 @@ describe('conversation export', () => {
       '> 时间: 2025-07-14\n> 平台: DeepSeek\n---\n**USER**：\nHello\n\n**ASSISTANT 思考过程**：\nConsider it\n\n**ASSISTANT**：\nHi\n---\n',
     )
     expect(JSON.parse(serializeJson(model))).toEqual(model)
+
+    setLocale('en-US')
+    expect(serializeMarkdown(model)).toBe(
+      '> Time: 2025-07-14\n> Platform: DeepSeek\n---\n**USER**:\nHello\n\n**ASSISTANT reasoning**:\nConsider it\n\n**ASSISTANT**:\nHi\n---\n',
+    )
   })
 
   it('only adds non-empty thinking when requested', () => {

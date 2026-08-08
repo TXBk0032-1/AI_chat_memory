@@ -1,11 +1,12 @@
 /** @vitest-environment happy-dom */
 
 import { createApp, defineComponent, h, nextTick, ref } from 'vue'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Message, Reference } from './conversation'
 import * as markdown from './markdown'
 import MessageBlock from './MessageBlock.vue'
 
+import { setLocale } from './i18n'
 function oversizedContent(title = '完整标题') {
   return `# ${title}\n\n<strong>raw</strong>\n\n${'x'.repeat(100_000)}`
 }
@@ -66,9 +67,12 @@ function mountMessage(initialMessage: Message, initialQuery = '', references = n
 }
 
 afterEach(() => {
+  setLocale('zh-CN')
   vi.restoreAllMocks()
   document.body.innerHTML = ''
 })
+
+beforeEach(() => setLocale('zh-CN'))
 
 describe('MessageBlock oversized content', () => {
   it('shows a surrogate-safe plain-text preview without invoking Markdown by default', () => {
@@ -129,6 +133,23 @@ describe('MessageBlock oversized content', () => {
 
       expect(harness.root.querySelector('.markdown')).toBeNull()
       expect(harness.root.querySelector('.oversized-message-preview')).not.toBeNull()
+    } finally {
+      harness.unmount()
+    }
+  })
+
+  it('formats lightweight controls with the active English locale', async () => {
+    setLocale('en-US')
+    const content = oversizedContent()
+    const harness = mountMessage(messageFixture({ content }))
+    try {
+      expect(harness.root.querySelector('.oversized-message-meta')?.textContent).toContain(
+        `Original characters: ${new Intl.NumberFormat('en-US').format(content.length)}`,
+      )
+      expect(buttonWithText(harness.root, 'Render full Markdown')).toBeTruthy()
+      buttonWithText(harness.root, 'Render full Markdown').click()
+      await nextTick()
+      expect(buttonWithText(harness.root, 'Restore lightweight mode')).toBeTruthy()
     } finally {
       harness.unmount()
     }

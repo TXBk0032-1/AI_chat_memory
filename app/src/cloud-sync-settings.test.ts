@@ -1,11 +1,12 @@
 /** @vitest-environment happy-dom */
 
 import { createApp, defineComponent, h, nextTick, reactive, ref } from 'vue'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import CloudSyncSettings from './components/CloudSyncSettings.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import type { CloudSyncSettings as CloudSettings, SettingsModel } from './desktop-api'
 
+import { setLocale } from './i18n'
 function cloudSettings(): CloudSettings {
   return {
     backend: 'webdav',
@@ -36,6 +37,7 @@ function settingsModel(): SettingsModel {
     close_behavior: 'ask',
     tray_click_behavior: 'show_menu',
     theme: 'system',
+    language: 'system',
     semantic_search: {
       enabled: true,
       default_mode: 'hybrid',
@@ -90,6 +92,12 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
+beforeEach(() => setLocale('zh-CN'))
+afterEach(() => {
+  setLocale('zh-CN')
+  document.body.innerHTML = ''
+})
+
 describe('cloud sync settings', () => {
   it('switches backend fields and validates S3 before testing', async () => {
     document.body.innerHTML = '<div id="app"></div>'
@@ -126,6 +134,73 @@ describe('cloud sync settings', () => {
     } finally {
       app.unmount()
       document.body.innerHTML = ''
+    }
+  })
+
+  it('renders Cloud Sync diagnostics in English for WebDAV and S3', async () => {
+    setLocale('en-US')
+    document.body.innerHTML = '<div id="app"></div>'
+    const settings = reactive(cloudSettings())
+    const Root = defineComponent({
+      setup: () => () => h(CloudSyncSettings, {
+        settings,
+        password: 'dav-password',
+        syncPassword: '',
+        accessKeyId: '',
+        secretAccessKey: '',
+        sessionToken: '',
+        status: { state: 'idle', pending_mutations: 0, devices: [] },
+      }),
+    })
+    const app = createApp(Root)
+    app.mount('#app')
+    try {
+      expect(document.body.textContent).toContain('Cloud sync')
+      expect(document.body.textContent).toContain('WebDAV URL')
+      expect(document.body.textContent).toContain('Test connection')
+      expect(document.body.textContent).toContain('Sync now')
+      expect(document.body.querySelector('[aria-label="Remote devices"]')).not.toBeNull()
+      expect(document.body.textContent).toContain('Idle')
+      button(document.body, 'S3').click()
+      await nextTick()
+      expect(document.body.textContent).toContain('Endpoint (optional for AWS)')
+      expect(document.body.textContent).toContain('Use path-style addressing')
+    } finally {
+      app.unmount()
+    }
+  })
+
+  it('reports a missing connection handler in English and keeps save disabled', async () => {
+    setLocale('en-US')
+    document.body.innerHTML = '<div id="app"></div>'
+    const visible = ref(true)
+    const settings = reactive(settingsModel())
+    const save = vi.fn()
+    const Root = defineComponent({
+      setup: () => () => h(SettingsDialog, {
+        visible: visible.value,
+        secretCopied: false,
+        settings,
+        originText: '',
+        onSave: save,
+      }),
+    })
+    const app = createApp(Root)
+    app.mount('#app')
+    try {
+      button(document.body, 'Cloud sync').click()
+      await nextTick()
+      const password = inputForLabel(document.body, 'WebDAV password')
+      password.value = 'webdav-secret'
+      password.dispatchEvent(new Event('input'))
+      await nextTick()
+      button(document.body, 'Test connection').click()
+      await nextTick()
+      expect(document.body.textContent).toContain('Connection test handler is not configured')
+      expect(button(document.body, 'Save settings').disabled).toBe(true)
+      expect(save).not.toHaveBeenCalled()
+    } finally {
+      app.unmount()
     }
   })
 
@@ -762,3 +837,4 @@ describe('cloud sync settings', () => {
   })
 
 })
+

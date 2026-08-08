@@ -1,6 +1,38 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// User-selected language. `System` is resolved by the frontend using the
+/// browser/system language before synchronising native UI copy.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum LanguagePreference {
+    #[default]
+    #[serde(rename = "system")]
+    System,
+    #[serde(rename = "zh-CN")]
+    ZhCn,
+    #[serde(rename = "en-US")]
+    EnUs,
+}
+
+/// Locale values accepted by the native window/tray synchronisation command.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SupportedLocale {
+    #[serde(rename = "zh-CN")]
+    ZhCn,
+    #[serde(rename = "en-US")]
+    EnUs,
+}
+
+impl LanguagePreference {
+    pub const fn supported_locale(self) -> Option<SupportedLocale> {
+        match self {
+            Self::System => None,
+            Self::ZhCn => Some(SupportedLocale::ZhCn),
+            Self::EnUs => Some(SupportedLocale::EnUs),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub id: String,
@@ -337,6 +369,8 @@ pub struct AppSettings {
     #[serde(default)]
     pub theme: ThemePreference,
     #[serde(default)]
+    pub language: LanguagePreference,
+    #[serde(default)]
     pub semantic_search: SemanticSearchSettings,
     #[serde(default = "default_true")]
     pub mcp_enabled: bool,
@@ -581,6 +615,7 @@ impl Default for AppSettings {
             close_behavior: CloseBehavior::Ask,
             tray_click_behavior: TrayClickBehavior::ShowMenu,
             theme: ThemePreference::System,
+            language: LanguagePreference::System,
             semantic_search: SemanticSearchSettings::default(),
             mcp_enabled: true,
             cloud_sync: CloudSyncSettings::default(),

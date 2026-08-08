@@ -83,6 +83,7 @@ describe('desktopApi', () => {
       close_behavior: 'ask',
       tray_click_behavior: 'show_menu',
       theme: 'system',
+      language: 'system',
       semantic_search: {
         enabled: true,
         default_mode: 'hybrid',
@@ -128,4 +129,14 @@ describe('desktopApi', () => {
       cloudSyncCredentials: credentials,
     })
   })
+
+  it('syncs the effective locale through the stable native command', async () => {
+    invoke.mockResolvedValue(undefined)
+    const { desktopApi } = await import('./desktop-api')
+
+    await desktopApi.setNativeLocale('en-US')
+
+    expect(invoke).toHaveBeenLastCalledWith('set_native_locale', { locale: 'en-US' })
+  })
 })
+

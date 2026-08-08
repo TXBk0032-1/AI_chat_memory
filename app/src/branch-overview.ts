@@ -1,6 +1,7 @@
 import dagre from '@dagrejs/dagre'
 import { Position, type Edge, type Node } from '@vue-flow/core'
 import type { BranchNode, BranchOverview, SearchMatch } from './conversation'
+import { translate as t } from './i18n'
 
 export const branchNodeWidth = 210
 export const branchNodeHeight = 76
@@ -86,6 +87,8 @@ export function layoutBranchOverview(overview: BranchOverview, activeLeafId: str
   const path = branchPath(overview.nodes, activeLeafId)
   const nodes: Array<Node<BranchNodeData | BranchRootData>> = overview.nodes.map((node) => {
     const point = graph.node(node.node_id)
+    const roleLabel = node.role === 'user' ? t('app.roleYou') : node.role === 'assistant' ? t('app.roleAi') : node.role
+    const preview = node.preview || t('branch.emptyMessage')
     return {
       id: node.node_id,
       type: 'branch',
@@ -98,10 +101,10 @@ export function layoutBranchOverview(overview: BranchOverview, activeLeafId: str
       focusable: true,
       width: branchNodeWidth,
       height: branchNodeHeight,
-      ariaLabel: `${node.role === 'user' ? '你' : 'AI'}：${node.preview || '空消息'}`,
+      ariaLabel: t('branch.nodeLabel', { role: roleLabel, preview }),
       data: {
         ...node,
-        roleLabel: node.role === 'user' ? '你' : node.role === 'assistant' ? 'AI' : node.role,
+        roleLabel,
         childCount: node.children_node_ids.length,
         current: node.node_id === activeLeafId,
         path: path.has(node.node_id),

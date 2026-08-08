@@ -5,6 +5,7 @@ mod database;
 mod embedding;
 mod error;
 mod http_api;
+mod i18n;
 mod local_services;
 mod logging;
 mod mcp;
@@ -132,6 +133,7 @@ pub fn run() {
             commands::delete_session,
             commands::import_deepseek_zip,
             commands::get_settings,
+            commands::set_native_locale,
             commands::save_settings,
             commands::rotate_secret,
             commands::get_cloud_sync_status,
