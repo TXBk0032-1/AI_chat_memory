@@ -4,6 +4,14 @@ import { createApp, nextTick } from 'vue'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { SettingsModel } from './desktop-api'
 
+vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn().mockResolvedValue(() => {}) }))
+vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn(), save: vi.fn() }))
+vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: vi.fn() }))
+vi.mock('@tauri-apps/api/app', () => ({ setTheme: vi.fn().mockResolvedValue(undefined) }))
+vi.mock('@tauri-apps/api/window', () => ({
+  getCurrentWindow: () => ({ minimize: vi.fn(), toggleMaximize: vi.fn(), close: vi.fn(), isMaximized: vi.fn().mockResolvedValue(false), onResized: vi.fn().mockResolvedValue(() => {}) }),
+}))
+
 function settingsFixture(): SettingsModel {
   return {
     setup_complete: true, secret_enabled: false, allowed_origins: [], close_behavior: 'ask', tray_click_behavior: 'show_menu', theme: 'system', language: 'zh-CN',
@@ -31,11 +39,6 @@ describe('desktop locale recovery integration', () => {
       getSemanticStatus: vi.fn().mockResolvedValue({ enabled: false, status: 'disabled', backend: 'local', model_id: '', pending_chunks: 0, ready_chunks: 0, local_model_ready: false }),
     }
     vi.doMock('./desktop-api', () => ({ desktopApi: api }))
-    vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn().mockResolvedValue(() => {}) }))
-    vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn(), save: vi.fn() }))
-    vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: vi.fn() }))
-    vi.mock('@tauri-apps/api/app', () => ({ setTheme: vi.fn().mockResolvedValue(undefined) }))
-    vi.mock('@tauri-apps/api/window', () => ({ getCurrentWindow: () => ({ minimize: vi.fn(), toggleMaximize: vi.fn(), close: vi.fn(), isMaximized: vi.fn().mockResolvedValue(false), onResized: vi.fn().mockResolvedValue(() => {}) }) }))
 
     const [{ startDesktopApp }, { default: App }, { i18n, currentLocale }] = await Promise.all([
       import('./desktop-startup'), import('./App.vue'), import('./i18n'),
