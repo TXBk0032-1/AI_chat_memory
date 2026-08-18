@@ -75,7 +75,12 @@ function Initialize-CudaBuildEnvironment {
     # CUDA 13.x CCCL requires MSVC's conforming preprocessor.
     $env:NVCC_APPEND_FLAGS = "-Xcompiler=/Zc:preprocessor"
     # CUDA 13 ships runtime DLLs under bin\x64; keep both for nvcc and runtime load.
-    $env:PATH = "$cudaRoot\bin\x64;$cudaRoot\bin;$msvcBin;$env:PATH"
+    $cargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
+    if (Test-Path -LiteralPath $cargoBin) {
+        $env:PATH = "$cudaRoot\bin\x64;$cudaRoot\bin;$msvcBin;$cargoBin;$env:PATH"
+    } else {
+        $env:PATH = "$cudaRoot\bin\x64;$cudaRoot\bin;$msvcBin;$env:PATH"
+    }
 
     if (-not (Get-Command nvcc -ErrorAction SilentlyContinue)) {
         throw "nvcc is not available after CUDA environment setup"
