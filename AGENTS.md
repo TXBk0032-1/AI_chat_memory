@@ -7,6 +7,8 @@
 - The local userscript API is fixed at `127.0.0.1:19820`; routes and authorization live in `app/src-tauri/src/http_api.rs`.
 - `userscript/dist/ai-chat-memory.user.js` is the committed userscript implementation, despite the `dist` name. Validate it directly after edits; there is no userscript build config.
 - The SQLite schema is created in Rust in `app/src-tauri/src/database/connection.rs`; there are no migration files. `legacy/` is reference code, not the active application.
+- `app/src-tauri/src/service/tests/` contains dedicated test modules for cloud transition, encryption, and archive import.
+- Export pipeline supports PNG, JPEG, PDF, Markdown, and JSON. PDF export uses Windows WebView2 `ICoreWebView2_10::PrintToPdf` via `commands::print_to_pdf` and `@media print` isolation in `ExportDocument.vue`.
 
 ## Commands
 
