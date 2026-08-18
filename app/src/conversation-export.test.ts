@@ -90,6 +90,7 @@ describe('conversation export', () => {
     expect(exportDate(undefined, fallback)).toBe('2025-07-14')
     expect(exportDate('invalid', fallback)).toBe('2025-07-14')
     expect(sanitizeExportFilename(' A/B:*?  ', '2025-07-14', 'jpeg')).toBe('A B-2025-07-14.jpeg')
+    expect(sanitizeExportFilename(' My Conversation ', '2025-07-14', 'pdf')).toBe('My Conversation-2025-07-14.pdf')
     expect(sanitizeExportFilename('CON', '2025-07-14', 'md')).toBe('_CON-2025-07-14.md')
   })
 

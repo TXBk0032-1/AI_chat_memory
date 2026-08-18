@@ -12,11 +12,14 @@ defineProps<{
 }>()
 const format = defineModel<ExportFormat>('format', { required: true })
 const includeThinking = defineModel<boolean>('includeThinking', { required: true })
+const compact = defineModel<boolean>('compact', { default: false })
+const includeCoverPage = defineModel<boolean>('includeCoverPage', { default: false })
 const emit = defineEmits<{ close: []; export: [] }>()
 
 const formats: Array<{ value: ExportFormat; label: string; icon: typeof FileImage }> = [
   { value: 'png', label: 'PNG', icon: FileImage },
   { value: 'jpeg', label: 'JPEG', icon: FileImage },
+  { value: 'pdf', label: 'PDF', icon: FileText },
   { value: 'md', label: 'Markdown', icon: FileText },
   { value: 'json', label: 'JSON', icon: Braces },
 ]
@@ -49,6 +52,16 @@ function isImageFormat(value: ExportFormat) {
             >
               <component :is="item.icon" :size="18" /><span>{{ item.label }}</span>
             </button>
+          </div>
+          <div v-if="format === 'pdf'" class="export-pdf-options">
+            <label class="export-thinking-option">
+              <input v-model="compact" type="checkbox" :disabled="busy" />
+              <span><strong>{{ t('export.compactLayout') }}</strong><small>{{ t('export.compactLayoutHint') }}</small></span>
+            </label>
+            <label class="export-thinking-option">
+              <input v-model="includeCoverPage" type="checkbox" :disabled="busy" />
+              <span><strong>{{ t('export.includeCoverPage') }}</strong><small>{{ t('export.includeCoverPageHint') }}</small></span>
+            </label>
           </div>
           <label class="export-thinking-option">
             <input v-model="includeThinking" type="checkbox" :disabled="busy" />

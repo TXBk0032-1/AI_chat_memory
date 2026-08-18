@@ -11,6 +11,9 @@ const props = defineProps<{
   messages: Message[]
   references: Map<number, Reference>
   includeThinking: boolean
+  isPdf?: boolean
+  compact?: boolean
+  includeCoverPage?: boolean
 }>()
 
 const root = ref<HTMLElement | null>(null)
@@ -30,7 +33,23 @@ defineExpose({ getElement: () => root.value })
 </script>
 
 <template>
-  <article ref="root" class="export-document">
+  <article
+    ref="root"
+    class="export-document"
+    :class="{
+      'export-document--compact': compact,
+      'export-document--pdf': isPdf,
+    }"
+  >
+    <section v-if="isPdf && includeCoverPage" class="export-cover-page">
+      <div class="export-cover-platform">{{ platform }}</div>
+      <h1 class="export-cover-title">{{ title || t('app.untitledConversation') }}</h1>
+      <div class="export-cover-meta">
+        <p><span class="meta-label">{{ t('export.timeLabel') }}</span><span class="meta-value">{{ time }}</span></p>
+        <p><span class="meta-label">{{ t('export.totalMessages') }}</span><span class="meta-value">{{ messages.length }}</span></p>
+        <p><span class="meta-label">{{ t('export.generatedBy') }}</span><span class="meta-value">AI Chat Memory</span></p>
+      </div>
+    </section>
     <header class="export-document-header">
       <span>{{ platform }}</span>
       <h1>{{ title || t('app.untitledConversation') }}</h1>

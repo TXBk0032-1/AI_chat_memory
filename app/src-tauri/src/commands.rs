@@ -319,6 +319,110 @@ pub async fn write_export_file(path: String, payload: ExportFilePayload) -> Resu
         .map_err(|error| format!("写入导出文件失败：{error}"))
 }
 
+#[tauri::command]
+pub async fn print_to_pdf(
+    window: tauri::WebviewWindow,
+    path: String,
+    compact: bool,
+) -> Result<(), String> {
+    if path.trim().is_empty() {
+        return Err("导出路径不能为空".into());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use std::sync::Mutex;
+        use tokio::sync::oneshot;
+        use webview2_com::Microsoft::Web::WebView2::Win32::*;
+        use windows_core::{BOOL, HRESULT, Interface, PCWSTR, implement};
+
+        #[implement(ICoreWebView2PrintToPdfCompletedHandler)]
+        struct PrintHandler(Mutex<Option<oneshot::Sender<Result<(), String>>>>);
+
+        impl ICoreWebView2PrintToPdfCompletedHandler_Impl for PrintHandler_Impl {
+            fn Invoke(&self, error_code: HRESULT, is_successful: BOOL) -> windows_core::Result<()> {
+                if let Some(tx) = self.0.lock().ok().and_then(|mut lock| lock.take()) {
+                    if error_code.is_ok() && is_successful.as_bool() {
+                        let _ = tx.send(Ok(()));
+                    } else {
+                        let _ = tx.send(Err(format!("PDF 写入失败 (错误码: {error_code:?})")));
+                    }
+                }
+                Ok(())
+            }
+        }
+
+        let (tx, rx) = oneshot::channel();
+        let target_path = path.clone();
+
+        window
+            .with_webview(move |webview| unsafe {
+                let controller = match webview.controller().CoreWebView2() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = tx.send(Err(format!("获取 WebView2 实例失败：{e}")));
+                        return;
+                    }
+                };
+
+                let core10: ICoreWebView2_10 = match controller.cast() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = tx.send(Err(format!("当前系统 WebView2 不支持 PrintToPdf：{e}")));
+                        return;
+                    }
+                };
+
+                let env6: ICoreWebView2Environment6 = match webview.environment().cast() {
+                    Ok(e) => e,
+                    Err(e) => {
+                        let _ = tx.send(Err(format!("获取 WebView2 环境失败：{e}")));
+                        return;
+                    }
+                };
+
+                let settings = match env6.CreatePrintSettings() {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = tx.send(Err(format!("创建打印配置失败：{e}")));
+                        return;
+                    }
+                };
+                let _ = settings.SetOrientation(COREWEBVIEW2_PRINT_ORIENTATION_PORTRAIT);
+                let margin = if compact { 0.3 } else { 0.6 };
+                let _ = settings.SetMarginTop(margin);
+                let _ = settings.SetMarginBottom(margin);
+                let _ = settings.SetMarginLeft(margin);
+                let _ = settings.SetMarginRight(margin);
+                let _ = settings.SetShouldPrintBackgrounds(true);
+
+                let wide_path: Vec<u16> = std::ffi::OsStr::new(&target_path)
+                    .encode_wide()
+                    .chain(std::iter::once(0))
+                    .collect();
+
+                let handler: ICoreWebView2PrintToPdfCompletedHandler =
+                    PrintHandler(Mutex::new(Some(tx))).into();
+
+                if let Err(e) =
+                    core10.PrintToPdf(PCWSTR(wide_path.as_ptr()), &settings, Some(&handler))
+                {
+                    tracing::error!(error = %e, "PrintToPdf 启动失败");
+                }
+            })
+            .map_err(|e| format!("调度 WebView2 打印失败：{e}"))?;
+
+        rx.await.map_err(|_| "打印等待通道中断".to_string())?
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (window, compact);
+        Err("当前平台暂不支持原生 PDF 导出".into())
+    }
+}
+
 #[cfg(test)]
 mod export_tests {
     use super::*;

@@ -138,5 +138,14 @@ describe('desktopApi', () => {
 
     expect(invoke).toHaveBeenLastCalledWith('set_native_locale', { locale: 'en-US' })
   })
+
+  it('invokes print_to_pdf with path and compact options', async () => {
+    invoke.mockResolvedValue(undefined)
+    const { desktopApi } = await import('./desktop-api')
+
+    await desktopApi.printToPdf('C:/archive/chat.pdf', { compact: true })
+
+    expect(invoke).toHaveBeenLastCalledWith('print_to_pdf', { path: 'C:/archive/chat.pdf', compact: true })
+  })
 })
 

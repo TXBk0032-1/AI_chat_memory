@@ -67,6 +67,10 @@ candle-transformers = { version = "0.9.1" }
 hf-hub = { version = "0.4", default-features = false, features = ["tokio", "rustls-tls"] }
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.38"
+windows-core = "0.61"
+
 [patch.crates-io]
 # GTK3 pins Tauri's Linux stack to glib 0.18. Keep the compatible release and
 # backport the fix for RUSTSEC-2024-0429 until the upstream stack can use 0.20.

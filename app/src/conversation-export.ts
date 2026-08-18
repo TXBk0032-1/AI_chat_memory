@@ -1,7 +1,13 @@
 import type { Message } from './conversation'
 import { translate as t } from './i18n'
 
-export type ExportFormat = 'png' | 'jpeg' | 'md' | 'json'
+export type ExportFormat = 'png' | 'jpeg' | 'pdf' | 'md' | 'json'
+
+export type PdfExportOptions = {
+  compact: boolean
+  includeCoverPage: boolean
+  includeThinking: boolean
+}
 
 export type ConversationTurn = {
   id: string

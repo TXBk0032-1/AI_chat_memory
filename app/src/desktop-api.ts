@@ -180,6 +180,7 @@ export interface DesktopApi {
   moveDataDirectory(path: string): Promise<void>
   confirmCloseBehavior(behavior: Exclude<CloseBehavior, 'ask'>): Promise<void>
   writeExportFile(path: string, payload: ExportFilePayload): Promise<void>
+  printToPdf(path: string, options: { compact: boolean }): Promise<void>
   getCloudSyncStatus(): Promise<CloudSyncStatus>
   testCloudSyncConnection(cloudSync: CloudSyncSettings, credentials: CloudCredentialInput): Promise<CloudConnectionTestResult>
   syncNow(): Promise<CloudSyncStatus>
@@ -209,6 +210,7 @@ export const desktopApi: DesktopApi = {
   moveDataDirectory: (path) => invoke('move_data_directory', { path }),
   confirmCloseBehavior: (behavior) => invoke('confirm_close_behavior', { behavior }),
   writeExportFile: (path, payload) => invoke('write_export_file', { path, payload }),
+  printToPdf: (path, options) => invoke('print_to_pdf', { path, compact: options.compact }),
   getCloudSyncStatus: () => invoke('get_cloud_sync_status'),
   testCloudSyncConnection: (cloudSync, credentials) => invoke('test_cloud_sync_connection', { cloudSync, credentials }),
   syncNow: () => invoke('sync_now'),

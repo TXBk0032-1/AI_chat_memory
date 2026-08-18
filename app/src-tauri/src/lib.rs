@@ -157,7 +157,8 @@ pub fn run() {
             commands::cancel_semantic_work,
             commands::move_data_directory,
             commands::confirm_close_behavior,
-            commands::write_export_file
+            commands::write_export_file,
+            commands::print_to_pdf
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");

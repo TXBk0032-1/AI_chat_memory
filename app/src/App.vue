@@ -92,6 +92,8 @@ const exportImageTooLong = ref(false)
 const exportImageDisabledReason = ref('')
 const exportFormat = ref<ExportFormat>('png')
 const exportIncludeThinking = ref(false)
+const exportPdfCompact = ref(false)
+const exportPdfCoverPage = ref(false)
 const exportTurns = ref<ConversationTurn[]>([])
 const selectedExportTurnIds = ref(new Set<string>())
 const exportLockedSessionId = ref('')
@@ -423,13 +425,13 @@ async function prepareExportPreview() {
       ? t('export.contentTooLong')
       : ''
     if (exportImageTooLong.value && (exportFormat.value === 'png' || exportFormat.value === 'jpeg')) {
-      exportFormat.value = 'md'
+      exportFormat.value = 'pdf'
     }
   } catch (reason) {
     if (generation !== exportPreviewGeneration) return
     exportImageTooLong.value = true
     exportImageDisabledReason.value = t('export.preflightFailed', { reason: String(reason) })
-    if (exportFormat.value === 'png' || exportFormat.value === 'jpeg') exportFormat.value = 'md'
+    if (exportFormat.value === 'png' || exportFormat.value === 'jpeg') exportFormat.value = 'pdf'
   } finally {
     if (generation === exportPreviewGeneration) exportImageChecking.value = false
   }
@@ -467,9 +469,12 @@ async function exportSelectedConversation() {
   error.value = ''
   let succeeded = false
   try {
+    const filters = format === 'pdf'
+      ? [{ name: 'PDF Document', extensions: ['pdf'] }]
+      : [{ name: format === 'md' ? 'Markdown' : format.toUpperCase(), extensions: [format] }]
     const path = await save({
       defaultPath: filename,
-      filters: [{ name: format === 'md' ? 'Markdown' : format.toUpperCase(), extensions: [format] }],
+      filters,
     })
     if (typeof path !== 'string') return
     await ensureMessagesLoaded(selectedExportSeqs.value)
@@ -479,6 +484,17 @@ async function exportSelectedConversation() {
     if (format === 'md' || format === 'json') {
       const data = format === 'md' ? serializeMarkdown(model) : serializeJson(model)
       await desktopApi.writeExportFile(path, { encoding: 'utf8', data })
+    } else if (format === 'pdf') {
+      exportRenderModel.value = model
+      exportRenderMessages.value = messages
+      await nextTick()
+      const root = exportDocumentRef.value?.getElement()
+      if (!root) throw new Error(t('export.documentNotReady'))
+      await renderExportMermaidDiagrams(root)
+      await nextTick()
+      await localizeExportImages(root)
+      await document.fonts?.ready
+      await desktopApi.printToPdf(path, { compact: exportPdfCompact.value })
     } else {
       exportRenderModel.value = model
       exportRenderMessages.value = messages
@@ -992,6 +1008,8 @@ onBeforeUnmount(() => {
     <ExportDialog
       v-model:format="exportFormat"
       v-model:include-thinking="exportIncludeThinking"
+      v-model:compact="exportPdfCompact"
+      v-model:include-cover-page="exportPdfCoverPage"
       :visible="showExportDialog"
       :selected-count="selectedExportTurns.length"
       :busy="exportBusy"
@@ -1009,6 +1027,9 @@ onBeforeUnmount(() => {
         :messages="exportRenderMessages"
         :references="compactReferences"
         :include-thinking="exportIncludeThinking"
+        :is-pdf="exportFormat === 'pdf'"
+        :compact="exportPdfCompact"
+        :include-cover-page="exportPdfCoverPage"
       />
     </div>
     <Transition name="context-menu">
