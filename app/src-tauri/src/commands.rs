@@ -319,6 +319,30 @@ pub async fn write_export_file(path: String, payload: ExportFilePayload) -> Resu
         .map_err(|error| format!("写入导出文件失败：{error}"))
 }
 
+#[cfg(any(target_os = "windows", test))]
+const MILLIMETERS_PER_INCH: f64 = 25.4;
+#[cfg(any(target_os = "windows", test))]
+const A4_PAGE_WIDTH_INCHES: f64 = 210.0 / MILLIMETERS_PER_INCH;
+#[cfg(any(target_os = "windows", test))]
+const A4_PAGE_HEIGHT_INCHES: f64 = 297.0 / MILLIMETERS_PER_INCH;
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PdfPrintLayout {
+    page_width_inches: f64,
+    page_height_inches: f64,
+    margin_inches: f64,
+}
+
+#[cfg(any(target_os = "windows", test))]
+const fn pdf_print_layout(compact: bool) -> PdfPrintLayout {
+    PdfPrintLayout {
+        page_width_inches: A4_PAGE_WIDTH_INCHES,
+        page_height_inches: A4_PAGE_HEIGHT_INCHES,
+        margin_inches: if compact { 0.3 } else { 0.6 },
+    }
+}
+
 #[tauri::command]
 pub async fn print_to_pdf(
     window: tauri::WebviewWindow,
@@ -389,13 +413,22 @@ pub async fn print_to_pdf(
                         return;
                     }
                 };
-                let _ = settings.SetOrientation(COREWEBVIEW2_PRINT_ORIENTATION_PORTRAIT);
-                let margin = if compact { 0.3 } else { 0.6 };
-                let _ = settings.SetMarginTop(margin);
-                let _ = settings.SetMarginBottom(margin);
-                let _ = settings.SetMarginLeft(margin);
-                let _ = settings.SetMarginRight(margin);
-                let _ = settings.SetShouldPrintBackgrounds(true);
+                let layout = pdf_print_layout(compact);
+                let configure_result: windows_core::Result<()> = (|| {
+                    settings.SetOrientation(COREWEBVIEW2_PRINT_ORIENTATION_PORTRAIT)?;
+                    settings.SetPageWidth(layout.page_width_inches)?;
+                    settings.SetPageHeight(layout.page_height_inches)?;
+                    settings.SetMarginTop(layout.margin_inches)?;
+                    settings.SetMarginBottom(layout.margin_inches)?;
+                    settings.SetMarginLeft(layout.margin_inches)?;
+                    settings.SetMarginRight(layout.margin_inches)?;
+                    settings.SetShouldPrintBackgrounds(true)?;
+                    Ok(())
+                })();
+                if let Err(error) = configure_result {
+                    let _ = tx.send(Err(format!("配置 PDF 打印参数失败：{error}")));
+                    return;
+                }
 
                 let wide_path: Vec<u16> = std::ffi::OsStr::new(&target_path)
                     .encode_wide()
@@ -426,6 +459,26 @@ pub async fn print_to_pdf(
 #[cfg(test)]
 mod export_tests {
     use super::*;
+
+    #[test]
+    fn pdf_print_layout_uses_a4_and_density_specific_margins() {
+        assert_eq!(
+            pdf_print_layout(true),
+            PdfPrintLayout {
+                page_width_inches: 210.0 / 25.4,
+                page_height_inches: 297.0 / 25.4,
+                margin_inches: 0.3,
+            }
+        );
+        assert_eq!(
+            pdf_print_layout(false),
+            PdfPrintLayout {
+                page_width_inches: 210.0 / 25.4,
+                page_height_inches: 297.0 / 25.4,
+                margin_inches: 0.6,
+            }
+        );
+    }
 
     #[tokio::test]
     async fn writes_utf8_and_base64_exports() {

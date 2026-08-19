@@ -347,12 +347,15 @@ i.deepseek { background: #5273e6; } i.doubao { background: #e36f53; } i.kimi { b
 .export-image-fallback { display: block; margin: 10px 0; padding: 10px; color: #697277; background: #f3f5f5; overflow-wrap: anywhere; }
 
 @media print {
+  html, body, #app, .app-frame { min-width: 0 !important; min-height: 0 !important; overflow: visible !important; }
   body { background: #ffffff !important; color: #202629 !important; }
   body > * { visibility: hidden !important; }
+  .app-frame { display: block !important; }
+  .app-frame > :not(.export-document-host) { display: none !important; }
   .export-document-host, .export-document-host * { visibility: visible !important; }
-  .export-document-host { position: static !important; left: 0 !important; top: 0 !important; width: 100% !important; max-width: 100% !important; z-index: auto !important; pointer-events: auto !important; }
+  .export-document-host { display: block !important; position: static !important; left: 0 !important; top: 0 !important; width: 100% !important; max-width: 100% !important; z-index: auto !important; pointer-events: auto !important; }
   .export-document { width: 100% !important; padding: 0 !important; margin: 0 !important; box-shadow: none !important; }
-  @page { size: A4 portrait; margin: 15mm; }
+  @page { size: A4 portrait; }
   .export-cover-page { page-break-after: always !important; break-after: page !important; min-height: 85vh !important; border-bottom: none !important; }
   .export-message, .export-thinking, .mermaid-diagram, pre, .katex-display { page-break-inside: avoid !important; break-inside: avoid !important; }
 }

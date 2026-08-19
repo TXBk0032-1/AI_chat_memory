@@ -3,9 +3,26 @@ import { describe, expect, it } from 'vitest'
 
 const styleSource = readFileSync(new URL('../src/style.css', import.meta.url), 'utf8')
 
-function ruleFor(selector: string) {
+function ruleFor(selector: string, source = styleSource) {
   const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return styleSource.match(new RegExp(`${escapedSelector}\\s*\\{([^}]*)\\}`))?.[1]
+  return source.match(new RegExp(`(?:^|})\\s*${escapedSelector}\\s*\\{([^}]*)\\}`))?.[1]
+}
+
+function blockFor(atRule: string) {
+  const start = styleSource.indexOf(atRule)
+  if (start < 0) return undefined
+
+  const openingBrace = styleSource.indexOf('{', start + atRule.length)
+  if (openingBrace < 0) return undefined
+
+  let depth = 1
+  for (let index = openingBrace + 1; index < styleSource.length; index += 1) {
+    if (styleSource[index] === '{') depth += 1
+    if (styleSource[index] === '}') depth -= 1
+    if (depth === 0) return styleSource.slice(openingBrace + 1, index)
+  }
+
+  return undefined
 }
 
 describe('search toolbar layout', () => {
@@ -48,5 +65,36 @@ describe('search toolbar layout', () => {
 
     expect(searchField).toMatch(/\bmin-width:\s*0\s*;/)
     expect(searchField).toMatch(/\bwidth:\s*min\(460px,\s*48vw\)\s*;/)
+  })
+})
+
+describe('print export layout', () => {
+  it('removes the application shell from print flow and expands the export document', () => {
+    const printBlock = blockFor('@media print')
+    expect(printBlock).toBeDefined()
+
+    const rootLayout = ruleFor('html, body, #app, .app-frame', printBlock)
+    const appFrame = ruleFor('.app-frame', printBlock)
+    const nonExportContent = ruleFor('.app-frame > :not(.export-document-host)', printBlock)
+    const exportHost = ruleFor('.export-document-host', printBlock)
+
+    expect(rootLayout).toMatch(/\bmin-width:\s*0\s*!important\s*;/)
+    expect(rootLayout).toMatch(/\bmin-height:\s*0\s*!important\s*;/)
+    expect(rootLayout).toMatch(/\boverflow:\s*visible\s*!important\s*;/)
+    expect(appFrame).toMatch(/\bdisplay:\s*block\s*!important\s*;/)
+    expect(nonExportContent).toMatch(/\bdisplay:\s*none\s*!important\s*;/)
+    expect(exportHost).toMatch(/\bdisplay:\s*block\s*!important\s*;/)
+    expect(exportHost).toMatch(/\bposition:\s*static\s*!important\s*;/)
+    expect(exportHost).toMatch(/\bwidth:\s*100%\s*!important\s*;/)
+    expect(exportHost).toMatch(/\bmax-width:\s*100%\s*!important\s*;/)
+  })
+
+  it('leaves page margins to the native WebView2 print settings', () => {
+    const printBlock = blockFor('@media print')
+    expect(printBlock).toBeDefined()
+
+    const page = ruleFor('@page', printBlock)
+    expect(page).toMatch(/\bsize:\s*A4\s+portrait\s*;/)
+    expect(page).not.toMatch(/\bmargin\s*:/)
   })
 })
