@@ -7,6 +7,7 @@ import { translate as t } from './i18n'
 const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true }).use(texmath, {
   engine: katex,
   delimiters: ['dollars', 'brackets'],
+  katexOptions: { strict: 'ignore', throwOnError: false },
 })
 
 const defaultFence = markdown.renderer.rules.fence

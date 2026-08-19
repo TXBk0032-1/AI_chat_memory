@@ -96,7 +96,7 @@ if ($FrontendAction -eq "build") {
     Write-Host "==> Build frontend" -ForegroundColor Cyan
     Push-Location $App
     try {
-        & npm run build
+        & npm.cmd run build
         if ($LASTEXITCODE -ne 0) { throw "Frontend build failed with exit code $LASTEXITCODE" }
     } finally {
         Pop-Location

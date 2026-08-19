@@ -12,7 +12,7 @@ export function useTheme(settings: Ref<SettingsModel>, onApplied: (animate: bool
 
   function commitTheme(preference: ThemePreference, animate = true) {
     const theme = effectiveTheme(preference)
-    void setNativeTheme(theme).catch((error) => console.error('Failed to update native window theme', error))
+    void setNativeTheme(theme).catch(() => {})
     if (document.documentElement.dataset.theme === theme) {
       document.documentElement.style.colorScheme = theme
       return

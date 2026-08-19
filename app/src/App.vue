@@ -28,6 +28,7 @@ import { useVirtualizer } from '@tanstack/vue-virtual'
 import 'katex/dist/katex.min.css'
 import MessageBlock from './MessageBlock.vue'
 import BranchOverviewView from './BranchOverview.vue'
+import AppSelect from './components/AppSelect.vue'
 import AppSidebar from './components/AppSidebar.vue'
 import AppTitleBar from './components/AppTitleBar.vue'
 import SessionList from './components/SessionList.vue'
@@ -222,6 +223,11 @@ const {
   }
 })
 const conversationSearch = useConversationSearch(selected, committedQuery, searchMode, desktopApi)
+const searchModeOptions = computed(() => [
+  { value: 'hybrid', label: t('searchMode.hybrid') },
+  { value: 'semantic', label: t('searchMode.semantic') },
+  { value: 'keyword', label: t('searchMode.keyword') },
+])
 const cloudSync = useCloudSync()
 const { hits: sessionSearchHits, index: searchHitIndex, loop: loopSearch } = conversationSearch
 const loadSearchHits = conversationSearch.load
@@ -514,14 +520,24 @@ async function exportSelectedConversation() {
 async function selectSession(id: string) {
   if (exportBusy.value) return
   if (!detail.shouldOpen(id)) return
+  const tStart = performance.now()
+  console.log(`%c[PERF:SESSION_PIPELINE] >>> selectSession("${id}") trigger started <<<`, 'color: #7c3aed; font-weight: bold')
+  const t1 = performance.now()
   persistReadingPosition()
   cancelExportSelection()
   error.value = ''
   conversationSearch.reset()
   branches.reset()
+  const tReset = performance.now()
+  console.debug(`[PERF:SESSION_PIPELINE] State resets: ${(tReset - t1).toFixed(2)}ms`)
+
   const result = await detail.open(id)
+  const tDetailOpen = performance.now()
+  console.log(`[PERF:SESSION_PIPELINE] detail.open("${id}") finished in ${(tDetailOpen - tReset).toFixed(2)}ms`)
+
   if (!result || !selected.value) {
     if (detail.error.value) error.value = detail.error.value
+    console.warn(`[PERF:SESSION_PIPELINE] selectSession("${id}") returned empty/error in ${(tDetailOpen - tStart).toFixed(2)}ms`)
     return
   }
   const { readingPosition, generation } = result
@@ -529,25 +545,48 @@ async function selectSession(id: string) {
   try {
     let overview: BranchOverview | null = null
     if (opened.has_branches) {
+      const tBranchStart = performance.now()
       try {
         overview = await desktopApi.getSessionBranches(id)
+        console.debug(`[PERF:SESSION_PIPELINE] getSessionBranches("${id}") took ${(performance.now() - tBranchStart).toFixed(2)}ms`)
       } catch (reason) {
         branchesError.value = String(reason)
+        console.error(`[PERF:SESSION_PIPELINE] getSessionBranches failed:`, reason)
       }
     }
-    if (!detail.isCurrent(generation)) return
+    if (!detail.isCurrent(generation)) {
+      console.warn(`[PERF:SESSION_PIPELINE] Generation superseded for "${id}" (generation=${generation})`)
+      return
+    }
     branches.setOverview(overview)
     expandedThinking.value = new Set()
     searchHitIndex.value = -1
+
+    const tNextTick1Start = performance.now()
     await nextTick()
+    const tNextTick1End = performance.now()
+    console.debug(`[PERF:SESSION_PIPELINE] Vue nextTick(1) DOM mount: ${(tNextTick1End - tNextTick1Start).toFixed(2)}ms`)
+
     const readingIndex = branchReadingIndex(displayedMessageSeqs.value, readingPosition?.seq ?? null, opened.start_seq)
     messageVirtualizer.value.scrollToIndex(readingIndex, { align: 'start' })
+
+    const tNextTick2Start = performance.now()
     await nextTick()
+    const tNextTick2End = performance.now()
+    console.debug(`[PERF:SESSION_PIPELINE] Vue nextTick(2) Virtualizer scroll: ${(tNextTick2End - tNextTick2Start).toFixed(2)}ms`)
+
     if (readingPosition?.offset) messageListRef.value?.scrollBy({ top: readingPosition.offset })
     void loadSearchHits()
     detail.scheduleBackgroundLoad(generation)
+
+    const tTotal = performance.now() - tStart
+    console.log(
+      `%c[PERF:SESSION_PIPELINE] <<< selectSession("${id}") COMPLETE in ${tTotal.toFixed(2)}ms (displayed=${displayedMessageSeqs.value.length} msgs) >>>`,
+      'color: #7c3aed; font-weight: bold',
+    )
   } catch (reason) {
     error.value = String(reason)
+    console.error(`[PERF:SESSION_PIPELINE] selectSession error after ${(performance.now() - tStart).toFixed(2)}ms:`, reason)
   }
 }
 
@@ -594,6 +633,19 @@ async function navigateSearch(direction: number) {
 }
 
 const loadBranches = branches.load
+function handleModePointerDown(targetMode: 'conversation' | 'branches', event: PointerEvent) {
+  if (event.button !== 0) return
+  console.log(`%c[DETAIL:MODE_POINTER_DOWN] target="${targetMode}"`, 'color: #ea580c; font-weight: bold')
+  if (targetMode === 'conversation') detailMode.value = 'conversation'
+  else showBranches()
+}
+
+function handleModeSwitch(targetMode: 'conversation' | 'branches') {
+  console.log(`%c[DETAIL:MODE_CLICK] target="${targetMode}"`, 'color: #ea580c; font-weight: bold')
+  if (targetMode === 'conversation') detailMode.value = 'conversation'
+  else showBranches()
+}
+
 const showBranches = branches.show
 
 function toggleThinking(messageId: string) {
@@ -663,15 +715,29 @@ function toggleDetailMenu() {
 function preventRapidControlClick(event: MouseEvent) {
   const target = event.target instanceof Element ? event.target : null
   const control = target?.closest('button, a[href], select, .switch, .close-options label, [role="button"], [role="menuitem"], [role="radio"]')
-  if (!control) return
   const now = performance.now()
-  const previous = lastControlClicks.get(control) ?? -Infinity
-  if (now - previous < clickDebounceMs) {
-    event.preventDefault()
-    event.stopImmediatePropagation()
-    return
+  if (control) {
+    const tagInfo = `${control.tagName.toLowerCase()}${control.className ? '.' + String(control.className).trim().replace(/\s+/g, '.') : ''}`
+    // Navigation items, tabs, and list rows must never be swallowed by click debouncing
+    const isNavigation = control.closest('.session-pane, .sidebar, .segmented-control, .source-picker, .nav-item') !== null
+    if (isNavigation) {
+      console.log(`%c[PERF:CLICK:NAV] Click on <${tagInfo}> (navigation, debounce bypassed)`, 'color: #16a34a')
+      return
+    }
+    const previous = lastControlClicks.get(control) ?? -Infinity
+    const diff = now - previous
+    if (diff < clickDebounceMs) {
+      console.warn(`%c[PERF:CLICK:DEBOUNCED] Click on <${tagInfo}> intercepted (${diff.toFixed(2)}ms < ${clickDebounceMs}ms debounce)`, 'color: #ea580c; font-weight: bold')
+      event.preventDefault()
+      event.stopImmediatePropagation()
+      return
+    }
+    console.log(`%c[PERF:CLICK:PASS] Click on <${tagInfo}> (interval: ${diff === Infinity ? 'first' : diff.toFixed(2) + 'ms'})`, 'color: #16a34a')
+    lastControlClicks.set(control, now)
+  } else if (target) {
+    const tagInfo = `${target.tagName.toLowerCase()}${target.className ? '.' + String(target.className).trim().replace(/\s+/g, '.') : ''}`
+    console.debug(`[PERF:CLICK:NON_CONTROL] Click on <${tagInfo}> at (${event.clientX}, ${event.clientY})`)
   }
-  lastControlClicks.set(control, now)
 }
 
 function handleContextMenu(event: MouseEvent) {
@@ -764,6 +830,23 @@ onMounted(async () => {
   window.addEventListener('keydown', handleContextMenuKey)
   document.addEventListener('click', preventRapidControlClick, true)
   document.addEventListener('scroll', hideContextMenu, true)
+
+  window.addEventListener('pointerdown', (e) => {
+    const target = e.target instanceof Element ? e.target : null
+    const tag = target ? `${target.tagName.toLowerCase()}${target.className ? '.' + String(target.className).trim().replace(/\s+/g, '.') : ''}` : 'null'
+    console.debug(`[INPUT:POINTER_DOWN] at (${e.clientX}, ${e.clientY}) on <${tag}>`)
+  }, true)
+
+  let lastHeartbeat = performance.now()
+  window.setInterval(() => {
+    const now = performance.now()
+    const delta = now - lastHeartbeat
+    if (delta > 200) {
+      console.warn(`%c[PERF:MAIN_THREAD_JANK] Event loop was delayed by ${(delta - 100).toFixed(1)}ms (main thread stutter)`, 'color: #dc2626; font-weight: bold')
+    }
+    lastHeartbeat = now
+  }, 100)
+
   // Kick off the first session list immediately so the shell is never empty while
   // settings / API status catch up in parallel.
   const sessionsReady = loadSessions()
@@ -784,7 +867,7 @@ onMounted(async () => {
   await Promise.allSettled([settingsReady, refreshApiStatus(), sessionsReady])
   statusTimer = window.setInterval(refreshApiStatus, 3000)
 })
-watch([messageSlots, expandedThinking, detailMode], () => { void renderMermaidDiagrams() }, { flush: 'post' })
+watch([expandedThinking, detailMode], () => { void renderMermaidDiagrams() }, { flush: 'post' })
 watch(committedQuery, () => {
   searchHitIndex.value = -1
   void loadSearchHits()
@@ -838,11 +921,13 @@ onBeforeUnmount(() => {
         <div class="search-stack">
           <div class="search-row">
             <label class="search-field"><Search :size="17" /><input v-model="query" :placeholder="t('app.searchPlaceholder')" @input="searchElapsed=null" @keyup.enter="loadSessions()" /><button v-if="query" :title="t('app.clearSearch')" @click="query=''; searchElapsed=null; loadSessions()"><X :size="15" /></button></label>
-            <select class="search-mode" :value="searchMode" @change="setSearchMode(($event.target as HTMLSelectElement).value as any)">
-              <option value="hybrid">{{ t('searchMode.hybrid') }}</option>
-              <option value="semantic">{{ t('searchMode.semantic') }}</option>
-              <option value="keyword">{{ t('searchMode.keyword') }}</option>
-            </select>
+            <AppSelect
+              class="search-mode"
+              :model-value="searchMode"
+              :options="searchModeOptions"
+              :aria-label="t('settings.defaultMode')"
+              @update:model-value="setSearchMode($event as any)"
+            />
           </div>
           <Transition name="search-summary"><div v-if="searchElapsed !== null" class="search-summary">{{ t('app.searchSummary', { count: total, milliseconds: searchElapsed.toFixed(0), mode: t(`searchMode.${searchMode}`), status: semanticStatus }) }}</div></Transition>
         </div>
@@ -895,8 +980,8 @@ onBeforeUnmount(() => {
             </div>
             <div v-if="hasBranches" :class="['segmented-control', { branches: detailMode === 'branches' }]">
               <span class="segmented-highlight" aria-hidden="true"></span>
-              <button :class="{ active: detailMode === 'conversation' }" :disabled="exportSelecting" @click="detailMode='conversation'"><MessageSquareText :size="15" />{{ t('app.conversation') }}</button>
-              <button :class="{ active: detailMode === 'branches' }" :disabled="exportSelecting" @click="showBranches"><GitBranch :size="15" />{{ t('app.branchPreview') }}</button>
+              <button :class="{ active: detailMode === 'conversation' }" :disabled="exportSelecting" @pointerdown="handleModePointerDown('conversation', $event)" @click="handleModeSwitch('conversation')"><MessageSquareText :size="15" />{{ t('app.conversation') }}</button>
+              <button :class="{ active: detailMode === 'branches' }" :disabled="exportSelecting" @pointerdown="handleModePointerDown('branches', $event)" @click="handleModeSwitch('branches')"><GitBranch :size="15" />{{ t('app.branchPreview') }}</button>
             </div>
             <div v-if="exportSelecting" class="export-selection-toolbar">
               <strong>{{ t('app.selectedQas', { selected: selectedExportTurns.length, total: exportTurns.length }) }}</strong>

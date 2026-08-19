@@ -19,8 +19,15 @@ export function usePaneResize() {
     sessionPaneWidth.value = Math.min(Math.max(resizeStartWidth + event.clientX - resizeStartX, 340), workspaceWidth - 380)
   }
 
-  function stopPaneResize() {
+  function stopPaneResize(event?: PointerEvent) {
     resizingPanes.value = false
+    if (event?.currentTarget instanceof HTMLElement && event.currentTarget.hasPointerCapture(event.pointerId)) {
+      try {
+        event.currentTarget.releasePointerCapture(event.pointerId)
+      } catch {
+        // ignore
+      }
+    }
   }
 
   return { sessionPaneWidth, resizingPanes, startPaneResize, resizePanes, stopPaneResize }

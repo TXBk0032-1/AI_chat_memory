@@ -46,8 +46,6 @@ pub fn run() {
                     eprintln!("failed to initialize file logging: {error}");
                 }
             }
-            tracing::info!(app_data_dir=%data_dir.display(), "application starting");
-
             #[cfg(target_os = "windows")]
             if let Some(window) = app.get_webview_window("main") {
                 match window_vibrancy::apply_acrylic(&window, Some((18, 18, 18, 110))) {
@@ -55,6 +53,7 @@ pub fn run() {
                     Err(error) => tracing::warn!(%error, "acrylic window effect unavailable"),
                 }
             }
+            tracing::info!(app_data_dir=%data_dir.display(), "application starting");
 
             let executable_dir = std::env::current_exe()
                 .ok()

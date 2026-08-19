@@ -14,6 +14,7 @@ import {
   SlidersHorizontal,
   Sun,
 } from 'lucide-vue-next'
+import AppSelect, { type SelectOption } from './AppSelect.vue'
 import CloudSyncSettings from './CloudSyncSettings.vue'
 import { cloudSyncProfileSnapshot, cloudSyncProfilesEqual } from '../cloud-sync-profile'
 import type {
@@ -252,6 +253,49 @@ if (!settings.value.semantic_search.local.device) {
 if (!settings.value.semantic_search.local.dtype) {
   settings.value.semantic_search.local.dtype = 'auto' as LocalEmbeddingDType
 }
+
+const languageOptions = computed<SelectOption<LanguagePreference>[]>(() => [
+  { value: 'system', label: t('settings.language.system') },
+  { value: 'zh-CN', label: t('settings.language.zhCN') },
+  { value: 'en-US', label: t('settings.language.enUS') },
+])
+
+const closeBehaviorOptions = computed<SelectOption<string>[]>(() => [
+  { value: 'ask', label: t('settings.closeAsk') },
+  { value: 'hide_to_tray', label: t('settings.closeTray') },
+  { value: 'exit', label: t('settings.closeExit') },
+])
+
+const trayClickOptions = computed<SelectOption<string>[]>(() => [
+  { value: 'show_menu', label: t('settings.trayMenu') },
+  { value: 'open_window', label: t('settings.trayOpen') },
+  { value: 'no_action', label: t('settings.trayNone') },
+])
+
+const searchModeOptions = computed<SelectOption<SearchMode>[]>(() => [
+  { value: 'hybrid', label: t('searchMode.hybrid') },
+  { value: 'semantic', label: t('searchMode.semantic') },
+  { value: 'keyword', label: t('searchMode.keyword') },
+])
+
+const backendOptions = computed<SelectOption<EmbeddingBackendKind>[]>(() => [
+  { value: 'local', label: t('settings.localBackend') },
+  { value: 'ollama', label: 'Ollama' },
+  { value: 'llama_cpp', label: 'llama.cpp' },
+  { value: 'openai_compatible', label: t('settings.openAiCompatible') },
+])
+
+const deviceOptions = computed<SelectOption<LocalEmbeddingDevice>[]>(() => [
+  { value: 'auto', label: t('settings.automatic') },
+  { value: 'cuda', label: 'CUDA' },
+  { value: 'cpu', label: 'CPU' },
+])
+
+const dtypeOptions = computed<SelectOption<LocalEmbeddingDType>[]>(() => [
+  { value: 'auto', label: t('settings.automatic') },
+  { value: 'f16', label: 'F16' },
+  { value: 'f32', label: 'F32' },
+])
 </script>
 
 <template>
@@ -327,19 +371,20 @@ if (!settings.value.semantic_search.local.dtype) {
             <div><h3>{{ t('settings.language.title') }}</h3><p>{{ t('settings.language.description') }}</p></div>
             <label>
               <span>{{ t('settings.language.title') }}</span>
-              <select v-model="settings.language" @change="emit('previewLanguage', settings.language)">
-                <option value="system">{{ t('settings.language.system') }}</option>
-                <option value="zh-CN">{{ t('settings.language.zhCN') }}</option>
-                <option value="en-US">{{ t('settings.language.enUS') }}</option>
-              </select>
+              <AppSelect
+                v-model="settings.language"
+                :options="languageOptions"
+                block
+                @update:model-value="emit('previewLanguage', settings.language)"
+              />
             </label>
           </section>
           <section class="setting-group">
             <div class="setting-row"><div><h3>{{ t('settings.dataLocation') }}</h3><p class="path-value">{{ settings.data_directory || t('settings.defaultDataLocation') }}</p></div><button class="secondary-button" @click="emit('changeDataDirectory')">{{ t('settings.changeLocation') }}</button></div>
           </section>
           <section class="setting-group behavior-settings">
-            <label><span>{{ t('settings.closeBehavior') }}</span><select v-model="settings.close_behavior"><option value="ask">{{ t('settings.closeAsk') }}</option><option value="hide_to_tray">{{ t('settings.closeTray') }}</option><option value="exit">{{ t('settings.closeExit') }}</option></select></label>
-            <label><span>{{ t('settings.trayClick') }}</span><select v-model="settings.tray_click_behavior"><option value="show_menu">{{ t('settings.trayMenu') }}</option><option value="open_window">{{ t('settings.trayOpen') }}</option><option value="no_action">{{ t('settings.trayNone') }}</option></select></label>
+            <label><span>{{ t('settings.closeBehavior') }}</span><AppSelect v-model="settings.close_behavior" :options="closeBehaviorOptions" block /></label>
+            <label><span>{{ t('settings.trayClick') }}</span><AppSelect v-model="settings.tray_click_behavior" :options="trayClickOptions" block /></label>
           </section>
             </section>
             <section
@@ -360,38 +405,39 @@ if (!settings.value.semantic_search.local.dtype) {
             <div class="semantic-settings" v-if="settings.semantic_search.enabled">
               <label>
                 <span>{{ t('settings.defaultMode') }}</span>
-                <select :value="settings.semantic_search.default_mode" @change="setMode(($event.target as HTMLSelectElement).value as SearchMode)">
-                  <option value="hybrid">{{ t('searchMode.hybrid') }}</option>
-                  <option value="semantic">{{ t('searchMode.semantic') }}</option>
-                  <option value="keyword">{{ t('searchMode.keyword') }}</option>
-                </select>
+                <AppSelect
+                  :model-value="settings.semantic_search.default_mode"
+                  :options="searchModeOptions"
+                  block
+                  @update:model-value="setMode($event as SearchMode)"
+                />
               </label>
               <label>
                 <span>{{ t('settings.embeddingBackend') }}</span>
-                <select :value="settings.semantic_search.backend" @change="setBackend(($event.target as HTMLSelectElement).value as EmbeddingBackendKind)">
-                  <option value="local">{{ t('settings.localBackend') }}</option>
-                  <option value="ollama">Ollama</option>
-                  <option value="llama_cpp">llama.cpp</option>
-                  <option value="openai_compatible">{{ t('settings.openAiCompatible') }}</option>
-                </select>
+                <AppSelect
+                  :model-value="settings.semantic_search.backend"
+                  :options="backendOptions"
+                  block
+                  @update:model-value="setBackend($event as EmbeddingBackendKind)"
+                />
               </label>
               <template v-if="settings.semantic_search.backend === 'local'">
                 <label><span>{{ t('settings.modelId') }}</span><input v-model="settings.semantic_search.local.model" /></label>
                 <label>
                   <span>{{ t('settings.device') }}</span>
-                  <select v-model="settings.semantic_search.local.device">
-                    <option value="auto">{{ t('settings.automatic') }}</option>
-                    <option value="cuda">CUDA</option>
-                    <option value="cpu">CPU</option>
-                  </select>
+                  <AppSelect
+                    v-model="settings.semantic_search.local.device"
+                    :options="deviceOptions"
+                    block
+                  />
                 </label>
                 <label>
                   <span>{{ t('settings.precision') }}</span>
-                  <select v-model="settings.semantic_search.local.dtype">
-                    <option value="auto">{{ t('settings.automatic') }}</option>
-                    <option value="f16">F16</option>
-                    <option value="f32">F32</option>
-                  </select>
+                  <AppSelect
+                    v-model="settings.semantic_search.local.dtype"
+                    :options="dtypeOptions"
+                    block
+                  />
                 </label>
                 <p class="path-value">{{ t('settings.localDirectory', { path: semanticStatus?.local_model_path || settings.semantic_search.local.model_path || t('settings.notPrepared') }) }}</p>
                 <p class="path-value">{{ t('settings.downloadSource', { model: settings.semantic_search.local.model }) }}</p>

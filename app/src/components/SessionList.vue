@@ -31,13 +31,24 @@ function formatDate(value?: string) {
   if (!value) return '-'
   return localizedDate(value, currentLocale(), true)
 }
+
+function handleSessionPointerDown(id: string, event: PointerEvent) {
+  if (event.button !== 0) return
+  console.log(`%c[SESSION_LIST:POINTER_DOWN_TRIGGER] id="${id}"`, 'color: #9333ea; font-weight: bold')
+  emit('select', id)
+}
+
+function handleSessionClick(id: string) {
+  console.log(`%c[SESSION_LIST:ROW_CLICK] id="${id}"`, 'color: #9333ea; font-weight: bold')
+  emit('select', id)
+}
 </script>
 
 <template>
   <div class="session-pane">
     <div class="table-head"><span>{{ t('session.conversation') }}</span><span>{{ t('session.source') }}</span><span>{{ t('session.updated') }}</span></div>
     <div v-if="loading && !sessions.length" class="loading-state"><LoaderCircle class="spinning" :size="22" /><span>{{ t('session.reading') }}</span></div>
-    <button v-for="session in sessions" :key="session.id" :class="['session-row', { selected: selectedId === session.id }]" @click="emit('select', session.id)">
+    <button v-for="session in sessions" :key="session.id" :class="['session-row', { selected: selectedId === session.id }]" @pointerdown="handleSessionPointerDown(session.id, $event)" @click="handleSessionClick(session.id)">
       <span class="session-title"><strong v-html="highlightTitle(session.title)"></strong></span>
       <span class="platform-cell"><i :class="session.platform"></i>{{ platformName(session.platform) }}</span>
       <time>{{ formatDate(session.updated_at) }}</time>

@@ -34,6 +34,7 @@ export function useMermaidRenderer(effectiveTheme: () => 'light' | 'dark') {
     await nextTick()
     const diagrams = [...document.querySelectorAll<HTMLElement>('.mermaid-diagram:not([data-rendered])')]
     if (!diagrams.length) return
+    const t0 = performance.now()
     const mermaid = await loadMermaid()
     for (const [index, element] of diagrams.entries()) {
       if (version !== renderVersion) return
@@ -50,6 +51,7 @@ export function useMermaidRenderer(effectiveTheme: () => 'light' | 'dark') {
         element.title = String(reason)
       }
     }
+    console.debug(`[PERF:MERMAID] Rendered ${diagrams.length} diagrams in ${(performance.now() - t0).toFixed(2)}ms`)
   }
 
   async function renderExportMermaidDiagrams(root: HTMLElement) {

@@ -51,7 +51,10 @@ export function useSessionDetail(api: DesktopApi = desktopApi) {
   }
 
   async function open(id: string): Promise<{ readingPosition: ReadingPosition | null; generation: number } | null> {
-    if (!shouldOpen(id)) return null
+    if (!shouldOpen(id)) {
+      console.debug(`[PERF:DETAIL] shouldOpen(${id}) rejected: openingId=${openingId.value}, selectedId=${selected.value?.id}`)
+      return null
+    }
     cancelPendingWork()
     const requestGeneration = generation
     const readingPosition = loadReadingPosition(id)
@@ -60,16 +63,29 @@ export function useSessionDetail(api: DesktopApi = desktopApi) {
     loading.value = true
     backgroundLoadFailed.value = false
     error.value = ''
+    const t0 = performance.now()
+    console.log(`%c[PERF:DETAIL] open(${id}) started (generation=${requestGeneration})`, 'color: #0284c7; font-weight: bold')
     try {
       const opened = await api.openSession(id, readingPosition?.seq ?? null)
-      if (requestGeneration !== generation) return null
+      const tIpc = performance.now()
+      if (requestGeneration !== generation) {
+        console.warn(`[PERF:DETAIL] open(${id}) discarded due to generation mismatch (req: ${requestGeneration}, cur: ${generation}) in ${(tIpc - t0).toFixed(2)}ms`)
+        return null
+      }
       selected.value = opened
+      const tMergeStart = performance.now()
       messageSlots.value = mergeMessageBatch(Array.from({ length: opened.message_count }), opened.messages)
+      const tMergeEnd = performance.now()
+      console.log(
+        `%c[PERF:DETAIL] open(${id}) completed: IPC=${(tIpc - t0).toFixed(2)}ms, merge=${(tMergeEnd - tMergeStart).toFixed(2)}ms, initialMsgs=${opened.messages.length}/${opened.message_count}`,
+        'color: #0284c7',
+      )
       return { readingPosition, generation: requestGeneration }
     } catch (reason) {
       if (requestGeneration === generation) {
         openFailed.value = true
         error.value = String(reason)
+        console.error(`[PERF:DETAIL] open(${id}) failed after ${(performance.now() - t0).toFixed(2)}ms:`, reason)
       }
       return null
     } finally {
@@ -87,10 +103,16 @@ export function useSessionDetail(api: DesktopApi = desktopApi) {
     const batchKey = `${sessionId}:${normalizedStart}`
     const pending = pendingBatches.get(batchKey)
     if (pending) return pending
+    const t0 = performance.now()
     const request = (async () => {
       const messages = await api.getSessionMessages(sessionId, normalizedStart, messageBatchSize)
+      const tIpc = performance.now()
       if (requestGeneration !== generation || selected.value?.id !== sessionId) return false
       messageSlots.value = mergeMessageBatch(messageSlots.value, messages)
+      const tEnd = performance.now()
+      console.debug(
+        `[PERF:DETAIL:BATCH] fetchBatch(${sessionId}, seq=${normalizedStart}) done: IPC=${(tIpc - t0).toFixed(2)}ms, total=${(tEnd - t0).toFixed(2)}ms, count=${messages.length}`,
+      )
       return messages.length > 0
     })().finally(() => pendingBatches.delete(batchKey))
     pendingBatches.set(batchKey, request)
@@ -107,7 +129,10 @@ export function useSessionDetail(api: DesktopApi = desktopApi) {
     backgroundTimer = setTimeout(async () => {
       if (requestGeneration !== generation) return
       const startSeq = nextMissingBatch()
-      if (startSeq === null) return
+      if (startSeq === null) {
+        console.debug(`[PERF:DETAIL:BG] all background messages loaded for ${selected.value?.id}`)
+        return
+      }
       try {
         await fetchBatch(startSeq, requestGeneration)
         scheduleBackgroundLoad(requestGeneration)
@@ -115,9 +140,10 @@ export function useSessionDetail(api: DesktopApi = desktopApi) {
         if (requestGeneration === generation) {
           backgroundLoadFailed.value = true
           error.value = t('errors.backgroundLoad', { reason: String(reason) })
+          console.error(`[PERF:DETAIL:BG] background load failed at seq ${startSeq}:`, reason)
         }
       }
-    }, 16)
+    }, 120)
   }
 
   function retryBackgroundLoad() {

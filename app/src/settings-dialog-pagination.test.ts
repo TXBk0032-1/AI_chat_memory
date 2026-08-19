@@ -3,7 +3,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { createApp, defineComponent, h, nextTick, ref } from 'vue'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import SettingsDialog from './components/SettingsDialog.vue'
 import type { LanguagePreference, SettingsModel } from './desktop-api'
 import { setLanguagePreference, setLocale } from './i18n'
@@ -57,12 +57,22 @@ function buttonWithText(root: ParentNode, text: string): HTMLButtonElement {
   return button
 }
 
-function selectWithLabel(root: ParentNode, text: string): HTMLSelectElement {
+function selectWithLabel(root: ParentNode, text: string): HTMLButtonElement {
   const label = [...root.querySelectorAll<HTMLLabelElement>('label')]
     .find((candidate) => candidate.textContent?.includes(text))
-  const select = label?.querySelector<HTMLSelectElement>('select')
-  if (!select) throw new Error(`Missing select labelled "${text}"`)
-  return select
+  const trigger = label?.querySelector<HTMLButtonElement>('.app-select__trigger')
+  if (!trigger) throw new Error(`Missing select labelled "${text}"`)
+  return trigger
+}
+
+async function pickSelectOption(trigger: HTMLButtonElement, optionText: string) {
+  trigger.click()
+  await nextTick()
+  const option = [...document.querySelectorAll<HTMLButtonElement>('.app-select__option')]
+    .find((candidate) => candidate.textContent?.includes(optionText))
+  if (!option) throw new Error(`Missing option with text "${optionText}"`)
+  option.click()
+  await nextTick()
 }
 
 function mountDialog() {
@@ -78,7 +88,7 @@ function mountDialog() {
       visible: visible.value,
       secretCopied: false,
       settings,
-      originText: 'https://example.test',
+      originText: 'http://127.0.0.1:19820',
       onClose: close,
       onSave: save,
       onPreviewLanguage: previewLanguage,
@@ -90,18 +100,19 @@ function mountDialog() {
   return {
     root: document.body,
     visible,
+    settings,
     close,
     save,
     previewLanguage,
-    settings,
-    unmount() {
-      app.unmount()
-      document.body.innerHTML = ''
-    },
+    unmount: () => app.unmount(),
   }
 }
 
 describe('settings dialog pagination', () => {
+  afterEach(() => {
+    document.body.innerHTML = ''
+  })
+
   it('switches one labelled panel at a time and retains shared form actions', async () => {
     const harness = mountDialog()
     try {
@@ -117,8 +128,7 @@ describe('settings dialog pagination', () => {
       expect(semanticPanel.style.display).toBe('none')
 
       const closeBehavior = selectWithLabel(generalPanel, '关闭窗口后')
-      closeBehavior.value = 'exit'
-      closeBehavior.dispatchEvent(new Event('change'))
+      await pickSelectOption(closeBehavior, '退出应用')
       semanticButton.click()
       await nextTick()
 
@@ -130,7 +140,7 @@ describe('settings dialog pagination', () => {
 
       generalButton.click()
       await nextTick()
-      expect(selectWithLabel(generalPanel, '关闭窗口后').value).toBe('exit')
+      expect(selectWithLabel(generalPanel, '关闭窗口后').textContent).toContain('退出应用')
 
       const footers = harness.root.querySelectorAll('footer')
       expect(footers).toHaveLength(1)
@@ -171,9 +181,7 @@ describe('settings dialog pagination', () => {
     const harness = mountDialog()
     try {
       const language = selectWithLabel(harness.root, '界面语言')
-      language.value = 'en-US'
-      language.dispatchEvent(new Event('change'))
-      await nextTick()
+      await pickSelectOption(language, 'English')
 
       expect(harness.previewLanguage).toHaveBeenCalledWith('en-US')
       expect(harness.root.textContent).toContain('App settings')

@@ -28,15 +28,18 @@ export function useSessionCatalog(
   const searchMode = ref<SearchMode>('hybrid')
   const semanticStatus = ref<SemanticStatus>('disabled')
   const filtered = computed(() => Boolean(query.value || platform.value || dateFrom.value || dateTo.value || searchMode.value !== 'hybrid'))
+  let generation = 0
 
   async function loadSessions(reset = true) {
     const started = performance.now()
+    const requestGeneration = ++generation
     loading.value = true
     error.value = ''
     if (reset) {
       page.value = 0
       committedQuery.value = query.value.trim()
     }
+    console.log(`%c[PERF:CATALOG] loadSessions(platform="${platform.value}", q="${committedQuery.value}") started (gen=${requestGeneration})`, 'color: #059669')
     try {
       const result = await api.searchSessions({
         q: committedQuery.value || null,
@@ -47,15 +50,25 @@ export function useSessionCatalog(
         offset: page.value * PAGE_SIZE,
         mode: searchMode.value,
       })
+      if (requestGeneration !== generation) {
+        console.warn(`[PERF:CATALOG] loadSessions discarded due to generation mismatch (req: ${requestGeneration}, cur: ${generation})`)
+        return
+      }
       sessions.value = reset ? result.sessions : [...sessions.value, ...result.sessions]
       total.value = result.total
       semanticStatus.value = result.semantic_status
       searchElapsed.value = committedQuery.value ? performance.now() - started : null
       if (reset) onSelectionInvalidated(new Set(result.sessions.map((session) => session.id)))
+      console.log(`%c[PERF:CATALOG] loadSessions completed: count=${result.sessions.length}, total=${result.total}, elapsed=${(performance.now() - started).toFixed(2)}ms`, 'color: #059669')
     } catch (reason) {
-      error.value = String(reason)
+      if (requestGeneration === generation) {
+        error.value = String(reason)
+        console.error(`[PERF:CATALOG] loadSessions failed:`, reason)
+      }
     } finally {
-      loading.value = false
+      if (requestGeneration === generation) {
+        loading.value = false
+      }
     }
   }
 

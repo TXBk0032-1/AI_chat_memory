@@ -30,11 +30,27 @@ const lightweightContent = computed(() => (
   && fullContentMessageId.value !== props.message.id
 ))
 const contentPreview = computed(() => createMessagePreview(props.message.content))
-const contentHtml = computed(() => lightweightContent.value
-  ? ''
-  : renderMarkdown(props.message.content, props.message, props.references, props.query))
+const contentHtml = computed(() => {
+  if (lightweightContent.value) return ''
+  const t0 = performance.now()
+  const result = renderMarkdown(props.message.content, props.message, props.references, props.query)
+  const elapsed = performance.now() - t0
+  if (elapsed > 4) {
+    console.debug(`[PERF:MARKDOWN] Rendered msg seq=${props.message.seq} (len=${props.message.content.length}) in ${elapsed.toFixed(2)}ms`)
+  }
+  return result
+})
 const thinking = computed(() => typeof props.message.metadata?.thinking === 'string' ? props.message.metadata.thinking : '')
-const thinkingHtml = computed(() => props.expanded && thinking.value ? renderMarkdown(thinking.value, props.message, props.references, props.query) : '')
+const thinkingHtml = computed(() => {
+  if (!props.expanded || !thinking.value) return ''
+  const t0 = performance.now()
+  const result = renderMarkdown(thinking.value, props.message, props.references, props.query)
+  const elapsed = performance.now() - t0
+  if (elapsed > 4) {
+    console.debug(`[PERF:MARKDOWN:THINKING] Rendered thinking seq=${props.message.seq} in ${elapsed.toFixed(2)}ms`)
+  }
+  return result
+})
 const canRestoreLightweight = computed(() => (
   oversizedContent.value
   && !hasQuery.value

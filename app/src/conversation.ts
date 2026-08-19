@@ -76,10 +76,14 @@ export function expandSearchHits(hits: SearchHit[]): SearchMatch[] {
   return hits.flatMap((hit) => Array.from({ length: hit.count }, (_, occurrence) => ({ ...hit, occurrence })))
 }
 
+let cachedPositions: Record<string, ReadingPosition> | null = null
+
 export function loadReadingPosition(sessionId: string): ReadingPosition | null {
   try {
-    const positions = JSON.parse(localStorage.getItem(readingPositionKey) || '{}') as Record<string, ReadingPosition>
-    const position = positions[sessionId]
+    if (!cachedPositions) {
+      cachedPositions = JSON.parse(localStorage.getItem(readingPositionKey) || '{}') as Record<string, ReadingPosition>
+    }
+    const position = cachedPositions[sessionId]
     return position && Number.isInteger(position.seq) ? position : null
   } catch {
     return null
@@ -88,10 +92,13 @@ export function loadReadingPosition(sessionId: string): ReadingPosition | null {
 
 export function saveReadingPosition(sessionId: string, position: ReadingPosition) {
   try {
-    const positions = JSON.parse(localStorage.getItem(readingPositionKey) || '{}') as Record<string, ReadingPosition>
-    positions[sessionId] = position
-    const entries = Object.entries(positions).sort((a, b) => b[1].updatedAt - a[1].updatedAt).slice(0, maxReadingPositions)
-    localStorage.setItem(readingPositionKey, JSON.stringify(Object.fromEntries(entries)))
+    if (!cachedPositions) {
+      cachedPositions = JSON.parse(localStorage.getItem(readingPositionKey) || '{}') as Record<string, ReadingPosition>
+    }
+    cachedPositions[sessionId] = position
+    const entries = Object.entries(cachedPositions).sort((a, b) => b[1].updatedAt - a[1].updatedAt).slice(0, maxReadingPositions)
+    cachedPositions = Object.fromEntries(entries)
+    localStorage.setItem(readingPositionKey, JSON.stringify(cachedPositions))
   } catch {
     // Reading restoration is best-effort and must never block conversation rendering.
   }
