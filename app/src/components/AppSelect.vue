@@ -63,12 +63,13 @@ const selectedOption = computed(() => {
 })
 
 function updateMenuPosition() {
-  if (!isOpen.value || !triggerRef.value) return
+  if (!triggerRef.value) return
 
   const rect = triggerRef.value.getBoundingClientRect()
   const viewportHeight = window.innerHeight || document.documentElement.clientHeight
   const viewportWidth = window.innerWidth || document.documentElement.clientWidth
-  const estimatedMenuHeight = Math.min(props.options.length * 36 + 12, 280)
+  const actualMenuHeight = menuRef.value ? menuRef.value.offsetHeight : 0
+  const estimatedMenuHeight = actualMenuHeight || Math.min(props.options.length * 36 + 12, 280)
   const gap = 5
 
   const spaceBelow = viewportHeight - rect.bottom
@@ -111,9 +112,10 @@ function updateMenuPosition() {
 
 function openMenu() {
   if (props.disabled) return
-  isOpen.value = true
   const selectedIdx = props.options.findIndex((opt) => opt.value === props.modelValue)
   highlightedIndex.value = selectedIdx >= 0 ? selectedIdx : 0
+  updateMenuPosition()
+  isOpen.value = true
 
   nextTick(() => {
     updateMenuPosition()
