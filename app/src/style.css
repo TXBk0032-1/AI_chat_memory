@@ -692,7 +692,6 @@ html[data-theme="dark"] .export-document .mermaid-diagram { border-color: #d7ddd
 
 
 .search-row { min-width: 0; display: flex; align-items: center; gap: 8px; }
-.search-mode { height: 36px; border: 1px solid #cbd1d4; border-radius: 12px; background: #fff; color: #31373a; padding: 0 10px; }
 .search-mode.app-select { flex: 0 0 auto; height: 36px; }
 .search-mode .app-select__trigger { height: 36px; min-width: 108px; border-radius: 12px; }
 .semantic-settings { display: grid; gap: 12px; margin-top: 14px; }
@@ -727,7 +726,6 @@ html[data-theme="dark"] .cloud-backend-selector button.active { color: #82d2ba; 
 .mcp-copy-button.copied .mcp-copy-button__check polyline { stroke-dashoffset: 0; }
 .mcp-copy-button.copied .mcp-copy-button__label-default { opacity: 0; transform: translateX(10px); }
 .mcp-copy-button.copied .mcp-copy-button__label-success { opacity: 1; transform: translateX(0); }
-html[data-theme="dark"] .search-mode,
 html[data-theme="dark"] .semantic-settings input,
 html[data-theme="dark"] .semantic-settings select { border-color: #4a5358; background: #20272c; color: #e7ecef; }
 html[data-theme="dark"] .app-select__trigger { color: #edf1f2; border-color: #485156; background: #292f33; }
