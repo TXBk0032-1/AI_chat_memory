@@ -250,6 +250,16 @@
         }
 
         _session(state, sessionId) {
+            if (!sessionId || sessionId === '__proto__' || sessionId === 'constructor' || sessionId === 'prototype') {
+                return {
+                    latest_native_history: null,
+                    latest_compatibility_history: null,
+                    completion_exchanges: [],
+                    file_exchanges: [],
+                    other_exchanges: [],
+                    updated_at: null
+                };
+            }
             return state.sessions[sessionId] ||= {
                 latest_native_history: null,
                 latest_compatibility_history: null,
@@ -448,7 +458,22 @@
             } catch { return false; }
         }
 
-        _captureToken(headers) {
+        _isAllowedTokenUrl(url) {
+            try {
+                const parsed = new URL(String(url), 'https://chat.deepseek.com');
+                const host = parsed.hostname.toLowerCase();
+                return host === 'chat.deepseek.com'
+                    || host === 'kimi.com'
+                    || host === 'www.kimi.com'
+                    || host.endsWith('.kimi.com')
+                    || host.endsWith('.deepseek.com');
+            } catch {
+                return false;
+            }
+        }
+
+        _captureToken(url, headers) {
+            if (!this._isAllowedTokenUrl(url)) return;
             const entries = NetworkCapture.headersObject(headers);
             const auth = entries.authorization || entries.Authorization;
             const match = typeof auth === 'string' ? auth.match(/^Bearer\s+(.+)$/i) : null;
@@ -519,7 +544,7 @@
             function capturedFetch(input, init = {}) {
                 const url = typeof input === 'string' || input instanceof URL ? String(input) : String(input?.url || input);
                 const headers = init.headers || input?.headers || {};
-                capture._captureToken(headers);
+                capture._captureToken(url, headers);
                 const exchange = capture._isCapturable(url)
                     ? capture._baseExchange('fetch', url, init.method || input?.method || 'GET', headers, init.body)
                     : null;
@@ -549,8 +574,10 @@
                 return originalOpen.apply(this, arguments);
             };
             XHR.prototype.setRequestHeader = function(name, value) {
-                if (this[metadataKey]) this[metadataKey].headers[name] = value;
-                capture._captureToken({ [name]: value });
+                if (this[metadataKey]) {
+                    this[metadataKey].headers[name] = value;
+                    capture._captureToken(this[metadataKey].url, { [name]: value });
+                }
                 return originalSetHeader.apply(this, arguments);
             };
             XHR.prototype.send = function(body) {
@@ -1055,7 +1082,7 @@
         }
 
         async fetchConversation(id) {
-            const conversation = await this._xhr(`https://chat.deepseek.com/api/v0/chat/history_messages?chat_session_id=${id}`);
+            const conversation = await this._xhr(`https://chat.deepseek.com/api/v0/chat/history_messages?chat_session_id=${encodeURIComponent(id)}`);
             if (!this.captureStore) {
                 conversation._references = this._referencesForSession(id);
                 return conversation;
@@ -1078,26 +1105,20 @@
 
         extractOfficialZipUrl(json) {
             const seen = new Set();
-            const walk = value => {
-                if (!value || seen.has(value)) return null;
+            const findZip = (value) => {
                 if (typeof value === 'string') {
-                    return /^https?:\/\/.+(?:\.zip(?:\?|$)|\/download(?:[/?#]|$))/.test(value) ? value : null;
+                    return /^https?:\/\/.+(?:\.zip(?:\?|$)|(?:\/download|\/export)(?:[/?#]|$))/.test(value) ? value : null;
                 }
-                if (Array.isArray(value)) {
-                    for (const item of value) {
-                        const found = walk(item);
-                        if (found) return found;
-                    }
-                } else if (typeof value === 'object') {
-                    seen.add(value);
-                    for (const key of Object.keys(value)) {
-                        const found = walk(value[key]);
-                        if (found) return found;
-                    }
+                if (!value || typeof value !== 'object') return null;
+                if (seen.has(value)) return null;
+                seen.add(value);
+                for (const item of Object.values(value)) {
+                    const matched = findZip(item);
+                    if (matched) return matched;
                 }
                 return null;
             };
-            return walk(json);
+            return findZip(json);
         }
 
         describeExportStatus(json) {
@@ -1175,14 +1196,20 @@
             const credentials = this.credentials;
             windowObject.fetch = function(...args) {
                 try {
-                    const options = args[1] || {};
-                    const headers = options.headers || args[0]?.headers;
-                    const auth = headers && typeof headers.get === 'function'
-                        ? headers.get('authorization')
-                        : headers?.authorization || headers?.Authorization;
-                    const match = typeof auth === 'string' && auth.match(/^Bearer\s+(.+)$/);
-                    if (match && match[1].trim() !== '') {
-                        credentials.saveToken(tokenKey, match[1], 'Kimi');
+                    const input = args[0];
+                    const url = typeof input === 'string' || input instanceof URL ? String(input) : String(input?.url || input || '');
+                    const parsed = new URL(url, 'https://www.kimi.com');
+                    const host = parsed.hostname.toLowerCase();
+                    if (host === 'kimi.com' || host === 'www.kimi.com' || host.endsWith('.kimi.com')) {
+                        const options = args[1] || {};
+                        const headers = options.headers || args[0]?.headers;
+                        const auth = headers && typeof headers.get === 'function'
+                            ? headers.get('authorization')
+                            : headers?.authorization || headers?.Authorization;
+                        const match = typeof auth === 'string' && auth.match(/^Bearer\s+(.+)$/);
+                        if (match && match[1].trim() !== '') {
+                            credentials.saveToken(tokenKey, match[1], 'Kimi');
+                        }
                     }
                 } catch {}
                 return originalFetch.apply(this, args);

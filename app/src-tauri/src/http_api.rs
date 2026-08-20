@@ -17,14 +17,19 @@ const CLIENT_HEADER: &str = "x-ai-chat-memory-client";
 const CLIENT_VALUE: &str = "userscript-v1";
 const SECRET_HEADER: &str = "x-ai-chat-memory-secret";
 
+static ZIP_IMPORT_SEMAPHORE: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
 pub async fn serve(service: AppService) -> crate::error::Result<()> {
     let app = Router::new()
         .route("/api/v1/health", get(health))
         .route("/api/v1/sessions/import", post(import))
-        .route("/api/v1/sessions/import/deepseek-export", post(import_zip))
+        .route(
+            "/api/v1/sessions/import/deepseek-export",
+            post(import_zip).layer(DefaultBodyLimit::max(128 * 1024 * 1024)),
+        )
         .route("/api/v1/sessions/sync-status", get(sync_status))
         .fallback(options)
-        .layer(DefaultBodyLimit::max(128 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(20 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(service.clone(), authorize))
         .layer(middleware::from_fn(log_request))
         .with_state(service.clone());
@@ -99,6 +104,17 @@ fn is_authorized(
     authorization_error(method, origin, headers, settings).is_ok()
 }
 
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    let a_hash = Sha256::digest(a.as_bytes());
+    let b_hash = Sha256::digest(b.as_bytes());
+    let mut diff = 0u8;
+    for (x, y) in a_hash.iter().zip(b_hash.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 fn authorization_error(
     method: &Method,
     origin: Option<&str>,
@@ -127,7 +143,7 @@ fn authorization_error(
                 headers
                     .get(SECRET_HEADER)
                     .and_then(|value| value.to_str().ok())
-                    == Some(secret)
+                    .is_some_and(|header_secret| constant_time_eq(header_secret, secret))
             });
     if !secret_ok {
         return Err("invalid_secret");
@@ -145,6 +161,15 @@ async fn import(
     api_result(service.import(req).await)
 }
 async fn import_zip(State(service): State<AppService>, body: Bytes) -> impl IntoResponse {
+    let _permit = match ZIP_IMPORT_SEMAPHORE.try_acquire() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({"error": "rate_limited", "detail": "Too many concurrent ZIP import requests"})),
+            ).into_response();
+        }
+    };
     api_result(service.import_deepseek_zip(body.to_vec()).await)
 }
 
@@ -171,18 +196,24 @@ fn api_result(result: crate::error::Result<crate::models::ImportResponse>) -> Re
     }
 }
 fn error_response(error: crate::error::AppError) -> Response {
-    let status = match error {
-        crate::error::AppError::InvalidData(_)
-        | crate::error::AppError::Json(_)
-        | crate::error::AppError::Zip(_) => StatusCode::BAD_REQUEST,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    let (status, error_type, detail) = match &error {
+        crate::error::AppError::InvalidData(msg) => {
+            (StatusCode::BAD_REQUEST, "invalid_data", msg.clone())
+        }
+        crate::error::AppError::Json(e) => (StatusCode::BAD_REQUEST, "invalid_json", e.to_string()),
+        crate::error::AppError::Zip(e) => (StatusCode::BAD_REQUEST, "invalid_zip", e.to_string()),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal_error",
+            "Internal server error".to_string(),
+        ),
     };
     if status.is_server_error() {
         tracing::error!(%error, %status, "local API request failed");
     } else {
         tracing::warn!(%error, %status, "local API request rejected");
     }
-    (status, Json(json!({"detail":error.to_string()}))).into_response()
+    (status, Json(json!({"error": error_type, "detail": detail}))).into_response()
 }
 
 #[cfg(test)]

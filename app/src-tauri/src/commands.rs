@@ -90,7 +90,8 @@ pub async fn import_deepseek_zip(
     service: State<'_, AppService>,
     path: String,
 ) -> Result<ImportResponse, String> {
-    let metadata = tokio::fs::metadata(&path)
+    let safe_path = validate_file_path(&path, &["zip"])?;
+    let metadata = tokio::fs::metadata(&safe_path)
         .await
         .map_err(|e| e.to_string())?;
     if metadata.len() > 128 * 1024 * 1024 {
@@ -100,7 +101,9 @@ pub async fn import_deepseek_zip(
         );
         return Err("ZIP 文件超过 128 MB 限制".into());
     }
-    let bytes = tokio::fs::read(path).await.map_err(|e| e.to_string())?;
+    let bytes = tokio::fs::read(safe_path)
+        .await
+        .map_err(|e| e.to_string())?;
     service.import_deepseek_zip(bytes).await.map_err(message)
 }
 
@@ -257,8 +260,9 @@ pub async fn import_local_embedding_model(
     service: State<'_, AppService>,
     path: String,
 ) -> Result<(), String> {
+    let safe_path = validate_file_path(&path, &["onnx", "bin", "safetensors", "tar", "gz", "zip"])?;
     service
-        .import_local_model(std::path::Path::new(&path))
+        .import_local_model(&safe_path)
         .await
         .map_err(message)
 }
@@ -269,7 +273,7 @@ pub async fn move_data_directory(
     service: State<'_, AppService>,
     path: String,
 ) -> Result<(), String> {
-    let directory = std::path::PathBuf::from(path);
+    let directory = validate_directory_path(&path)?;
     service
         .move_data_directory(&directory)
         .await
@@ -303,18 +307,271 @@ pub async fn confirm_close_behavior(
     Ok(())
 }
 
-#[tauri::command]
-pub async fn write_export_file(path: String, payload: ExportFilePayload) -> Result<(), String> {
-    if path.trim().is_empty() {
+pub fn validate_file_path(
+    path_str: &str,
+    allowed_extensions: &[&str],
+) -> Result<std::path::PathBuf, String> {
+    if path_str.trim().is_empty() {
         return Err("导出路径不能为空".into());
     }
+    let raw_path = std::path::Path::new(path_str);
+
+    if let Some(file_name) = raw_path.file_name().and_then(|n| n.to_str()) {
+        let stem = raw_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(file_name);
+        let reserved = [
+            "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+            "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        ];
+        if reserved.iter().any(|&r| r.eq_ignore_ascii_case(stem)) {
+            return Err("目标文件名属于系统保留名称".into());
+        }
+    }
+
+    if !allowed_extensions.is_empty() {
+        let ext = raw_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !allowed_extensions
+            .iter()
+            .any(|&allowed| allowed.eq_ignore_ascii_case(&ext))
+        {
+            return Err(format!(
+                "不支持的文件格式，仅允许：{}",
+                allowed_extensions.join(", ")
+            ));
+        }
+    }
+
+    use std::path::Component;
+    let mut normalized = std::path::PathBuf::new();
+    for component in raw_path.components() {
+        match component {
+            Component::Prefix(prefix) => {
+                #[cfg(target_os = "windows")]
+                {
+                    if !matches!(prefix.kind(), std::path::Prefix::Disk(_)) {
+                        return Err("禁止使用网络共享、命名空间或非标准路径前缀".into());
+                    }
+                }
+                normalized.push(component);
+            }
+            Component::RootDir => normalized.push(component),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                return Err("路径包含非法目录遍历字符 (..)".into());
+            }
+            Component::Normal(c) => normalized.push(c),
+        }
+    }
+
+    if !normalized.is_absolute() {
+        return Err("路径必须为绝对路径".into());
+    }
+
+    let path_str_lower = normalized
+        .to_string_lossy()
+        .to_ascii_lowercase()
+        .replace('/', "\\");
+
+    let is_temp = [
+        std::env::var("TEMP").ok(),
+        std::env::var("TMP").ok(),
+        Some(std::env::temp_dir().to_string_lossy().into_owned()),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|tmp| {
+        let tmp_lower = tmp.to_ascii_lowercase().replace('/', "\\");
+        !tmp_lower.is_empty() && path_str_lower.starts_with(&tmp_lower)
+    });
+
+    if !is_temp {
+        let forbidden_prefixes = [
+            "c:\\windows",
+            "c:\\program files",
+            "c:\\program files (x86)",
+            "c:\\programdata",
+        ];
+        for forbidden in forbidden_prefixes {
+            if path_str_lower.starts_with(forbidden) {
+                return Err(format!("禁止访问系统关键目录：{forbidden}"));
+            }
+        }
+
+        if let Ok(windir) = std::env::var("WINDIR") {
+            let windir_lower = windir.to_ascii_lowercase().replace('/', "\\");
+            if !windir_lower.is_empty() && path_str_lower.starts_with(&windir_lower) {
+                return Err("禁止访问系统 Windows 目录".into());
+            }
+        }
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let appdata_lower = appdata.to_ascii_lowercase().replace('/', "\\");
+            if !appdata_lower.is_empty() && path_str_lower.starts_with(&appdata_lower) {
+                return Err("禁止访问用户 AppData 目录".into());
+            }
+        }
+        if let Ok(localappdata) = std::env::var("LOCALAPPDATA") {
+            let localappdata_lower = localappdata.to_ascii_lowercase().replace('/', "\\");
+            if !localappdata_lower.is_empty() && path_str_lower.starts_with(&localappdata_lower) {
+                return Err("禁止访问用户 LocalAppData 目录".into());
+            }
+        }
+
+        if let Ok(userprofile) = std::env::var("USERPROFILE") {
+            let userprofile_lower = userprofile.to_ascii_lowercase().replace('/', "\\");
+            if path_str_lower.starts_with("c:\\users\\")
+                && !path_str_lower.starts_with(&userprofile_lower)
+            {
+                return Err("禁止访问非当前登录用户的目录".into());
+            }
+
+            if path_str_lower.starts_with(&userprofile_lower) {
+                let rel = &path_str_lower[userprofile_lower.len()..];
+                let rel = rel.trim_start_matches('\\');
+                if let Some(first_seg) = rel.split('\\').next() {
+                    if first_seg.starts_with('.') {
+                        return Err(format!("禁止访问用户配置目录 ({first_seg})"));
+                    }
+                    if first_seg.eq_ignore_ascii_case("appdata") {
+                        return Err("禁止访问 AppData 目录".into());
+                    }
+                }
+            }
+        }
+
+        if path_str_lower.contains("\\startup") || path_str_lower.contains("\\start menu") {
+            return Err("禁止访问系统启动或开始菜单目录".into());
+        }
+    }
+
+    Ok(normalized)
+}
+
+pub fn validate_directory_path(path_str: &str) -> Result<std::path::PathBuf, String> {
+    if path_str.trim().is_empty() {
+        return Err("目录路径不能为空".into());
+    }
+    let raw_path = std::path::Path::new(path_str);
+    use std::path::Component;
+    let mut normalized = std::path::PathBuf::new();
+    for component in raw_path.components() {
+        match component {
+            Component::Prefix(prefix) => {
+                #[cfg(target_os = "windows")]
+                {
+                    if !matches!(prefix.kind(), std::path::Prefix::Disk(_)) {
+                        return Err("禁止使用网络共享、命名空间或非标准路径前缀".into());
+                    }
+                }
+                normalized.push(component);
+            }
+            Component::RootDir => normalized.push(component),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                return Err("路径包含非法目录遍历字符 (..)".into());
+            }
+            Component::Normal(c) => normalized.push(c),
+        }
+    }
+
+    if !normalized.is_absolute() {
+        return Err("路径必须为绝对路径".into());
+    }
+
+    let path_str_lower = normalized
+        .to_string_lossy()
+        .to_ascii_lowercase()
+        .replace('/', "\\");
+
+    let is_temp = [
+        std::env::var("TEMP").ok(),
+        std::env::var("TMP").ok(),
+        Some(std::env::temp_dir().to_string_lossy().into_owned()),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|tmp| {
+        let tmp_lower = tmp.to_ascii_lowercase().replace('/', "\\");
+        !tmp_lower.is_empty() && path_str_lower.starts_with(&tmp_lower)
+    });
+
+    if !is_temp {
+        let forbidden_prefixes = [
+            "c:\\windows",
+            "c:\\program files",
+            "c:\\program files (x86)",
+            "c:\\programdata",
+        ];
+        for forbidden in forbidden_prefixes {
+            if path_str_lower.starts_with(forbidden) {
+                return Err(format!("禁止访问系统关键目录：{forbidden}"));
+            }
+        }
+
+        if let Ok(windir) = std::env::var("WINDIR") {
+            let windir_lower = windir.to_ascii_lowercase().replace('/', "\\");
+            if !windir_lower.is_empty() && path_str_lower.starts_with(&windir_lower) {
+                return Err("禁止访问系统 Windows 目录".into());
+            }
+        }
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let appdata_lower = appdata.to_ascii_lowercase().replace('/', "\\");
+            if !appdata_lower.is_empty() && path_str_lower.starts_with(&appdata_lower) {
+                return Err("禁止访问用户 AppData 目录".into());
+            }
+        }
+        if let Ok(localappdata) = std::env::var("LOCALAPPDATA") {
+            let localappdata_lower = localappdata.to_ascii_lowercase().replace('/', "\\");
+            if !localappdata_lower.is_empty() && path_str_lower.starts_with(&localappdata_lower) {
+                return Err("禁止访问用户 LocalAppData 目录".into());
+            }
+        }
+
+        if let Ok(userprofile) = std::env::var("USERPROFILE") {
+            let userprofile_lower = userprofile.to_ascii_lowercase().replace('/', "\\");
+            if path_str_lower.starts_with("c:\\users\\")
+                && !path_str_lower.starts_with(&userprofile_lower)
+            {
+                return Err("禁止访问非当前登录用户的目录".into());
+            }
+
+            if path_str_lower.starts_with(&userprofile_lower) {
+                let rel = &path_str_lower[userprofile_lower.len()..];
+                let rel = rel.trim_start_matches('\\');
+                if let Some(first_seg) = rel.split('\\').next() {
+                    if first_seg.starts_with('.') {
+                        return Err(format!("禁止访问用户配置目录 ({first_seg})"));
+                    }
+                    if first_seg.eq_ignore_ascii_case("appdata") {
+                        return Err("禁止访问 AppData 目录".into());
+                    }
+                }
+            }
+        }
+
+        if path_str_lower.contains("\\startup") || path_str_lower.contains("\\start menu") {
+            return Err("禁止访问系统启动或开始菜单目录".into());
+        }
+    }
+
+    Ok(normalized)
+}
+
+#[tauri::command]
+pub async fn write_export_file(path: String, payload: ExportFilePayload) -> Result<(), String> {
+    let safe_path = validate_file_path(&path, &["md", "json", "png", "jpg", "jpeg"])?;
     let bytes = match payload.encoding {
         ExportEncoding::Utf8 => payload.data.into_bytes(),
         ExportEncoding::Base64 => STANDARD
             .decode(payload.data)
             .map_err(|error| format!("图片数据无效：{error}"))?,
     };
-    tokio::fs::write(path, bytes)
+    tokio::fs::write(safe_path, bytes)
         .await
         .map_err(|error| format!("写入导出文件失败：{error}"))
 }
@@ -349,9 +606,8 @@ pub async fn print_to_pdf(
     path: String,
     compact: bool,
 ) -> Result<(), String> {
-    if path.trim().is_empty() {
-        return Err("导出路径不能为空".into());
-    }
+    let safe_path = validate_file_path(&path, &["pdf"])?;
+    let path = safe_path.to_string_lossy().into_owned();
 
     #[cfg(target_os = "windows")]
     {
@@ -509,6 +765,23 @@ mod export_tests {
         .unwrap();
         assert_eq!(tokio::fs::read(&image_path).await.unwrap(), [1, 2, 3]);
         tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[test]
+    fn validates_export_paths_securely() {
+        assert!(validate_file_path("", &["md"]).is_err());
+        assert!(validate_file_path("C:\\Windows\\System32\\calc.exe", &["md"]).is_err());
+        assert!(validate_file_path("C:\\Windows\\System32\\evil.md", &["md"]).is_err());
+        assert!(validate_file_path("C:\\Program Files\\app\\test.md", &["md"]).is_err());
+        assert!(validate_file_path("C:\\ProgramData\\test.md", &["md"]).is_err());
+        assert!(validate_file_path("\\\\evil.com\\share\\doc.md", &["md"]).is_err());
+        assert!(validate_file_path("CON.md", &["md"]).is_err());
+        assert!(validate_file_path("C:\\test\\..\\..\\Windows\\test.md", &["md"]).is_err());
+        assert!(validate_file_path("C:\\test\\export.exe", &["md"]).is_err());
+        assert!(validate_file_path(r"\\?\C:\Windows\System32\evil.md", &["md"]).is_err());
+        assert!(validate_file_path(r"\\.\COM1", &["md"]).is_err());
+        assert!(validate_directory_path(r"C:\Windows\System32").is_err());
+        assert!(validate_directory_path(r"\\?\C:\Windows").is_err());
     }
 }
 

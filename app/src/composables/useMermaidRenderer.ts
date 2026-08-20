@@ -10,6 +10,14 @@ export function normalizeMermaidSource(source: string) {
   return source.replace(/[“”]/g, '"')
 }
 
+export function safeDecodeURIComponent(value: string): string {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return value
+  }
+}
+
 export function useMermaidRenderer(effectiveTheme: () => 'light' | 'dark') {
   let instance: typeof import('mermaid')['default'] | null = null
   let renderVersion = 0
@@ -38,9 +46,10 @@ export function useMermaidRenderer(effectiveTheme: () => 'light' | 'dark') {
     const mermaid = await loadMermaid()
     for (const [index, element] of diagrams.entries()) {
       if (version !== renderVersion) return
-      const source = normalizeMermaidSource(decodeURIComponent(element.dataset.mermaidSource || ''))
-      if (!source) continue
       try {
+        const rawSource = safeDecodeURIComponent(element.dataset.mermaidSource || '')
+        const source = normalizeMermaidSource(rawSource)
+        if (!source) continue
         const { svg, bindFunctions } = await mermaid.render(`mermaid-${version}-${index}`, source)
         element.innerHTML = svg
         element.dataset.rendered = 'true'
@@ -59,9 +68,10 @@ export function useMermaidRenderer(effectiveTheme: () => 'light' | 'dark') {
     mermaid.initialize({ ...mermaidOptions, theme: 'neutral' })
     const diagrams = [...root.querySelectorAll<HTMLElement>('.mermaid-diagram:not([data-rendered])')]
     for (const [index, element] of diagrams.entries()) {
-      const source = normalizeMermaidSource(decodeURIComponent(element.dataset.mermaidSource || ''))
-      if (!source) continue
       try {
+        const rawSource = safeDecodeURIComponent(element.dataset.mermaidSource || '')
+        const source = normalizeMermaidSource(rawSource)
+        if (!source) continue
         const { svg } = await mermaid.render(`export-mermaid-${Date.now()}-${index}`, source)
         element.innerHTML = svg
         element.dataset.rendered = 'true'

@@ -42,4 +42,5 @@ hatch-runs/
 artifacts/
 .omo/
 .superpowers/
+.agents/
 /.worktrees/
