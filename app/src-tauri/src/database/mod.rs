@@ -527,4 +527,49 @@ mod tests {
         .unwrap();
         assert_eq!(distinct, 1);
     }
+
+    #[tokio::test]
+    async fn delete_session_cleans_embedding_chunks_and_vector_table() {
+        let pool = create_sync_pool().await;
+        let session = session_fixture("session-vec", "Vector session");
+        import_sessions(&pool, std::slice::from_ref(&session), false)
+            .await
+            .unwrap();
+        let session_id: String =
+            sqlx::query_scalar("SELECT id FROM sessions WHERE platform_session_id = 'session-vec'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        sqlx::query(
+            "INSERT INTO embedding_chunks
+             (id, message_id, session_id, platform, chunk_index, role, text, content_hash,
+              backend_id, model_id, dim, status, updated_at)
+             VALUES (101, 'm1', ?, 'custom', 0, 'user', 'hello', 'h1', 'local', 'model-a', 512, 'ready', 'now')",
+        )
+        .bind(&session_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let zero_vec = vec![0u8; 512 * 4];
+        sqlx::query(
+            "INSERT INTO embedding_vec (chunk_id, embedding, session_id, message_id, platform) VALUES (101, ?, ?, 'm1', 'custom')",
+        )
+        .bind(zero_vec)
+        .bind(&session_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        assert_eq!(table_count(&pool, "embedding_chunks").await, 1);
+        assert_eq!(table_count(&pool, "embedding_vec").await, 1);
+
+        delete_session(&pool, &session_id, false).await.unwrap();
+
+        assert_eq!(table_count(&pool, "sessions").await, 0);
+        assert_eq!(table_count(&pool, "messages").await, 0);
+        assert_eq!(table_count(&pool, "embedding_chunks").await, 0);
+        assert_eq!(table_count(&pool, "embedding_vec").await, 0);
+    }
 }

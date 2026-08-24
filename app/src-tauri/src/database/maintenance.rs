@@ -39,6 +39,30 @@ pub async fn delete_session(pool: &SqlitePool, id: &str, record_sync: bool) -> R
             .execute(&mut *tx)
             .await?;
     }
+    let has_chunks_table: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'embedding_chunks')",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .unwrap_or(false);
+
+    if has_chunks_table {
+        let chunk_ids: Vec<i64> =
+            sqlx::query_scalar("SELECT id FROM embedding_chunks WHERE session_id = ?")
+                .bind(id)
+                .fetch_all(&mut *tx)
+                .await?;
+        for chunk_id in chunk_ids {
+            let _ = sqlx::query("DELETE FROM embedding_vec WHERE chunk_id = ?")
+                .bind(chunk_id)
+                .execute(&mut *tx)
+                .await;
+        }
+        sqlx::query("DELETE FROM embedding_chunks WHERE session_id = ?")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
     let result = sqlx::query("DELETE FROM sessions WHERE id = ?")
         .bind(id)
         .execute(&mut *tx)

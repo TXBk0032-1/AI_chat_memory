@@ -79,7 +79,7 @@ pub(crate) async fn initialize_schema(pool: &SqlitePool) -> Result<()> {
         "CREATE TABLE IF NOT EXISTS embedding_chunks (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             message_id TEXT NOT NULL,
-            session_id TEXT NOT NULL,
+            session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
             platform TEXT NOT NULL,
             chunk_index INTEGER NOT NULL,
             role TEXT NOT NULL,
@@ -96,6 +96,7 @@ pub(crate) async fn initialize_schema(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await?;
+    ensure_embedding_chunks_foreign_key(pool).await?;
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_embedding_chunks_session ON embedding_chunks(session_id);",
     )
@@ -195,6 +196,79 @@ pub(crate) async fn initialize_schema(pool: &SqlitePool) -> Result<()> {
     .execute(pool)
     .await?;
     ensure_embedding_vec_table(pool, None).await?;
+    Ok(())
+}
+
+async fn ensure_embedding_chunks_foreign_key(pool: &SqlitePool) -> Result<()> {
+    let sql: Option<String> = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'embedding_chunks'",
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    let Some(sql) = sql else {
+        return Ok(());
+    };
+
+    if sql.to_ascii_lowercase().contains("references sessions") {
+        return Ok(());
+    }
+
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        "CREATE TABLE embedding_chunks_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id TEXT NOT NULL,
+            session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            platform TEXT NOT NULL,
+            chunk_index INTEGER NOT NULL,
+            role TEXT NOT NULL,
+            text TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            backend_id TEXT NOT NULL,
+            model_id TEXT NOT NULL,
+            dim INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            error TEXT,
+            updated_at TEXT NOT NULL,
+            UNIQUE(message_id, chunk_index, backend_id, model_id)
+        );",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO embedding_chunks_new (id, message_id, session_id, platform, chunk_index, role, text, content_hash, backend_id, model_id, dim, status, error, updated_at)
+         SELECT c.id, c.message_id, c.session_id, c.platform, c.chunk_index, c.role, c.text, c.content_hash, c.backend_id, c.model_id, c.dim, c.status, c.error, c.updated_at
+         FROM embedding_chunks c
+         WHERE EXISTS (SELECT 1 FROM sessions s WHERE s.id = c.session_id);",
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    let has_embedding_vec: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'embedding_vec')",
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+
+    if has_embedding_vec {
+        let _ = sqlx::query(
+            "DELETE FROM embedding_vec WHERE chunk_id NOT IN (SELECT id FROM embedding_chunks_new);",
+        )
+        .execute(&mut *tx)
+        .await;
+    }
+
+    sqlx::query("DROP TABLE embedding_chunks;")
+        .execute(&mut *tx)
+        .await?;
+
+    sqlx::query("ALTER TABLE embedding_chunks_new RENAME TO embedding_chunks;")
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
     Ok(())
 }
 
@@ -784,6 +858,12 @@ mod active_index_tests {
                 .unwrap()
         );
         sqlx::query(
+            "INSERT INTO sessions (id, platform, platform_session_id) VALUES ('s', 'test', 'platform-s')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
             "INSERT INTO embedding_chunks
              (message_id, session_id, platform, chunk_index, role, text, content_hash,
               backend_id, model_id, dim, status, updated_at)
@@ -808,5 +888,102 @@ mod active_index_tests {
             .await
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn upgrades_legacy_embedding_chunks_table_and_purges_orphans() {
+        register_sqlite_vec();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                platform TEXT NOT NULL,
+                platform_session_id TEXT NOT NULL,
+                title TEXT,
+                created_at TEXT,
+                updated_at TEXT,
+                imported_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                raw_data TEXT,
+                UNIQUE(platform, platform_session_id)
+            );
+            CREATE TABLE embedding_chunks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                text TEXT NOT NULL,
+                content_hash TEXT NOT NULL,
+                backend_id TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                dim INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                error TEXT,
+                updated_at TEXT NOT NULL,
+                UNIQUE(message_id, chunk_index, backend_id, model_id)
+            );",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO sessions (id, platform, platform_session_id) VALUES ('s1', 'test', 'p1')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Valid chunk (session exists)
+        sqlx::query(
+            "INSERT INTO embedding_chunks
+             (id, message_id, session_id, platform, chunk_index, role, text, content_hash,
+              backend_id, model_id, dim, status, updated_at)
+             VALUES (1, 'm1', 's1', 'test', 0, 'user', 'valid', 'hash1',
+                     'local', 'model-a', 512, 'ready', 'now')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // Orphan chunk (session 's2' does not exist)
+        sqlx::query(
+            "INSERT INTO embedding_chunks
+             (id, message_id, session_id, platform, chunk_index, role, text, content_hash,
+              backend_id, model_id, dim, status, updated_at)
+             VALUES (2, 'm2', 's2', 'test', 0, 'user', 'orphan', 'hash2',
+                     'local', 'model-a', 512, 'ready', 'now')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        initialize_schema(&pool).await.unwrap();
+
+        let table_sql: String = sqlx::query_scalar(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'embedding_chunks'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            table_sql
+                .to_ascii_lowercase()
+                .contains("references sessions"),
+            "table sql should contain foreign key constraint: {table_sql}"
+        );
+
+        let chunks: Vec<(i64, String)> =
+            sqlx::query_as("SELECT id, session_id FROM embedding_chunks ORDER BY id ASC")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0], (1, "s1".to_string()));
     }
 }
