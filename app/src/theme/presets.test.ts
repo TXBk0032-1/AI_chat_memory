@@ -1,7 +1,15 @@
 /** @vitest-environment happy-dom */
 
 import { describe, expect, it } from 'vitest'
-import { allThemes, darkThemes, findTheme, getDefaultTheme, lightThemes } from './presets'
+import {
+  allThemes,
+  darkThemes,
+  findTheme,
+  getDefaultTheme,
+  lightThemes,
+  duplicateThemeAsCustom,
+  createDefaultCustomTheme,
+} from './presets'
 import { applyThemeToDOM, resolveTheme } from './index'
 
 describe('theme presets and index', () => {
@@ -49,10 +57,39 @@ describe('theme presets and index', () => {
     expect(systemDarkResolved.isDark).toBe(true)
   })
 
-  it('applies theme variables to DOM documentElement', () => {
+  it('supports custom themes creation, duplication, and resolution', () => {
+    const customLight = {
+      id: 'custom_light_1',
+      name: 'My Custom Light',
+      nameKey: '',
+      isDark: false,
+      isCustom: true,
+      config: {
+        primary: 'rgb(100, 150, 200)',
+      },
+    }
+
+    const found = findTheme('custom_light_1', [customLight])
+    expect(found).toBeDefined()
+    expect(found?.name).toBe('My Custom Light')
+
+    const resolved = resolveTheme('light', 'custom_light_1', 'black', false, [customLight])
+    expect(resolved.id).toBe('custom_light_1')
+    expect(resolved.colors['--color-primary']).toBe('rgb(100, 150, 200)')
+
+    const duplicated = duplicateThemeAsCustom(customLight, 'Cloned Theme')
+    expect(duplicated.id).not.toBe(customLight.id)
+    expect(duplicated.name).toBe('Cloned Theme')
+    expect(duplicated.isCustom).toBe(true)
+
+    const created = createDefaultCustomTheme(true, 'Brand New Dark')
+    expect(created.isDark).toBe(true)
+    expect(created.name).toBe('Brand New Dark')
+  })
+
+  it('applies resolved theme to DOM', () => {
     const resolved = resolveTheme('light', 'green', 'black', false)
     applyThemeToDOM(resolved)
-
     expect(document.documentElement.dataset.theme).toBe('light')
     expect(document.documentElement.dataset.themeId).toBe('green')
     expect(document.documentElement.style.getPropertyValue('--color-primary')).toBeTruthy()

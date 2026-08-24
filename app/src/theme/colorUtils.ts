@@ -174,3 +174,57 @@ export function RGB_Linear_Blend(p: number, c0: string, c1: string): string {
 
   return `rgb(${r}, ${g}, ${b})`
 }
+
+/**
+ * Converts any valid hex/rgb/rgba string to 6-digit hex format (#RRGGBB).
+ */
+export function toHex6(color: string): string {
+  const hex = rgbToHex(color)
+  if (hex.length >= 7) {
+    return hex.slice(0, 7)
+  }
+  return hex.padEnd(7, '0')
+}
+
+/**
+ * Parses an rgba/rgb/hex string into r, g, b, and alpha (0-1).
+ */
+export function parseRgba(color: string): { r: number; g: number; b: number; a: number } {
+  const norm = normalizeColor(color)
+  const match = norm.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*([\d.]+))?\)/)
+  if (match) {
+    return {
+      r: parseInt(match[1], 10),
+      g: parseInt(match[2], 10),
+      b: parseInt(match[3], 10),
+      a: match[4] !== undefined ? parseFloat(match[4]) : 1,
+    }
+  }
+  return { r: 0, g: 0, b: 0, a: 1 }
+}
+
+/**
+ * Formats r, g, b, a into a standard CSS color string.
+ */
+export function formatRgba(r: number, g: number, b: number, a = 1): string {
+  const clampedR = Math.max(0, Math.min(255, Math.round(r)))
+  const clampedG = Math.max(0, Math.min(255, Math.round(g)))
+  const clampedB = Math.max(0, Math.min(255, Math.round(b)))
+  const clampedA = Math.max(0, Math.min(1, Math.round(a * 100) / 100))
+  if (clampedA < 1) {
+    return `rgba(${clampedR}, ${clampedG}, ${clampedB}, ${clampedA})`
+  }
+  return `rgb(${clampedR}, ${clampedG}, ${clampedB})`
+}
+
+/**
+ * Validates whether a color string is a valid Hex, RGB, or RGBA color.
+ */
+export function isValidColor(color: string): boolean {
+  if (!color || typeof color !== 'string') return false
+  const trimmed = color.trim()
+  if (/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(trimmed)) {
+    return true
+  }
+  return /^rgba?\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*(?:,\s*[\d.]+\s*)?\)$/.test(trimmed)
+}

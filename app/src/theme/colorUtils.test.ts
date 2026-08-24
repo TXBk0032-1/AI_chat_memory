@@ -7,6 +7,10 @@ import {
   hexToRgb,
   normalizeColor,
   rgbToHex,
+  toHex6,
+  parseRgba,
+  formatRgba,
+  isValidColor,
 } from './colorUtils'
 
 describe('theme colorUtils', () => {
@@ -55,5 +59,31 @@ describe('theme colorUtils', () => {
   it('blends two colors linearly', () => {
     const blended = RGB_Linear_Blend(0.5, 'rgb(0, 0, 0)', 'rgb(200, 200, 200)')
     expect(blended).toBe('rgb(100, 100, 100)')
+  })
+
+  it('converts to 6-digit hex format via toHex6', () => {
+    expect(toHex6('rgb(22, 121, 97)')).toBe('#167961')
+    expect(toHex6('#16796180')).toBe('#167961')
+    expect(toHex6('#167961')).toBe('#167961')
+  })
+
+  it('parses and formats rgba values', () => {
+    const parsed = parseRgba('rgba(22, 121, 97, 0.8)')
+    expect(parsed.r).toBe(22)
+    expect(parsed.g).toBe(121)
+    expect(parsed.b).toBe(97)
+    expect(parsed.a).toBe(0.8)
+
+    expect(formatRgba(22, 121, 97, 1)).toBe('rgb(22, 121, 97)')
+    expect(formatRgba(22, 121, 97, 0.5)).toBe('rgba(22, 121, 97, 0.5)')
+  })
+
+  it('validates color strings correctly', () => {
+    expect(isValidColor('#167961')).toBe(true)
+    expect(isValidColor('#abc')).toBe(true)
+    expect(isValidColor('rgb(22, 121, 97)')).toBe(true)
+    expect(isValidColor('rgba(22, 121, 97, 0.5)')).toBe(true)
+    expect(isValidColor('invalid-color')).toBe(false)
+    expect(isValidColor('')).toBe(false)
   })
 })

@@ -1,7 +1,7 @@
 import { setTheme as setNativeTheme } from '@tauri-apps/api/app'
 import type { Ref } from 'vue'
 import type { SettingsModel, ThemePreference } from '../desktop-api'
-import { applyThemeToDOM, resolveTheme, type ResolvedTheme } from '../theme'
+import { applyThemeToDOM, resolveTheme, type ResolvedTheme, type ThemeDefinition } from '../theme'
 
 export function useTheme(settings: Ref<SettingsModel>, onApplied: (animate: boolean) => void) {
   let systemThemeQuery: MediaQueryList | undefined
@@ -24,7 +24,7 @@ export function useTheme(settings: Ref<SettingsModel>, onApplied: (animate: bool
           ? window.matchMedia('(prefers-color-scheme: dark)').matches
           : false),
     )
-    return resolveTheme(preference, lightId, darkId, isSystemDark)
+    return resolveTheme(preference, lightId, darkId, isSystemDark, settings.value.custom_themes || [])
   }
 
   function commitTheme(
@@ -78,6 +78,39 @@ export function useTheme(settings: Ref<SettingsModel>, onApplied: (animate: bool
     commitTheme(settings.value.theme, settings.value.light_theme_id, settings.value.dark_theme_id, true)
   }
 
+  function saveCustomTheme(theme: ThemeDefinition, activate = false) {
+    const list = [...(settings.value.custom_themes || [])]
+    const idx = list.findIndex((t) => t.id === theme.id)
+    if (idx >= 0) {
+      list[idx] = { ...theme, isCustom: true }
+    } else {
+      list.push({ ...theme, isCustom: true })
+    }
+    settings.value.custom_themes = list
+
+    if (activate) {
+      previewThemeId(theme.id, theme.isDark)
+    } else {
+      const activeId = theme.isDark ? settings.value.dark_theme_id : settings.value.light_theme_id
+      if (activeId === theme.id) {
+        commitTheme(settings.value.theme, settings.value.light_theme_id, settings.value.dark_theme_id, true)
+      }
+    }
+  }
+
+  function deleteCustomTheme(id: string) {
+    const list = (settings.value.custom_themes || []).filter((t) => t.id !== id)
+    settings.value.custom_themes = list
+
+    if (settings.value.light_theme_id === id) {
+      settings.value.light_theme_id = 'green'
+    }
+    if (settings.value.dark_theme_id === id) {
+      settings.value.dark_theme_id = 'black'
+    }
+    commitTheme(settings.value.theme, settings.value.light_theme_id, settings.value.dark_theme_id, true)
+  }
+
   function beginPreview() {
     savedPreference = settings.value.theme
     savedLightId = settings.value.light_theme_id
@@ -119,6 +152,8 @@ export function useTheme(settings: Ref<SettingsModel>, onApplied: (animate: bool
     commitTheme,
     previewTheme,
     previewThemeId,
+    saveCustomTheme,
+    deleteCustomTheme,
     beginPreview,
     acceptPreview,
     cancelPreview,

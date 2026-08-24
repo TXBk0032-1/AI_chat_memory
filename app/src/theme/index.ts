@@ -15,13 +15,14 @@ export function resolveTheme(
   lightId?: string,
   darkId?: string,
   isSystemDark = false,
+  customThemes: ThemeDefinition[] = [],
 ): ResolvedTheme {
   const isDark = mode === 'system' ? isSystemDark : mode === 'dark'
   const activeId = isDark ? (darkId || 'black') : (lightId || 'green')
 
-  let themeDef: ThemeDefinition | undefined = findTheme(activeId)
+  let themeDef: ThemeDefinition | undefined = findTheme(activeId, customThemes)
   if (!themeDef || themeDef.isDark !== isDark) {
-    themeDef = getDefaultTheme(isDark)
+    themeDef = getDefaultTheme(isDark, customThemes)
   }
 
   const colors = createThemeColors(

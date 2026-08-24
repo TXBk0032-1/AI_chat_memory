@@ -36,6 +36,8 @@ export type SemanticSearchSettings = {
   openai_compatible: RemoteEmbeddingSettings
 }
 
+import type { ThemeDefinition } from './theme/types'
+
 export type SettingsModel = {
   setup_complete: boolean
   secret_enabled: boolean
@@ -51,6 +53,7 @@ export type SettingsModel = {
   semantic_search: SemanticSearchSettings
   mcp_enabled: boolean
   cloud_sync: CloudSyncSettings
+  custom_themes?: ThemeDefinition[]
 }
 
 export type CloudBackendKind = 'webdav' | 's3'

@@ -380,6 +380,31 @@ pub struct AppSettings {
     pub mcp_enabled: bool,
     #[serde(default)]
     pub cloud_sync: CloudSyncSettings,
+    #[serde(default)]
+    pub custom_themes: Vec<CustomThemeDefinition>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ThemeConfigModel {
+    pub primary: String,
+    #[serde(default)]
+    pub font: Option<String>,
+    #[serde(default)]
+    pub ext_info: Option<std::collections::HashMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CustomThemeDefinition {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub name_key: Option<String>,
+    pub is_dark: bool,
+    #[serde(default)]
+    pub is_dark_font: Option<bool>,
+    #[serde(default = "default_true")]
+    pub is_custom: bool,
+    pub config: ThemeConfigModel,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -625,6 +650,7 @@ impl Default for AppSettings {
             semantic_search: SemanticSearchSettings::default(),
             mcp_enabled: true,
             cloud_sync: CloudSyncSettings::default(),
+            custom_themes: Vec::new(),
         }
     }
 }

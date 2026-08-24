@@ -111,4 +111,31 @@ describe('useTheme composable', () => {
     expect(document.documentElement.dataset.theme).toBe('light')
     expect(document.documentElement.dataset.themeId).toBe('green')
   })
+
+  it('saves, activates and deletes custom themes', () => {
+    const settings = ref(createTestSettings())
+    const onApplied = vi.fn()
+    const theme = useTheme(settings, onApplied)
+
+    const customTheme = {
+      id: 'custom_aurora',
+      name: 'Aurora Dark',
+      nameKey: '',
+      isDark: true,
+      isCustom: true,
+      config: {
+        primary: 'rgb(80, 200, 160)',
+      },
+    }
+
+    theme.saveCustomTheme(customTheme, true)
+    expect(settings.value.custom_themes).toHaveLength(1)
+    expect(settings.value.dark_theme_id).toBe('custom_aurora')
+    expect(settings.value.theme).toBe('dark')
+    expect(document.documentElement.dataset.themeId).toBe('custom_aurora')
+
+    theme.deleteCustomTheme('custom_aurora')
+    expect(settings.value.custom_themes).toHaveLength(0)
+    expect(settings.value.dark_theme_id).toBe('black')
+  })
 })

@@ -322,13 +322,96 @@ export const darkThemes: ThemeDefinition[] = [
 
 export const allThemes: ThemeDefinition[] = [...lightThemes, ...darkThemes]
 
-export function findTheme(id: string): ThemeDefinition | undefined {
-  return allThemes.find((t) => t.id === id)
+export function findTheme(id: string, customThemes: ThemeDefinition[] = []): ThemeDefinition | undefined {
+  return customThemes.find((t) => t.id === id) || allThemes.find((t) => t.id === id)
 }
 
-export function getDefaultTheme(isDark: boolean): ThemeDefinition {
+export function getDefaultTheme(isDark: boolean, customThemes: ThemeDefinition[] = []): ThemeDefinition {
   if (isDark) {
-    return darkThemes[0]
+    const customDark = customThemes.find((t) => t.isDark)
+    return customDark || darkThemes[0]
   }
-  return lightThemes[0]
+  const customLight = customThemes.find((t) => !t.isDark)
+  return customLight || lightThemes[0]
+}
+
+export function getCategorizedThemes(customThemes: ThemeDefinition[] = []): {
+  customLight: ThemeDefinition[]
+  customDark: ThemeDefinition[]
+  presetLight: ThemeDefinition[]
+  presetDark: ThemeDefinition[]
+} {
+  return {
+    customLight: customThemes.filter((t) => !t.isDark),
+    customDark: customThemes.filter((t) => t.isDark),
+    presetLight: lightThemes,
+    presetDark: darkThemes,
+  }
+}
+
+export function createDefaultCustomTheme(isDark: boolean, name = ''): ThemeDefinition {
+  const id = `custom_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
+  if (isDark) {
+    return {
+      id,
+      name: name || 'Custom Dark',
+      nameKey: '',
+      isDark: true,
+      isDarkFont: false,
+      isCustom: true,
+      config: {
+        primary: 'rgb(85, 196, 158)',
+        font: 'rgb(229, 229, 229)',
+        extInfo: {
+          '--color-app-background': 'rgba(23, 27, 30, 0.95)',
+          '--color-main-background': 'rgba(30, 36, 40, 1)',
+          '--color-nav-font': 'var(--color-primary)',
+          '--color-badge-primary': 'var(--color-primary)',
+          '--color-badge-secondary': '#3ba272',
+          '--color-badge-tertiary': '#60c9a4',
+        },
+      },
+    }
+  }
+
+  return {
+    id,
+    name: name || 'Custom Light',
+    nameKey: '',
+    isDark: false,
+    isDarkFont: false,
+    isCustom: true,
+    config: {
+      primary: 'rgb(22, 121, 97)',
+      font: 'rgb(33, 33, 33)',
+      extInfo: {
+        '--color-app-background': 'rgba(247, 249, 250, 0.9)',
+        '--color-main-background': 'rgba(255, 255, 255, 1)',
+        '--color-nav-font': 'var(--color-primary)',
+        '--color-btn-hide': '#3bc2b2',
+        '--color-btn-min': '#85c43b',
+        '--color-btn-close': '#fab4a0',
+        '--color-badge-primary': 'var(--color-primary)',
+        '--color-badge-secondary': '#4baed5',
+        '--color-badge-tertiary': '#e7aa36',
+      },
+    },
+  }
+}
+
+export function duplicateThemeAsCustom(source: ThemeDefinition, newName?: string): ThemeDefinition {
+  const id = `custom_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
+  return {
+    id,
+    name: newName || `${source.name} (Copy)`,
+    nameKey: '',
+    isDark: source.isDark,
+    isDarkFont: Boolean(source.isDarkFont),
+    isCustom: true,
+    config: {
+      primary: source.config.primary,
+      font: source.config.font,
+      extInfo: source.config.extInfo ? { ...source.config.extInfo } : undefined,
+    },
+  }
 }

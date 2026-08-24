@@ -14,11 +14,21 @@ import {
   ShieldCheck,
   SlidersHorizontal,
   Sun,
+  Plus,
+  Edit3,
+  Copy,
+  Trash2,
 } from 'lucide-vue-next'
 import AppSelect, { type SelectOption } from './AppSelect.vue'
 import CloudSyncSettings from './CloudSyncSettings.vue'
+import ThemeEditorDialog from './ThemeEditorDialog.vue'
 import { cloudSyncProfileSnapshot, cloudSyncProfilesEqual } from '../cloud-sync-profile'
-import { lightThemes, darkThemes, type ThemeDefinition } from '../theme'
+import {
+  getCategorizedThemes,
+  duplicateThemeAsCustom,
+  createDefaultCustomTheme,
+  type ThemeDefinition,
+} from '../theme'
 import type {
   ApiStatus,
   EmbeddingBackendKind,
@@ -302,6 +312,14 @@ const dtypeOptions = computed<SelectOption<LocalEmbeddingDType>[]>(() => [
 const pages: SettingsPage[] = ['general', 'appearance', 'semantic', 'connections', 'cloud-sync']
 const activePageIndex = computed(() => pages.indexOf(activePage.value))
 
+const showThemeEditor = ref(false)
+const editingTheme = ref<ThemeDefinition | null>(null)
+const isCreatingNewTheme = ref(false)
+
+const categorizedThemes = computed(() => getCategorizedThemes(settings.value.custom_themes || []))
+const lightThemesList = computed(() => [...categorizedThemes.value.customLight, ...categorizedThemes.value.presetLight])
+const darkThemesList = computed(() => [...categorizedThemes.value.customDark, ...categorizedThemes.value.presetDark])
+
 function onThemeModeChange(mode: ThemePreference) {
   settings.value.theme = mode
   emit('previewTheme', mode, settings.value.light_theme_id, settings.value.dark_theme_id)
@@ -320,6 +338,60 @@ function onSelectTheme(themeDef: ThemeDefinition) {
     }
   }
   emit('previewThemeId', themeDef.id, themeDef.isDark)
+}
+
+function openCreateTheme(isDark = false) {
+  editingTheme.value = createDefaultCustomTheme(isDark)
+  isCreatingNewTheme.value = true
+  showThemeEditor.value = true
+}
+
+function openEditTheme(themeDef: ThemeDefinition, e?: Event) {
+  e?.stopPropagation()
+  editingTheme.value = themeDef
+  isCreatingNewTheme.value = false
+  showThemeEditor.value = true
+}
+
+function openDuplicateTheme(themeDef: ThemeDefinition, e?: Event) {
+  e?.stopPropagation()
+  const cloned = duplicateThemeAsCustom(themeDef)
+  editingTheme.value = cloned
+  isCreatingNewTheme.value = true
+  showThemeEditor.value = true
+}
+
+function onSaveCustomTheme(theme: ThemeDefinition, activate: boolean) {
+  const currentCustom = [...(settings.value.custom_themes || [])]
+  const idx = currentCustom.findIndex((t) => t.id === theme.id)
+  if (idx >= 0) {
+    currentCustom[idx] = { ...theme, isCustom: true }
+  } else {
+    currentCustom.unshift({ ...theme, isCustom: true })
+  }
+  settings.value.custom_themes = currentCustom
+
+  if (activate) {
+    onSelectTheme(theme)
+  } else {
+    const activeId = theme.isDark ? settings.value.dark_theme_id : settings.value.light_theme_id
+    if (activeId === theme.id) {
+      emit('previewThemeId', theme.id, theme.isDark)
+    }
+  }
+}
+
+function onDeleteCustomTheme(id: string) {
+  const currentCustom = (settings.value.custom_themes || []).filter((t) => t.id !== id)
+  settings.value.custom_themes = currentCustom
+
+  if (settings.value.light_theme_id === id) {
+    settings.value.light_theme_id = 'green'
+  }
+  if (settings.value.dark_theme_id === id) {
+    settings.value.dark_theme_id = 'black'
+  }
+  emit('previewTheme', settings.value.theme, settings.value.light_theme_id, settings.value.dark_theme_id)
 }
 </script>
 
@@ -435,62 +507,154 @@ function onSelectTheme(themeDef: ThemeDefinition) {
               </section>
 
               <section v-show="settings.theme !== 'dark'" class="setting-group theme-palette-group">
-                <div class="setting-heading">
+                <div class="setting-heading theme-section-heading">
                   <div>
                     <h3>{{ t('settings.lightThemesTitle') }}</h3>
                     <p>{{ t('settings.lightThemesDescription') }}</p>
                   </div>
+                  <div class="theme-heading-actions">
+                    <button
+                      type="button"
+                      class="theme-btn-action"
+                      @click="openCreateTheme(false)"
+                    >
+                      <Plus :size="13" />
+                      <span>{{ t('settings.newThemeButton') }}</span>
+                    </button>
+                  </div>
                 </div>
                 <div class="theme-card-grid" role="radiogroup" :aria-label="t('settings.lightThemesTitle')">
-                  <button
-                    v-for="item in lightThemes"
+                  <div
+                    v-for="item in lightThemesList"
                     :key="item.id"
-                    type="button"
                     class="theme-card"
                     :class="{ active: (settings.light_theme_id || 'green') === item.id }"
                     :aria-checked="(settings.light_theme_id || 'green') === item.id"
                     role="radio"
+                    tabindex="0"
                     @click="onSelectTheme(item)"
+                    @keydown.enter.space.prevent="onSelectTheme(item)"
                   >
+                    <!-- Custom Badge -->
+                    <span v-if="item.isCustom" class="theme-card-custom-badge">
+                      {{ t('settings.customThemeBadge') }}
+                    </span>
+
+                    <!-- Action buttons -->
+                    <div class="theme-card-actions" @click.stop>
+                      <button
+                        v-if="item.isCustom"
+                        type="button"
+                        class="theme-card-icon-btn"
+                        :title="t('settings.editTheme')"
+                        @click="openEditTheme(item, $event)"
+                      >
+                        <Edit3 :size="12" />
+                      </button>
+                      <button
+                        type="button"
+                        class="theme-card-icon-btn"
+                        :title="t('settings.duplicateTheme')"
+                        @click="openDuplicateTheme(item, $event)"
+                      >
+                        <Copy :size="12" />
+                      </button>
+                      <button
+                        v-if="item.isCustom"
+                        type="button"
+                        class="theme-card-icon-btn is-danger"
+                        :title="t('settings.deleteTheme')"
+                        @click="onDeleteCustomTheme(item.id)"
+                      >
+                        <Trash2 :size="12" />
+                      </button>
+                    </div>
+
                     <div class="theme-card-preview" :style="{ '--preview-color': item.config.primary, '--preview-bg': item.config.extInfo?.['--color-app-background'] || '#f7f9fa' }">
                       <span class="theme-card-swatch"></span>
                       <span class="theme-card-accent"></span>
                     </div>
                     <div class="theme-card-info">
-                      <strong>{{ t(item.nameKey) }}</strong>
+                      <strong>{{ item.nameKey ? t(item.nameKey) : item.name }}</strong>
                       <span v-if="(settings.light_theme_id || 'green') === item.id" class="theme-card-badge">{{ t('settings.selectedTheme') }}</span>
                     </div>
-                  </button>
+                  </div>
                 </div>
               </section>
 
               <section v-show="settings.theme !== 'light'" class="setting-group theme-palette-group">
-                <div class="setting-heading">
+                <div class="setting-heading theme-section-heading">
                   <div>
                     <h3>{{ t('settings.darkThemesTitle') }}</h3>
                     <p>{{ t('settings.darkThemesDescription') }}</p>
                   </div>
+                  <div class="theme-heading-actions">
+                    <button
+                      type="button"
+                      class="theme-btn-action"
+                      @click="openCreateTheme(true)"
+                    >
+                      <Plus :size="13" />
+                      <span>{{ t('settings.newThemeButton') }}</span>
+                    </button>
+                  </div>
                 </div>
                 <div class="theme-card-grid" role="radiogroup" :aria-label="t('settings.darkThemesTitle')">
-                  <button
-                    v-for="item in darkThemes"
+                  <div
+                    v-for="item in darkThemesList"
                     :key="item.id"
-                    type="button"
                     class="theme-card is-dark-card"
                     :class="{ active: (settings.dark_theme_id || 'black') === item.id }"
                     :aria-checked="(settings.dark_theme_id || 'black') === item.id"
                     role="radio"
+                    tabindex="0"
                     @click="onSelectTheme(item)"
+                    @keydown.enter.space.prevent="onSelectTheme(item)"
                   >
+                    <!-- Custom Badge -->
+                    <span v-if="item.isCustom" class="theme-card-custom-badge">
+                      {{ t('settings.customThemeBadge') }}
+                    </span>
+
+                    <!-- Action buttons -->
+                    <div class="theme-card-actions" @click.stop>
+                      <button
+                        v-if="item.isCustom"
+                        type="button"
+                        class="theme-card-icon-btn"
+                        :title="t('settings.editTheme')"
+                        @click="openEditTheme(item, $event)"
+                      >
+                        <Edit3 :size="12" />
+                      </button>
+                      <button
+                        type="button"
+                        class="theme-card-icon-btn"
+                        :title="t('settings.duplicateTheme')"
+                        @click="openDuplicateTheme(item, $event)"
+                      >
+                        <Copy :size="12" />
+                      </button>
+                      <button
+                        v-if="item.isCustom"
+                        type="button"
+                        class="theme-card-icon-btn is-danger"
+                        :title="t('settings.deleteTheme')"
+                        @click="onDeleteCustomTheme(item.id)"
+                      >
+                        <Trash2 :size="12" />
+                      </button>
+                    </div>
+
                     <div class="theme-card-preview" :style="{ '--preview-color': item.config.primary, '--preview-bg': item.config.extInfo?.['--color-app-background'] || '#171b1e' }">
                       <span class="theme-card-swatch"></span>
                       <span class="theme-card-accent"></span>
                     </div>
                     <div class="theme-card-info">
-                      <strong>{{ t(item.nameKey) }}</strong>
+                      <strong>{{ item.nameKey ? t(item.nameKey) : item.name }}</strong>
                       <span v-if="(settings.dark_theme_id || 'black') === item.id" class="theme-card-badge">{{ t('settings.selectedTheme') }}</span>
                     </div>
-                  </button>
+                  </div>
                 </div>
               </section>
             </section>
@@ -692,4 +856,12 @@ function onSelectTheme(themeDef: ThemeDefinition) {
       </section>
     </div>
   </Transition>
+
+  <ThemeEditorDialog
+    v-model:show="showThemeEditor"
+    :theme-def="editingTheme"
+    :is-new="isCreatingNewTheme"
+    @save="onSaveCustomTheme"
+    @delete="onDeleteCustomTheme"
+  />
 </template>
