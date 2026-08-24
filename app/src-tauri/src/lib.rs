@@ -119,10 +119,8 @@ pub fn run() {
                 }
             });
 
-            let initial_locale = tauri::async_runtime::block_on(async {
-                let settings = service.settings().await;
-                crate::i18n::resolve_native_locale(settings.language)
-            });
+            let initial_locale =
+                crate::i18n::resolve_native_locale(service.current_settings().language);
             if let Some(window) = app.get_webview_window("main") {
                 window.set_title(crate::i18n::native_text(initial_locale).app_title)?;
             }

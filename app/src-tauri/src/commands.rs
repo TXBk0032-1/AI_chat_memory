@@ -90,20 +90,24 @@ pub async fn import_deepseek_zip(
     service: State<'_, AppService>,
     path: String,
 ) -> Result<ImportResponse, String> {
+    use tokio::io::AsyncReadExt;
     let safe_path = validate_file_path(&path, &["zip"])?;
-    let metadata = tokio::fs::metadata(&safe_path)
+    let file = tokio::fs::File::open(&safe_path)
         .await
         .map_err(|e| e.to_string())?;
-    if metadata.len() > 128 * 1024 * 1024 {
+    const MAX_ZIP_BYTES: usize = 128 * 1024 * 1024;
+    let mut bytes = Vec::new();
+    file.take((MAX_ZIP_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|e| e.to_string())?;
+    if bytes.len() > MAX_ZIP_BYTES {
         tracing::warn!(
-            archive_bytes = metadata.len(),
+            archive_bytes = bytes.len(),
             "desktop ZIP import rejected because it exceeds the size limit"
         );
         return Err("ZIP 文件超过 128 MB 限制".into());
     }
-    let bytes = tokio::fs::read(safe_path)
-        .await
-        .map_err(|e| e.to_string())?;
     service.import_deepseek_zip(bytes).await.map_err(message)
 }
 

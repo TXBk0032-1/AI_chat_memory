@@ -13,7 +13,7 @@ use crate::{
 };
 
 pub fn build(app: &tauri::App, service: &AppService, locale: SupportedLocale) -> tauri::Result<()> {
-    let settings = tauri::async_runtime::block_on(service.settings());
+    let settings = service.current_settings();
     let menu = build_menu(app, locale)?;
     TrayIconBuilder::with_id("main-tray")
         .menu(&menu)
@@ -39,8 +39,7 @@ pub fn build(app: &tauri::App, service: &AppService, locale: SupportedLocale) ->
             {
                 let app = tray.app_handle();
                 let service = app.state::<AppService>();
-                let behavior =
-                    tauri::async_runtime::block_on(service.settings()).tray_click_behavior;
+                let behavior = service.current_settings().tray_click_behavior;
                 if matches!(behavior, TrayClickBehavior::OpenWindow) {
                     show_main_window(app);
                 }

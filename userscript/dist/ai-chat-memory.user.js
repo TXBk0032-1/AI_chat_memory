@@ -434,8 +434,9 @@
             if (body === undefined || body === null) return body ?? null;
             if (typeof body === 'string') return JsonTools.safeParse(body) ?? body;
             if (typeof body.entries === 'function' && typeof body.append === 'function') {
-                const result = {};
+                const result = Object.create(null);
                 for (const [name, value] of body.entries()) {
+                    if (name === '__proto__' || name === 'constructor' || name === 'prototype') continue;
                     const serialized = value && typeof value === 'object'
                         && typeof value.name === 'string'
                         && typeof value.size === 'number'
@@ -445,7 +446,7 @@
                         result[name] = Array.isArray(result[name]) ? [...result[name], serialized] : [result[name], serialized];
                     } else result[name] = serialized;
                 }
-                return result;
+                return { ...result };
             }
             if (typeof body === 'object') return JsonTools.clone(body);
             return String(body);

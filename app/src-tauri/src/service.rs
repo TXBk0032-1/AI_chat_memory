@@ -390,8 +390,12 @@ impl AppService {
         }
     }
 
+    pub fn current_settings(&self) -> AppSettings {
+        self.settings.current()
+    }
+
     pub async fn settings(&self) -> AppSettings {
-        self.settings.get().await
+        self.settings.current()
     }
 
     pub async fn update_settings(&self, settings: AppSettings) -> Result<AppSettings> {

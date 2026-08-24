@@ -6,7 +6,7 @@ pub fn handle(window: &tauri::Window, event: &WindowEvent) {
     if let WindowEvent::CloseRequested { api, .. } = event {
         let app = window.app_handle().clone();
         let service = app.state::<AppService>();
-        match tauri::async_runtime::block_on(service.settings()).close_behavior {
+        match service.current_settings().close_behavior {
             CloseBehavior::HideToTray => {
                 tracing::info!("main window close requested; hiding to tray");
                 api.prevent_close();

@@ -1,6 +1,6 @@
 use rand::RngCore;
 use std::path::PathBuf;
-use tokio::sync::RwLock;
+use std::sync::RwLock;
 
 use crate::{
     error::{AppError, Result},
@@ -39,8 +39,11 @@ impl SettingsStore {
             value: RwLock::new(value),
         })
     }
+    pub fn current(&self) -> AppSettings {
+        self.value.read().expect("settings lock poisoned").clone()
+    }
     pub async fn get(&self) -> AppSettings {
-        self.value.read().await.clone()
+        self.current()
     }
     pub async fn update(&self, mut value: AppSettings) -> Result<AppSettings> {
         validate_origins(&value.allowed_origins)?;
@@ -68,12 +71,12 @@ impl SettingsStore {
             return Err(error.into());
         }
         let _ = tokio::fs::remove_file(&backup).await;
-        *self.value.write().await = value.clone();
+        *self.value.write().expect("settings lock poisoned") = value.clone();
         tracing::info!(secret_enabled=value.secret_enabled, origin_count=value.allowed_origins.len(), theme=?value.theme, "application settings updated");
         Ok(value)
     }
     pub async fn rotate_secret(&self) -> Result<AppSettings> {
-        let mut value = self.get().await;
+        let mut value = self.current();
         value.secret_enabled = true;
         value.secret = Some(generate_secret());
         let settings = self.update(value).await?;
