@@ -211,33 +211,26 @@ $portableContractTest = Join-Path $PSScriptRoot "tests\build-dev-portable.Tests.
 $userscriptPath = Join-Path $Root "userscript\dist\ai-chat-memory.user.js"
 $userscriptTestPath = Join-Path $Root "userscript\tests\capture.test.mjs"
 
-Invoke-ParallelSteps @(
-    @{
-        Name = "Type-check and build frontend (Vite)"
-        WorkingDirectory = $App
-        Command = "npm run build"
-    },
-    @{
-        Name = "Static checks, contracts & Rust lint"
-        WorkingDirectory = $Rust
-        Command = "node --check `"$userscriptPath`" && node --test `"$userscriptTestPath`" && powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$installerContractTest`" && powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$portableContractTest`" && cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings"
-    }
-)
+$frontendCmd = "npm run build"
+$rustCmd = "node --check `"$userscriptPath`" && node --test `"$userscriptTestPath`" && powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$installerContractTest`" && powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$portableContractTest`" && cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings"
 
 if ($Stage -in "test", "release") {
-    Invoke-ParallelSteps @(
-        @{
-            Name = "Run frontend tests"
-            WorkingDirectory = $App
-            Command = "npm test"
-        },
-        @{
-            Name = "Run Rust tests"
-            WorkingDirectory = $Rust
-            Command = "cargo test --all-features"
-        }
-    )
+    $frontendCmd = "npm run build && npm test"
+    $rustCmd = "$rustCmd && cargo test --all-features"
 }
+
+Invoke-ParallelSteps @(
+    @{
+        Name = if ($Stage -in "test", "release") { "Frontend Pipeline (build & test)" } else { "Frontend Pipeline (build)" }
+        WorkingDirectory = $App
+        Command = $frontendCmd
+    },
+    @{
+        Name = if ($Stage -in "test", "release") { "Rust & Quality Pipeline (lint & test)" } else { "Rust & Quality Pipeline (lint)" }
+        WorkingDirectory = $Rust
+        Command = $rustCmd
+    }
+)
 
 if ($Stage -eq "release") {
     $runningApp = Get-CimInstance Win32_Process -Filter "Name = 'ai-chat-memory-desktop.exe'" -ErrorAction SilentlyContinue
