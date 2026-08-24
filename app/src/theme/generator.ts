@@ -58,15 +58,15 @@ export function createThemeColors(
   if (isDark) {
     colors['--color-primary-hover'] = colors['--color-primary-light-200'] || normPrimary
     colors['--color-primary-active'] = colors['--color-primary-light-400'] || normPrimary
-    colors['--color-primary-subtle'] = colors['--color-primary-alpha-200'] || 'rgba(85, 196, 158, 0.15)'
-    colors['--color-primary-border'] = colors['--color-primary-alpha-400'] || 'rgba(85, 196, 158, 0.4)'
+    colors['--color-primary-subtle'] = colors['--color-primary-alpha-800'] || 'rgba(85, 196, 158, 0.18)'
+    colors['--color-primary-border'] = colors['--color-primary-alpha-600'] || 'rgba(85, 196, 158, 0.4)'
     colors['--color-primary-text'] = colors['--color-primary-light-300'] || normPrimary
   } else {
     colors['--color-primary-hover'] = colors['--color-primary-dark-100'] || normPrimary
     colors['--color-primary-active'] = colors['--color-primary-dark-200'] || normPrimary
-    colors['--color-primary-subtle'] = colors['--color-primary-light-900'] || 'rgba(22, 121, 97, 0.08)'
-    colors['--color-primary-border'] = colors['--color-primary-light-600'] || 'rgba(22, 121, 97, 0.4)'
-    colors['--color-primary-text'] = normPrimary
+    colors['--color-primary-subtle'] = colors['--color-primary-alpha-900'] || 'rgba(22, 121, 97, 0.10)'
+    colors['--color-primary-border'] = colors['--color-primary-alpha-600'] || 'rgba(22, 121, 97, 0.4)'
+    colors['--color-primary-text'] = colors['--color-primary-dark-100'] || normPrimary
   }
 
   // Merge extInfo overrides

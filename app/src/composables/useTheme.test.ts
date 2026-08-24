@@ -84,7 +84,7 @@ describe('useTheme composable', () => {
 
     theme.previewThemeId('orange', false)
     expect(settings.value.light_theme_id).toBe('orange')
-    expect(settings.value.theme).toBe('system')
+    expect(settings.value.theme).toBe('light')
     expect(document.documentElement.dataset.themeId).toBe('orange')
 
     settings.value.theme = 'light'

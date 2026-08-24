@@ -18,7 +18,12 @@ export function useTheme(settings: Ref<SettingsModel>, onApplied: (animate: bool
     lightId = settings.value.light_theme_id,
     darkId = settings.value.dark_theme_id,
   ): ResolvedTheme {
-    const isSystemDark = Boolean(systemThemeQuery?.matches)
+    const isSystemDark = Boolean(
+      systemThemeQuery?.matches ??
+        (typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+          ? window.matchMedia('(prefers-color-scheme: dark)').matches
+          : false),
+    )
     return resolveTheme(preference, lightId, darkId, isSystemDark)
   }
 
@@ -55,18 +60,18 @@ export function useTheme(settings: Ref<SettingsModel>, onApplied: (animate: bool
     settings.value.theme = theme
     if (lightId !== undefined) settings.value.light_theme_id = lightId
     if (darkId !== undefined) settings.value.dark_theme_id = darkId
-    commitTheme(theme, lightId, darkId, true)
+    commitTheme(theme, settings.value.light_theme_id, settings.value.dark_theme_id, true)
   }
 
   function previewThemeId(id: string, isDark: boolean) {
     if (isDark) {
       settings.value.dark_theme_id = id
-      if (settings.value.theme === 'light') {
+      if (settings.value.theme !== 'dark') {
         settings.value.theme = 'dark'
       }
     } else {
       settings.value.light_theme_id = id
-      if (settings.value.theme === 'dark') {
+      if (settings.value.theme !== 'light') {
         settings.value.theme = 'light'
       }
     }

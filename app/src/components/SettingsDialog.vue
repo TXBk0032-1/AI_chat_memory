@@ -303,10 +303,22 @@ const pages: SettingsPage[] = ['general', 'appearance', 'semantic', 'connections
 const activePageIndex = computed(() => pages.indexOf(activePage.value))
 
 function onThemeModeChange(mode: ThemePreference) {
+  settings.value.theme = mode
   emit('previewTheme', mode, settings.value.light_theme_id, settings.value.dark_theme_id)
 }
 
 function onSelectTheme(themeDef: ThemeDefinition) {
+  if (themeDef.isDark) {
+    settings.value.dark_theme_id = themeDef.id
+    if (settings.value.theme !== 'dark') {
+      settings.value.theme = 'dark'
+    }
+  } else {
+    settings.value.light_theme_id = themeDef.id
+    if (settings.value.theme !== 'light') {
+      settings.value.theme = 'light'
+    }
+  }
   emit('previewThemeId', themeDef.id, themeDef.isDark)
 }
 </script>

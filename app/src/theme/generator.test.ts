@@ -16,7 +16,7 @@ describe('theme generator', () => {
     expect(colors['--color-primary-hover']).toBeDefined()
     expect(colors['--color-primary-active']).toBeDefined()
     expect(colors['--color-primary-subtle']).toBeDefined()
-    expect(colors['--color-primary-text']).toBe('rgb(22, 121, 97)')
+    expect(colors['--color-primary-text']).toBe('rgb(20, 109, 87)')
   })
 
   it('generates dark theme palette with inverted dark/light steps', () => {
