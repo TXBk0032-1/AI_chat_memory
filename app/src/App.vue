@@ -234,7 +234,7 @@ const loadSearchHits = conversationSearch.load
 const {
   showSettings, originText, secretCopied, mcpConfigCopied, settingsApiStatus, semanticStatus: settingsSemanticStatus, semanticBusy, downloadProgress, reindexProgress,
   openSettings, closeSettings, saveSettings: saveSettingsBase, rotateSecret, copySecret, copyMcpConfig, changeDataDirectory,
-  checkEmbedding, reindexSemantic, downloadLocalModel, importLocalModel, cancelSemanticWork,
+  checkEmbedding, reindexSemantic, downloadLocalModel, importLocalModel, cancelSemanticWork, dispose: disposeSettings,
 } = useSettings(settings, error, {
   begin: theme.beginPreview,
   accept: theme.acceptPreview,
@@ -635,13 +635,11 @@ async function navigateSearch(direction: number) {
 const loadBranches = branches.load
 function handleModePointerDown(targetMode: 'conversation' | 'branches', event: PointerEvent) {
   if (event.button !== 0) return
-  console.log(`%c[DETAIL:MODE_POINTER_DOWN] target="${targetMode}"`, 'color: #ea580c; font-weight: bold')
   if (targetMode === 'conversation') detailMode.value = 'conversation'
   else showBranches()
 }
 
 function handleModeSwitch(targetMode: 'conversation' | 'branches') {
-  console.log(`%c[DETAIL:MODE_CLICK] target="${targetMode}"`, 'color: #ea580c; font-weight: bold')
   if (targetMode === 'conversation') detailMode.value = 'conversation'
   else showBranches()
 }
@@ -831,22 +829,6 @@ onMounted(async () => {
   document.addEventListener('click', preventRapidControlClick, true)
   document.addEventListener('scroll', hideContextMenu, true)
 
-  window.addEventListener('pointerdown', (e) => {
-    const target = e.target instanceof Element ? e.target : null
-    const tag = target ? `${target.tagName.toLowerCase()}${target.className ? '.' + String(target.className).trim().replace(/\s+/g, '.') : ''}` : 'null'
-    console.debug(`[INPUT:POINTER_DOWN] at (${e.clientX}, ${e.clientY}) on <${tag}>`)
-  }, true)
-
-  let lastHeartbeat = performance.now()
-  window.setInterval(() => {
-    const now = performance.now()
-    const delta = now - lastHeartbeat
-    if (delta > 200) {
-      console.warn(`%c[PERF:MAIN_THREAD_JANK] Event loop was delayed by ${(delta - 100).toFixed(1)}ms (main thread stutter)`, 'color: #dc2626; font-weight: bold')
-    }
-    lastHeartbeat = now
-  }, 100)
-
   // Kick off the first session list immediately so the shell is never empty while
   // settings / API status catch up in parallel.
   const sessionsReady = loadSessions()
@@ -888,6 +870,7 @@ onBeforeUnmount(() => {
   document.removeEventListener('scroll', hideContextMenu, true)
   window.clearInterval(statusTimer)
   cloudSync.dispose()
+  disposeSettings()
   disposeToasts()
   window.clearTimeout(readingPositionTimer)
   unlistenCloseRequest?.()

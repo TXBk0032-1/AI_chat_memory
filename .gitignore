@@ -26,6 +26,8 @@ server/data/*.bak
 archive/python-reference/server/data/
 legacy/python/server/data/
 deepseek_data-*.zip
+*.zip
+*.exe
 *.log
 
 # OS / editor

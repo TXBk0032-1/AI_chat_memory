@@ -1,4 +1,5 @@
 use sha2::{Digest, Sha256};
+use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChunkDraft {
@@ -27,7 +28,10 @@ pub fn chunk_message(
         return Vec::new();
     }
     let prefix = format!("[{platform}] {title}\n{role}: ");
-    let parts = split_text(body, TARGET_CHARS, OVERLAP_CHARS);
+    let prefix_len = prefix.graphemes(true).count();
+    let target_body = TARGET_CHARS.saturating_sub(prefix_len).max(100);
+    let overlap_body = OVERLAP_CHARS.min(target_body / 2);
+    let parts = split_text(body, target_body, overlap_body);
     parts
         .into_iter()
         .enumerate()
@@ -48,16 +52,16 @@ pub fn chunk_message(
 }
 
 fn split_text(text: &str, target: usize, overlap: usize) -> Vec<String> {
-    let chars = text.chars().collect::<Vec<_>>();
-    if chars.len() <= target {
+    let graphemes = text.graphemes(true).collect::<Vec<_>>();
+    if graphemes.len() <= target {
         return vec![text.to_owned()];
     }
     let mut parts = Vec::new();
     let mut start = 0usize;
-    while start < chars.len() {
-        let end = (start + target).min(chars.len());
-        parts.push(chars[start..end].iter().collect());
-        if end >= chars.len() {
+    while start < graphemes.len() {
+        let end = (start + target).min(graphemes.len());
+        parts.push(graphemes[start..end].concat());
+        if end >= graphemes.len() {
             break;
         }
         start = end.saturating_sub(overlap);
@@ -93,5 +97,21 @@ mod tests {
         assert!(chunks.len() >= 2);
         assert_eq!(chunks[0].chunk_index, 0);
         assert_eq!(chunks[1].chunk_index, 1);
+        for chunk in &chunks {
+            assert!(chunk.text.graphemes(true).count() <= TARGET_CHARS);
+        }
+    }
+
+    #[test]
+    fn complex_unicode_grapheme_clusters_preserved() {
+        // Multi-codepoint emoji sequence (family emoji with zero-width joiners)
+        let family_emoji = "👩‍👩‍👦‍👦";
+        let body = family_emoji.repeat(100);
+        let chunks = chunk_message("deepseek", "测试标题", "m1", "s1", "user", &body);
+        assert!(!chunks.is_empty());
+        for chunk in &chunks {
+            assert!(chunk.text.contains(family_emoji));
+            assert!(chunk.text.graphemes(true).count() <= TARGET_CHARS);
+        }
     }
 }

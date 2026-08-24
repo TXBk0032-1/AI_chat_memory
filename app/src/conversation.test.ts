@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { expandSearchHits, loadReadingPosition, mergeMessageBatch, saveReadingPosition, type Message } from './conversation'
+import { expandSearchHits, loadReadingPosition, mergeMessageBatch, resetReadingPositionsCache, saveReadingPosition, type Message } from './conversation'
 
 function message(seq: number): Message {
   return { id: `message-${seq}`, role: 'assistant', content: `${seq}`, metadata: {}, seq }
@@ -7,6 +7,7 @@ function message(seq: number): Message {
 
 describe('conversation loading helpers', () => {
   beforeEach(() => {
+    resetReadingPositionsCache()
     const values = new Map<string, string>()
     vi.stubGlobal('localStorage', {
       getItem: (key: string) => values.get(key) ?? null,
@@ -40,5 +41,12 @@ describe('conversation loading helpers', () => {
     }
     expect(loadReadingPosition('session-0')).toBeNull()
     expect(loadReadingPosition('session-504')?.seq).toBe(504)
+  })
+
+  it('handles corrupted localStorage JSON without crashing and resets cache', () => {
+    localStorage.setItem('ai_chat_memory_reading_positions', 'invalid-json{{{')
+    expect(loadReadingPosition('session-corrupt')).toBeNull()
+    saveReadingPosition('session-new', { seq: 10, offset: 0, updatedAt: 1 })
+    expect(loadReadingPosition('session-new')?.seq).toBe(10)
   })
 })

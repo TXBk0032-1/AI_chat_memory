@@ -66,6 +66,7 @@ candle-nn = { version = "0.9.1", features = ["cuda"] }
 candle-transformers = { version = "0.9.1" }
 hf-hub = { version = "0.4", default-features = false, features = ["tokio", "rustls-tls"] }
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+unicode-segmentation = "1.12"
 
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38"

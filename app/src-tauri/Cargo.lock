@@ -97,6 +97,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "unicode-segmentation",
  "url",
  "uuid",
  "webview2-com",

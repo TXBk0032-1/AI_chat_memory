@@ -359,9 +359,18 @@ export function useSettings(
     }, 2200)
   }
 
+  function dispose() {
+    clearMcpConfigCopiedTimer()
+    stopReindexPolling()
+    unlistenDownload?.()
+    unlistenDownload = undefined
+    unlistenReindex?.()
+    unlistenReindex = undefined
+  }
+
   return {
     showSettings, originText, secretCopied, mcpConfigCopied, settingsApiStatus, semanticStatus, semanticBusy, downloadProgress, reindexProgress,
     openSettings, closeSettings, saveSettings, rotateSecret, copySecret, copyMcpConfig, changeDataDirectory,
-    checkEmbedding, reindexSemantic, downloadLocalModel, importLocalModel, cancelSemanticWork,
+    checkEmbedding, reindexSemantic, downloadLocalModel, importLocalModel, cancelSemanticWork, dispose,
   }
 }

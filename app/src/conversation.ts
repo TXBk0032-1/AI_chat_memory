@@ -86,6 +86,7 @@ export function loadReadingPosition(sessionId: string): ReadingPosition | null {
     const position = cachedPositions[sessionId]
     return position && Number.isInteger(position.seq) ? position : null
   } catch {
+    cachedPositions = {}
     return null
   }
 }
@@ -100,6 +101,11 @@ export function saveReadingPosition(sessionId: string, position: ReadingPosition
     cachedPositions = Object.fromEntries(entries)
     localStorage.setItem(readingPositionKey, JSON.stringify(cachedPositions))
   } catch {
+    cachedPositions = {}
     // Reading restoration is best-effort and must never block conversation rendering.
   }
+}
+
+export function resetReadingPositionsCache() {
+  cachedPositions = null
 }

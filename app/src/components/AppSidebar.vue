@@ -22,12 +22,10 @@ const statusLabel = computed(() => props.apiStatus.service.state === 'running' ?
 
 function handlePlatformPointerDown(platformKey: string, event: PointerEvent) {
   if (event.button !== 0) return
-  console.log(`%c[SIDEBAR:POINTER_DOWN_TRIGGER] platform="${platformKey || 'all'}"`, 'color: #2563eb; font-weight: bold')
   emit('selectPlatform', platformKey)
 }
 
 function handlePlatformClick(platformKey: string) {
-  console.log(`%c[SIDEBAR:PLATFORM_CLICK] platform="${platformKey || 'all'}"`, 'color: #2563eb; font-weight: bold')
   emit('selectPlatform', platformKey)
 }
 </script>

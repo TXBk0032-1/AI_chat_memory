@@ -34,12 +34,10 @@ function formatDate(value?: string) {
 
 function handleSessionPointerDown(id: string, event: PointerEvent) {
   if (event.button !== 0) return
-  console.log(`%c[SESSION_LIST:POINTER_DOWN_TRIGGER] id="${id}"`, 'color: #9333ea; font-weight: bold')
   emit('select', id)
 }
 
 function handleSessionClick(id: string) {
-  console.log(`%c[SESSION_LIST:ROW_CLICK] id="${id}"`, 'color: #9333ea; font-weight: bold')
   emit('select', id)
 }
 </script>
