@@ -45,17 +45,23 @@ function handleSessionClick(id: string) {
 <template>
   <div class="session-pane">
     <div class="table-head"><span>{{ t('session.conversation') }}</span><span>{{ t('session.source') }}</span><span>{{ t('session.updated') }}</span></div>
-    <div v-if="loading && !sessions.length" class="loading-state"><LoaderCircle class="spinning" :size="22" /><span>{{ t('session.reading') }}</span></div>
-    <button v-for="session in sessions" :key="session.id" :class="['session-row', { selected: selectedId === session.id }]" @pointerdown="handleSessionPointerDown(session.id, $event)" @click="handleSessionClick(session.id)">
-      <span class="session-title"><strong v-html="highlightTitle(session.title)"></strong></span>
-      <span class="platform-cell"><i :class="session.platform"></i>{{ platformName(session.platform) }}</span>
-      <time>{{ formatDate(session.updated_at) }}</time>
-    </button>
-    <div v-if="!loading && !sessions.length" class="empty-state">
-      <Archive :size="30" />
-      <strong>{{ filtered ? t('session.noMatches') : t('session.noRecords') }}</strong>
-      <span>{{ filtered ? t('session.adjustFilters') : t('session.emptyHint') }}</span>
-    </div>
-    <button v-if="sessions.length < total" class="load-more" :disabled="loading" @click="emit('loadMore')">{{ loading ? t('session.loading') : t('session.loadMore', { count: total - sessions.length }) }}</button>
+    <Transition name="session-state" mode="out-in">
+      <div v-if="loading && !sessions.length" key="loading" class="loading-state"><LoaderCircle class="spinning" :size="22" /><span>{{ t('session.reading') }}</span></div>
+      <div v-else-if="!sessions.length" key="empty" class="empty-state">
+        <Archive :size="30" />
+        <strong>{{ filtered ? t('session.noMatches') : t('session.noRecords') }}</strong>
+        <span>{{ filtered ? t('session.adjustFilters') : t('session.emptyHint') }}</span>
+      </div>
+      <div v-else key="list" class="session-list-wrapper">
+        <TransitionGroup name="session-item" tag="div" class="session-items">
+          <button v-for="session in sessions" :key="session.id" :class="['session-row', { selected: selectedId === session.id }]" @pointerdown="handleSessionPointerDown(session.id, $event)" @click="handleSessionClick(session.id)">
+            <span class="session-title"><strong v-html="highlightTitle(session.title)"></strong></span>
+            <span class="platform-cell"><i :class="session.platform"></i>{{ platformName(session.platform) }}</span>
+            <time>{{ formatDate(session.updated_at) }}</time>
+          </button>
+        </TransitionGroup>
+        <button v-if="sessions.length < total" class="load-more" :disabled="loading" @click="emit('loadMore')">{{ loading ? t('session.loading') : t('session.loadMore', { count: total - sessions.length }) }}</button>
+      </div>
+    </Transition>
   </div>
 </template>

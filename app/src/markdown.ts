@@ -13,10 +13,13 @@ const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true }).us
 const defaultFence = markdown.renderer.rules.fence
 markdown.renderer.rules.fence = (tokens, index, options, environment, renderer) => {
   const token = tokens[index]
-  if (token.info.trim().toLowerCase() === 'mermaid') {
+  const info = token.info.trim().toLowerCase()
+  if (info === 'mermaid') {
     return `<div class="mermaid-diagram" data-mermaid-source="${encodeURIComponent(token.content)}"><pre>${markdown.utils.escapeHtml(token.content)}</pre></div>`
   }
-  return defaultFence ? defaultFence(tokens, index, options, environment, renderer) : renderer.renderToken(tokens, index, options)
+  const renderedCode = defaultFence ? defaultFence(tokens, index, options, environment, renderer) : renderer.renderToken(tokens, index, options)
+  const lang = markdown.utils.escapeHtml(token.info.trim().split(/\s+/)[0] || '')
+  return `<div class="code-block-wrapper"><div class="code-block-header"><span class="code-block-lang">${lang}</span><button class="code-copy-button" type="button" aria-label="${t('app.copy')}"><svg class="copy-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><svg class="check-icon" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg><span class="copy-text">${t('app.copy')}</span></button></div>${renderedCode}</div>`
 }
 
 function referenceValue(reference: unknown, keys: string[]) {

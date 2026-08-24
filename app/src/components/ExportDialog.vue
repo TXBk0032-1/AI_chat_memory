@@ -53,16 +53,18 @@ function isImageFormat(value: ExportFormat) {
               <component :is="item.icon" :size="18" /><span>{{ item.label }}</span>
             </button>
           </div>
-          <div v-if="format === 'pdf'" class="export-pdf-options">
-            <label class="export-thinking-option">
-              <input v-model="compact" type="checkbox" :disabled="busy" />
-              <span><strong>{{ t('export.compactLayout') }}</strong><small>{{ t('export.compactLayoutHint') }}</small></span>
-            </label>
-            <label class="export-thinking-option">
-              <input v-model="includeCoverPage" type="checkbox" :disabled="busy" />
-              <span><strong>{{ t('export.includeCoverPage') }}</strong><small>{{ t('export.includeCoverPageHint') }}</small></span>
-            </label>
-          </div>
+          <Transition name="pdf-options">
+            <div v-if="format === 'pdf'" class="export-pdf-options">
+              <label class="export-thinking-option">
+                <input v-model="compact" type="checkbox" :disabled="busy" />
+                <span><strong>{{ t('export.compactLayout') }}</strong><small>{{ t('export.compactLayoutHint') }}</small></span>
+              </label>
+              <label class="export-thinking-option">
+                <input v-model="includeCoverPage" type="checkbox" :disabled="busy" />
+                <span><strong>{{ t('export.includeCoverPage') }}</strong><small>{{ t('export.includeCoverPageHint') }}</small></span>
+              </label>
+            </div>
+          </Transition>
           <label class="export-thinking-option">
             <input v-model="includeThinking" type="checkbox" :disabled="busy" />
             <span><strong>{{ t('export.includeThinking') }}</strong><small>{{ t('export.includeThinkingHint') }}</small></span>

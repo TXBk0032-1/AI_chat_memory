@@ -65,6 +65,25 @@ function restoreLightweightContent() {
   fullContentMessageId.value = null
 }
 
+function handleBlockClick(event: MouseEvent) {
+  const target = event.target as HTMLElement | null
+  const button = target?.closest<HTMLButtonElement>('.code-copy-button')
+  if (!button) return
+  const wrapper = button.closest('.code-block-wrapper')
+  const codeElement = wrapper?.querySelector('pre code')
+  if (!codeElement) return
+  const text = codeElement.textContent || ''
+  void navigator.clipboard.writeText(text).then(() => {
+    button.classList.add('copied')
+    const copyText = button.querySelector('.copy-text')
+    if (copyText) copyText.textContent = t('mcp.copied')
+    window.setTimeout(() => {
+      button.classList.remove('copied')
+      if (copyText) copyText.textContent = t('app.copy')
+    }, 2000)
+  })
+}
+
 function notifyRendered() {
   void nextTick(() => emit('contentRendered'))
 }
@@ -77,7 +96,7 @@ watch([contentHtml, thinkingHtml], notifyRendered)
 </script>
 
 <template>
-  <article :data-message-id="message.id" :class="['message-block', message.role]">
+  <article :data-message-id="message.id" :class="['message-block', message.role]" @click="handleBlockClick">
     <div class="message-author"><span>{{ roleLabel }}</span><time>{{ formattedDate }}</time></div>
     <section v-if="thinking" :class="['thinking', { open: expanded }]">
       <button class="thinking-toggle" :aria-expanded="expanded" @click="$emit('toggleThinking', message.id)">{{ t('message.showThinking') }}</button>

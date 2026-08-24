@@ -30,4 +30,13 @@ describe('markdown rendering', () => {
     expect(html).toContain('class="mermaid-diagram"')
     expect(html).toContain('data-mermaid-source=')
   })
+
+  it('wraps code fences in a container with language label and copy button', () => {
+    const html = renderMarkdown('```typescript\nconst x = 1\n```', message, new Map(), '')
+    expect(html).toContain('class="code-block-wrapper"')
+    expect(html).toContain('class="code-block-header"')
+    expect(html).toContain('class="code-block-lang"')
+    expect(html).toContain('typescript')
+    expect(html).toContain('class="code-copy-button"')
+  })
 })

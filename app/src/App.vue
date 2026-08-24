@@ -927,11 +927,13 @@ onBeforeUnmount(() => {
         </section>
       </Transition>
 
-      <div v-if="error || apiStatus.service.state === 'failed'" class="alert-bar">
-        <Server :size="17" />
-        <span>{{ error || t('app.serviceStartFailed', { reason: apiStatus.service.message || t('app.unknownError') }) }}</span>
-        <button :title="t('app.close')" @click="error=''"><X :size="15" /></button>
-      </div>
+      <Transition name="alert-bar">
+        <div v-if="error || apiStatus.service.state === 'failed'" class="alert-bar">
+          <Server :size="17" />
+          <span>{{ error || t('app.serviceStartFailed', { reason: apiStatus.service.message || t('app.unknownError') }) }}</span>
+          <button :title="t('app.close')" @click="error=''"><X :size="15" /></button>
+        </div>
+      </Transition>
 
       <section :class="['content-grid', { resizing: resizingPanes }]" :style="{ '--session-pane-width': `${sessionPaneWidth}px` }">
         <SessionList
@@ -948,80 +950,88 @@ onBeforeUnmount(() => {
         <div class="pane-resizer" role="separator" :aria-label="t('app.paneResize')" aria-orientation="vertical" tabindex="0" @pointerdown="startPaneResize" @pointermove="resizePanes" @pointerup="stopPaneResize" @pointercancel="stopPaneResize"></div>
 
         <aside class="detail-pane">
-          <div v-if="detailLoading" class="loading-state"><LoaderCircle class="spinning" :size="22" /><span>{{ t('app.openingConversation') }}</span></div>
-          <template v-else-if="selected">
-            <div class="detail-header">
-              <div class="detail-title"><span class="platform-badge"><i :class="selected.platform"></i>{{ platformName(selected.platform) }}</span><h2>{{ selected.title || t('app.untitledConversation') }}</h2><p>{{ t('app.messageCount', { count: displayedMessageSeqs.length }) }}<span v-if="branchOverview && displayedMessageSeqs.length < selected.message_count"> · {{ t('app.versionNodeCount', { count: selected.message_count }) }}</span> · {{ formatDate(selected.updated_at) }}<span v-if="loadedMessageCount < selected.message_count" class="load-progress"> · {{ t('app.loadedCount', { loaded: loadedMessageCount, total: selected.message_count }) }}</span><button v-if="backgroundLoadFailed" class="inline-retry" @click="retryBackgroundLoad">{{ t('app.retry') }}</button></p></div>
-              <div class="detail-actions" @click.stop>
-                <button class="icon-button" :title="t('app.moreActions')" aria-haspopup="menu" :aria-expanded="showDetailMenu" @click="toggleDetailMenu"><MoreHorizontal :size="19" /></button>
-                <div v-if="showDetailMenu" class="detail-menu" role="menu">
-                  <button role="menuitem" :disabled="exportSelectionLoading" @click="enterExportSelection"><Download :size="14" />{{ exportSelectionLoading ? t('app.preparing') : t('export.dialogTitle') }}</button>
-                  <button role="menuitem" @click="showSessionInfo=true; showDetailMenu=false">{{ t('app.conversationInfo') }}</button>
-                  <button class="danger" role="menuitem" @click="showDeletePrompt=true; showDetailMenu=false"><Trash2 :size="14" />{{ t('app.deleteConversation') }}</button>
+          <Transition name="detail-pane-view" mode="out-in">
+            <div v-if="detailLoading" key="loading" class="loading-state"><LoaderCircle class="spinning" :size="22" /><span>{{ t('app.openingConversation') }}</span></div>
+            <div v-else-if="selected" key="detail" class="detail-container">
+              <div class="detail-header">
+                <div class="detail-title"><span class="platform-badge"><i :class="selected.platform"></i>{{ platformName(selected.platform) }}</span><h2>{{ selected.title || t('app.untitledConversation') }}</h2><p>{{ t('app.messageCount', { count: displayedMessageSeqs.length }) }}<span v-if="branchOverview && displayedMessageSeqs.length < selected.message_count"> · {{ t('app.versionNodeCount', { count: selected.message_count }) }}</span> · {{ formatDate(selected.updated_at) }}<span v-if="loadedMessageCount < selected.message_count" class="load-progress"> · {{ t('app.loadedCount', { loaded: loadedMessageCount, total: selected.message_count }) }}</span><button v-if="backgroundLoadFailed" class="inline-retry" @click="retryBackgroundLoad">{{ t('app.retry') }}</button></p></div>
+                <div class="detail-actions" @click.stop>
+                  <button class="icon-button" :title="t('app.moreActions')" aria-haspopup="menu" :aria-expanded="showDetailMenu" @click="toggleDetailMenu"><MoreHorizontal :size="19" /></button>
+                  <Transition name="detail-menu">
+                    <div v-if="showDetailMenu" class="detail-menu" role="menu">
+                      <button role="menuitem" :disabled="exportSelectionLoading" @click="enterExportSelection"><Download :size="14" />{{ exportSelectionLoading ? t('app.preparing') : t('export.dialogTitle') }}</button>
+                      <button role="menuitem" @click="showSessionInfo=true; showDetailMenu=false">{{ t('app.conversationInfo') }}</button>
+                      <button class="danger" role="menuitem" @click="showDeletePrompt=true; showDetailMenu=false"><Trash2 :size="14" />{{ t('app.deleteConversation') }}</button>
+                    </div>
+                  </Transition>
                 </div>
               </div>
-            </div>
-            <div v-if="hasBranches" :class="['segmented-control', { branches: detailMode === 'branches' }]">
-              <span class="segmented-highlight" aria-hidden="true"></span>
-              <button :class="{ active: detailMode === 'conversation' }" :disabled="exportSelecting" @pointerdown="handleModePointerDown('conversation', $event)" @click="handleModeSwitch('conversation')"><MessageSquareText :size="15" />{{ t('app.conversation') }}</button>
-              <button :class="{ active: detailMode === 'branches' }" :disabled="exportSelecting" @pointerdown="handleModePointerDown('branches', $event)" @click="handleModeSwitch('branches')"><GitBranch :size="15" />{{ t('app.branchPreview') }}</button>
-            </div>
-            <div v-if="exportSelecting" class="export-selection-toolbar">
-              <strong>{{ t('app.selectedQas', { selected: selectedExportTurns.length, total: exportTurns.length }) }}</strong>
-              <div>
-                <button class="text-button" @click="selectAllExportTurns">{{ t('app.selectAll') }}</button>
-                <button class="text-button" @click="clearExportTurns">{{ t('app.clearAll') }}</button>
-                <button class="secondary-button compact" @click="cancelExportSelection">{{ t('app.cancel') }}</button>
-                <button class="primary-button compact" :disabled="!selectedExportTurns.length" @click="openExportConfirmation"><Download :size="14" />{{ t('app.exportSelected') }}</button>
+              <div v-if="hasBranches" :class="['segmented-control', { branches: detailMode === 'branches' }]">
+                <span class="segmented-highlight" aria-hidden="true"></span>
+                <button :class="{ active: detailMode === 'conversation' }" :disabled="exportSelecting" @pointerdown="handleModePointerDown('conversation', $event)" @click="handleModeSwitch('conversation')"><MessageSquareText :size="15" />{{ t('app.conversation') }}</button>
+                <button :class="{ active: detailMode === 'branches' }" :disabled="exportSelecting" @pointerdown="handleModePointerDown('branches', $event)" @click="handleModeSwitch('branches')"><GitBranch :size="15" />{{ t('app.branchPreview') }}</button>
               </div>
-            </div>
-            <div v-if="committedQuery && detailMode === 'conversation'" class="search-navigation">
-              <span>{{ selectedMatches.length ? `${Math.max(searchHitIndex + 1, 0)} / ${selectedMatches.length}` : t('app.noBodyMatch') }}</span>
-              <button class="icon-button" :title="t('app.previousMatch')" :disabled="!selectedMatches.length" @click="navigateSearch(-1)"><ArrowUp :size="15" /></button>
-              <button class="icon-button" :title="t('app.nextMatch')" :disabled="!selectedMatches.length" @click="navigateSearch(1)"><ArrowDown :size="15" /></button>
-              <label><input v-model="loopSearch" type="checkbox" />{{ t('app.loop') }}</label>
-            </div>
-            <div ref="messageListRef" :class="['message-list', { 'branch-mode': detailMode === 'branches' }]" @scroll.passive="handleMessageScroll" @click="openMarkdownLink">
-              <div v-if="selectedMatches.length" class="search-scroll-markers" aria-hidden="true">
-                <i v-for="(match, index) in selectedMatches" :key="`${match.message_id}-${match.field}-${index}`" :style="{ top: `${((displayedSeqIndexes.get(match.seq) ?? 0) + 0.5) / Math.max(displayedMessageSeqs.length, 1) * 100}%` }"></i>
-              </div>
-              <Transition name="detail-camera" mode="out-in">
-                <div v-if="detailMode === 'conversation'" key="conversation" class="conversation-view virtual-conversation" :style="{ height: `${virtualTotalSize}px` }">
-                  <div
-                    v-for="virtualMessage in virtualMessages"
-                    :key="String(virtualMessage.key)"
-                    :ref="measureVirtualElement"
-                    :class="['virtual-message', { 'export-selecting': exportSelecting, 'export-turn-selected': selectedExportTurnIds.has(exportTurnBySeq.get(displayedMessageSeqs[virtualMessage.index])?.id || '') }]"
-                    :data-index="virtualMessage.index"
-                    :style="{ transform: `translateY(${virtualMessage.start}px)` }"
-                  >
-                    <label v-if="exportSelecting && exportTurnBySeq.get(displayedMessageSeqs[virtualMessage.index])?.seqs[0] === displayedMessageSeqs[virtualMessage.index]" class="export-turn-checkbox">
-                      <input type="checkbox" :checked="selectedExportTurnIds.has(exportTurnBySeq.get(displayedMessageSeqs[virtualMessage.index])!.id)" :aria-label="t('app.selectQa', { index: exportTurns.indexOf(exportTurnBySeq.get(displayedMessageSeqs[virtualMessage.index])!) + 1 })" @change="toggleExportTurn(exportTurnBySeq.get(displayedMessageSeqs[virtualMessage.index])!.id)" />
-                    </label>
-                    <MessageBlock
-                      v-if="messageSlots[displayedMessageSeqs[virtualMessage.index]]"
-                      :message="messageSlots[displayedMessageSeqs[virtualMessage.index]]!"
-                      :references="compactReferences"
-                      :query="committedQuery"
-                      :expanded="expandedThinking.has(messageSlots[displayedMessageSeqs[virtualMessage.index]]!.id)"
-                      :formatted-date="formatDate(messageSlots[displayedMessageSeqs[virtualMessage.index]]!.created_at, true)"
-                      :role-label="roleName(messageSlots[displayedMessageSeqs[virtualMessage.index]]!.role)"
-                      @toggle-thinking="toggleThinking"
-                      @content-rendered="renderMermaidDiagrams"
-                    />
-                    <div v-else class="message-placeholder" @vue:mounted="ensureMessageLoaded(displayedMessageSeqs[virtualMessage.index])"><LoaderCircle class="spinning" :size="16" /><span>{{ t('app.loadMessage') }}</span></div>
+              <Transition name="export-toolbar">
+                <div v-if="exportSelecting" class="export-selection-toolbar">
+                  <strong>{{ t('app.selectedQas', { selected: selectedExportTurns.length, total: exportTurns.length }) }}</strong>
+                  <div>
+                    <button class="text-button" @click="selectAllExportTurns">{{ t('app.selectAll') }}</button>
+                    <button class="text-button" @click="clearExportTurns">{{ t('app.clearAll') }}</button>
+                    <button class="secondary-button compact" @click="cancelExportSelection">{{ t('app.cancel') }}</button>
+                    <button class="primary-button compact" :disabled="!selectedExportTurns.length" @click="openExportConfirmation"><Download :size="14" />{{ t('app.exportSelected') }}</button>
                   </div>
                 </div>
-                <div v-else key="branches" class="branch-view">
-                  <div v-if="branchesLoading" class="branch-state"><LoaderCircle class="spinning" :size="22" /><span>{{ t('app.buildingBranches') }}</span></div>
-                  <div v-else-if="branchesError" class="branch-state error"><GitBranch :size="25" /><strong>{{ t('app.branchLoadFailed') }}</strong><span>{{ branchesError }}</span><button class="secondary-button compact" @click="loadBranches">{{ t('app.retry') }}</button></div>
-                  <div v-else-if="branchOverview && !branchOverview.nodes.length" class="branch-state"><GitBranch :size="28" /><strong>{{ t('app.noBranchNodes') }}</strong></div>
-                  <BranchOverviewView v-else-if="branchOverview" :overview="branchOverview" :active-node-id="activeBranchNode" @select="selectBranch" />
+              </Transition>
+              <Transition name="search-nav">
+                <div v-if="committedQuery && detailMode === 'conversation'" class="search-navigation">
+                  <span>{{ selectedMatches.length ? `${Math.max(searchHitIndex + 1, 0)} / ${selectedMatches.length}` : t('app.noBodyMatch') }}</span>
+                  <button class="icon-button" :title="t('app.previousMatch')" :disabled="!selectedMatches.length" @click="navigateSearch(-1)"><ArrowUp :size="15" /></button>
+                  <button class="icon-button" :title="t('app.nextMatch')" :disabled="!selectedMatches.length" @click="navigateSearch(1)"><ArrowDown :size="15" /></button>
+                  <label><input v-model="loopSearch" type="checkbox" />{{ t('app.loop') }}</label>
                 </div>
               </Transition>
+              <div ref="messageListRef" :class="['message-list', { 'branch-mode': detailMode === 'branches' }]" @scroll.passive="handleMessageScroll" @click="openMarkdownLink">
+                <div v-if="selectedMatches.length" class="search-scroll-markers" aria-hidden="true">
+                  <i v-for="(match, index) in selectedMatches" :key="`${match.message_id}-${match.field}-${index}`" :style="{ top: `${((displayedSeqIndexes.get(match.seq) ?? 0) + 0.5) / Math.max(displayedMessageSeqs.length, 1) * 100}%` }"></i>
+                </div>
+                <Transition name="detail-camera" mode="out-in">
+                  <div v-if="detailMode === 'conversation'" key="conversation" class="conversation-view virtual-conversation" :style="{ height: `${virtualTotalSize}px` }">
+                    <div
+                      v-for="virtualMessage in virtualMessages"
+                      :key="String(virtualMessage.key)"
+                      :ref="measureVirtualElement"
+                      :class="['virtual-message', { 'export-selecting': exportSelecting, 'export-turn-selected': selectedExportTurnIds.has(exportTurnBySeq.get(displayedMessageSeqs[virtualMessage.index])?.id || '') }]"
+                      :data-index="virtualMessage.index"
+                      :style="{ transform: `translateY(${virtualMessage.start}px)` }"
+                    >
+                      <label v-if="exportSelecting && exportTurnBySeq.get(displayedMessageSeqs[virtualMessage.index])?.seqs[0] === displayedMessageSeqs[virtualMessage.index]" class="export-turn-checkbox">
+                        <input type="checkbox" :checked="selectedExportTurnIds.has(exportTurnBySeq.get(displayedMessageSeqs[virtualMessage.index])!.id)" :aria-label="t('app.selectQa', { index: exportTurns.indexOf(exportTurnBySeq.get(displayedMessageSeqs[virtualMessage.index])!) + 1 })" @change="toggleExportTurn(exportTurnBySeq.get(displayedMessageSeqs[virtualMessage.index])!.id)" />
+                      </label>
+                      <MessageBlock
+                        v-if="messageSlots[displayedMessageSeqs[virtualMessage.index]]"
+                        :message="messageSlots[displayedMessageSeqs[virtualMessage.index]]!"
+                        :references="compactReferences"
+                        :query="committedQuery"
+                        :expanded="expandedThinking.has(messageSlots[displayedMessageSeqs[virtualMessage.index]]!.id)"
+                        :formatted-date="formatDate(messageSlots[displayedMessageSeqs[virtualMessage.index]]!.created_at, true)"
+                        :role-label="roleName(messageSlots[displayedMessageSeqs[virtualMessage.index]]!.role)"
+                        @toggle-thinking="toggleThinking"
+                        @content-rendered="renderMermaidDiagrams"
+                      />
+                      <div v-else class="message-placeholder" @vue:mounted="ensureMessageLoaded(displayedMessageSeqs[virtualMessage.index])"><LoaderCircle class="spinning" :size="16" /><span>{{ t('app.loadMessage') }}</span></div>
+                    </div>
+                  </div>
+                  <div v-else key="branches" class="branch-view">
+                    <div v-if="branchesLoading" class="branch-state"><LoaderCircle class="spinning" :size="22" /><span>{{ t('app.buildingBranches') }}</span></div>
+                    <div v-else-if="branchesError" class="branch-state error"><GitBranch :size="25" /><strong>{{ t('app.branchLoadFailed') }}</strong><span>{{ branchesError }}</span><button class="secondary-button compact" @click="loadBranches">{{ t('app.retry') }}</button></div>
+                    <div v-else-if="branchOverview && !branchOverview.nodes.length" class="branch-state"><GitBranch :size="28" /><strong>{{ t('app.noBranchNodes') }}</strong></div>
+                    <BranchOverviewView v-else-if="branchOverview" :overview="branchOverview" :active-node-id="activeBranchNode" @select="selectBranch" />
+                  </div>
+                </Transition>
+              </div>
             </div>
-          </template>
-          <div v-else class="detail-placeholder"><MessageSquareText :size="34" /><strong>{{ t('app.selectConversation') }}</strong><span>{{ t('app.selectConversationHint') }}</span></div>
+            <div v-else key="empty" class="detail-placeholder"><MessageSquareText :size="34" /><strong>{{ t('app.selectConversation') }}</strong><span>{{ t('app.selectConversationHint') }}</span></div>
+          </Transition>
         </aside>
       </section>
     </main>

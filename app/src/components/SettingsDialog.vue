@@ -296,6 +296,8 @@ const dtypeOptions = computed<SelectOption<LocalEmbeddingDType>[]>(() => [
   { value: 'f16', label: 'F16' },
   { value: 'f32', label: 'F32' },
 ])
+const pages: SettingsPage[] = ['general', 'semantic', 'connections', 'cloud-sync']
+const activePageIndex = computed(() => pages.indexOf(activePage.value))
 </script>
 
 <template>
@@ -305,6 +307,7 @@ const dtypeOptions = computed<SelectOption<LocalEmbeddingDType>[]>(() => [
         <header><div><h2 id="settings-title">{{ t('settings.title') }}</h2><p>{{ t('settings.subtitle') }}</p></div></header>
         <div class="settings-layout">
           <nav class="settings-navigation" :aria-label="t('settings.categories')">
+            <span class="settings-nav-highlight" :style="{ '--nav-index': activePageIndex }" aria-hidden="true"></span>
             <button
               id="settings-navigation-general"
               type="button"
@@ -402,108 +405,114 @@ const dtypeOptions = computed<SelectOption<LocalEmbeddingDType>[]>(() => [
               </div>
               <label class="switch"><input v-model="settings.semantic_search.enabled" type="checkbox" /><span></span></label>
             </div>
-            <div class="semantic-settings" v-if="settings.semantic_search.enabled">
-              <label>
-                <span>{{ t('settings.defaultMode') }}</span>
-                <AppSelect
-                  :model-value="settings.semantic_search.default_mode"
-                  :options="searchModeOptions"
-                  block
-                  @update:model-value="setMode($event as SearchMode)"
-                />
-              </label>
-              <label>
-                <span>{{ t('settings.embeddingBackend') }}</span>
-                <AppSelect
-                  :model-value="settings.semantic_search.backend"
-                  :options="backendOptions"
-                  block
-                  @update:model-value="setBackend($event as EmbeddingBackendKind)"
-                />
-              </label>
-              <template v-if="settings.semantic_search.backend === 'local'">
-                <label><span>{{ t('settings.modelId') }}</span><input v-model="settings.semantic_search.local.model" /></label>
+            <Transition name="setting-expand">
+              <div class="semantic-settings" v-if="settings.semantic_search.enabled">
                 <label>
-                  <span>{{ t('settings.device') }}</span>
+                  <span>{{ t('settings.defaultMode') }}</span>
                   <AppSelect
-                    v-model="settings.semantic_search.local.device"
-                    :options="deviceOptions"
+                    :model-value="settings.semantic_search.default_mode"
+                    :options="searchModeOptions"
                     block
+                    @update:model-value="setMode($event as SearchMode)"
                   />
                 </label>
                 <label>
-                  <span>{{ t('settings.precision') }}</span>
+                  <span>{{ t('settings.embeddingBackend') }}</span>
                   <AppSelect
-                    v-model="settings.semantic_search.local.dtype"
-                    :options="dtypeOptions"
+                    :model-value="settings.semantic_search.backend"
+                    :options="backendOptions"
                     block
+                    @update:model-value="setBackend($event as EmbeddingBackendKind)"
                   />
                 </label>
-                <p class="path-value">{{ t('settings.localDirectory', { path: semanticStatus?.local_model_path || settings.semantic_search.local.model_path || t('settings.notPrepared') }) }}</p>
-                <p class="path-value">{{ t('settings.downloadSource', { model: settings.semantic_search.local.model }) }}</p>
-                <p class="path-value">{{ t('settings.currentDevice', { device: semanticStatus?.device || t('settings.notLoaded'), dtype: semanticStatus?.dtype || t('settings.notLoaded') }) }}</p>
-                <div class="setting-actions">
-                  <button class="secondary-button compact" :disabled="semanticBusy && !!downloadProgress && downloadProgress.stage !== 'done' && downloadProgress.stage !== 'error' && downloadProgress.stage !== 'cancelled'" @click="emit('downloadLocalModel')">{{ semanticBusy && downloadProgress && downloadProgress.stage !== 'done' && downloadProgress.stage !== 'error' && downloadProgress.stage !== 'cancelled' ? t('settings.downloading') : t('settings.downloadModel') }}</button>
-                  <button class="secondary-button compact" :disabled="semanticBusy" @click="emit('importLocalModel')"><FolderOpen :size="14" />{{ t('settings.importModel') }}</button>
-                  <button v-if="semanticBusy && downloadProgress && downloadProgress.stage !== 'done' && downloadProgress.stage !== 'error' && downloadProgress.stage !== 'cancelled'" class="secondary-button compact" @click="emit('cancelSemanticWork')">{{ t('settings.cancelDownload') }}</button>
-                </div>
-                <div v-if="downloadProgress" class="download-progress" :data-stage="downloadProgress.stage">
-                  <div class="download-progress-meta">
-                    <span>{{ downloadProgress.message }}</span>
-                    <strong>{{ Math.round((downloadProgress.fraction || 0) * 100) }}%</strong>
+                <template v-if="settings.semantic_search.backend === 'local'">
+                  <label><span>{{ t('settings.modelId') }}</span><input v-model="settings.semantic_search.local.model" /></label>
+                  <label>
+                    <span>{{ t('settings.device') }}</span>
+                    <AppSelect
+                      v-model="settings.semantic_search.local.device"
+                      :options="deviceOptions"
+                      block
+                    />
+                  </label>
+                  <label>
+                    <span>{{ t('settings.precision') }}</span>
+                    <AppSelect
+                      v-model="settings.semantic_search.local.dtype"
+                      :options="dtypeOptions"
+                      block
+                    />
+                  </label>
+                  <p class="path-value">{{ t('settings.localDirectory', { path: semanticStatus?.local_model_path || settings.semantic_search.local.model_path || t('settings.notPrepared') }) }}</p>
+                  <p class="path-value">{{ t('settings.downloadSource', { model: settings.semantic_search.local.model }) }}</p>
+                  <p class="path-value">{{ t('settings.currentDevice', { device: semanticStatus?.device || t('settings.notLoaded'), dtype: semanticStatus?.dtype || t('settings.notLoaded') }) }}</p>
+                  <div class="setting-actions">
+                    <button class="secondary-button compact" :disabled="semanticBusy && !!downloadProgress && downloadProgress.stage !== 'done' && downloadProgress.stage !== 'error' && downloadProgress.stage !== 'cancelled'" @click="emit('downloadLocalModel')">{{ semanticBusy && downloadProgress && downloadProgress.stage !== 'done' && downloadProgress.stage !== 'error' && downloadProgress.stage !== 'cancelled' ? t('settings.downloading') : t('settings.downloadModel') }}</button>
+                    <button class="secondary-button compact" :disabled="semanticBusy" @click="emit('importLocalModel')"><FolderOpen :size="14" />{{ t('settings.importModel') }}</button>
+                    <button v-if="semanticBusy && downloadProgress && downloadProgress.stage !== 'done' && downloadProgress.stage !== 'error' && downloadProgress.stage !== 'cancelled'" class="secondary-button compact" @click="emit('cancelSemanticWork')">{{ t('settings.cancelDownload') }}</button>
                   </div>
-                  <div class="download-progress-track" aria-hidden="true">
-                    <i :style="{ width: `${Math.max(2, Math.round((downloadProgress.fraction || 0) * 100))}%` }"></i>
-                  </div>
-                  <p v-if="downloadProgress.file" class="path-value">{{ t('settings.fileProgress', { index: downloadProgress.file_index + 1, count: downloadProgress.file_count, file: downloadProgress.file }) }}</p>
-                </div>
-              </template>
-              <template v-else-if="settings.semantic_search.backend === 'ollama'">
-                <label><span>Base URL</span><input v-model="settings.semantic_search.ollama.base_url" /></label>
-                <label><span>{{ t('settings.model') }}</span><input v-model="settings.semantic_search.ollama.model" /></label>
-                <label><span>{{ t('settings.dimensions') }}</span><input v-model.number="settings.semantic_search.ollama.dimensions" type="number" min="0" :placeholder="t('settings.automatic')" /></label>
-              </template>
-              <template v-else-if="settings.semantic_search.backend === 'llama_cpp'">
-                <label><span>Base URL</span><input v-model="settings.semantic_search.llama_cpp.base_url" /></label>
-                <label><span>{{ t('settings.model') }}</span><input v-model="settings.semantic_search.llama_cpp.model" /></label>
-                <label><span>API Key</span><input v-model="settings.semantic_search.llama_cpp.api_key" /></label>
-                <label><span>{{ t('settings.dimensions') }}</span><input v-model.number="settings.semantic_search.llama_cpp.dimensions" type="number" min="0" :placeholder="t('settings.automatic')" /></label>
-              </template>
-              <template v-else>
-                <label><span>Base URL</span><input v-model="settings.semantic_search.openai_compatible.base_url" /></label>
-                <label><span>{{ t('settings.model') }}</span><input v-model="settings.semantic_search.openai_compatible.model" /></label>
-                <label><span>API Key</span><input v-model="settings.semantic_search.openai_compatible.api_key" /></label>
-                <label><span>{{ t('settings.dimensions') }}</span><input v-model.number="settings.semantic_search.openai_compatible.dimensions" type="number" min="0" :placeholder="t('settings.automatic')" /></label>
-              </template>
-              <p class="path-value">
-                {{ t('settings.status', { status: semanticStatus?.status || 'unknown' }) }}
-                · {{ t('settings.ready', { count: semanticStatus?.ready_chunks ?? 0 }) }}
-                · {{ t('settings.pendingIndex', { count: semanticStatus?.pending_chunks ?? 0 }) }}
-                <template v-if="semanticStatus?.message"> · {{ semanticStatus.message }}</template>
-              </p>
-              <div class="setting-actions">
-                <button class="secondary-button compact" :disabled="semanticBusy" @click="emit('checkEmbedding')">{{ t('settings.testBackend') }}</button>
-                <button class="secondary-button compact" :disabled="!!(semanticBusy && reindexProgress && reindexProgress.stage !== 'done' && reindexProgress.stage !== 'error' && reindexProgress.stage !== 'cancelled')" @click="emit('reindexSemantic')">
-                  <RefreshCw :size="14" :class="{ spinning: semanticBusy && reindexProgress && reindexProgress.stage !== 'done' && reindexProgress.stage !== 'error' && reindexProgress.stage !== 'cancelled' }" />
-                  {{ semanticBusy && reindexProgress && reindexProgress.stage !== 'done' && reindexProgress.stage !== 'error' && reindexProgress.stage !== 'cancelled' ? t('settings.rebuilding') : t('settings.rebuildIndex') }}
-                </button>
-                <button v-if="semanticBusy && reindexProgress && reindexProgress.stage !== 'done' && reindexProgress.stage !== 'error' && reindexProgress.stage !== 'cancelled'" class="secondary-button compact" @click="emit('cancelSemanticWork')">{{ t('settings.cancelEncoding') }}</button>
-              </div>
-              <div v-if="reindexProgress" class="download-progress" :data-stage="reindexProgress.stage">
-                <div class="download-progress-meta">
-                  <span>{{ reindexProgress.message }}</span>
-                  <strong>{{ Math.round((reindexProgress.fraction || 0) * 100) }}%</strong>
-                </div>
-                <div class="download-progress-track" aria-hidden="true">
-                  <i :style="{ width: `${Math.max(2, Math.round((reindexProgress.fraction || 0) * 100))}%` }"></i>
-                </div>
+                  <Transition name="setting-expand">
+                    <div v-if="downloadProgress" class="download-progress" :data-stage="downloadProgress.stage">
+                      <div class="download-progress-meta">
+                        <span>{{ downloadProgress.message }}</span>
+                        <strong>{{ Math.round((downloadProgress.fraction || 0) * 100) }}%</strong>
+                      </div>
+                      <div class="download-progress-track" aria-hidden="true">
+                        <i :style="{ width: `${Math.max(2, Math.round((downloadProgress.fraction || 0) * 100))}%` }"></i>
+                      </div>
+                      <p v-if="downloadProgress.file" class="path-value">{{ t('settings.fileProgress', { index: downloadProgress.file_index + 1, count: downloadProgress.file_count, file: downloadProgress.file }) }}</p>
+                    </div>
+                  </Transition>
+                </template>
+                <template v-else-if="settings.semantic_search.backend === 'ollama'">
+                  <label><span>Base URL</span><input v-model="settings.semantic_search.ollama.base_url" /></label>
+                  <label><span>{{ t('settings.model') }}</span><input v-model="settings.semantic_search.ollama.model" /></label>
+                  <label><span>{{ t('settings.dimensions') }}</span><input v-model.number="settings.semantic_search.ollama.dimensions" type="number" min="0" :placeholder="t('settings.automatic')" /></label>
+                </template>
+                <template v-else-if="settings.semantic_search.backend === 'llama_cpp'">
+                  <label><span>Base URL</span><input v-model="settings.semantic_search.llama_cpp.base_url" /></label>
+                  <label><span>{{ t('settings.model') }}</span><input v-model="settings.semantic_search.llama_cpp.model" /></label>
+                  <label><span>API Key</span><input v-model="settings.semantic_search.llama_cpp.api_key" /></label>
+                  <label><span>{{ t('settings.dimensions') }}</span><input v-model.number="settings.semantic_search.llama_cpp.dimensions" type="number" min="0" :placeholder="t('settings.automatic')" /></label>
+                </template>
+                <template v-else>
+                  <label><span>Base URL</span><input v-model="settings.semantic_search.openai_compatible.base_url" /></label>
+                  <label><span>{{ t('settings.model') }}</span><input v-model="settings.semantic_search.openai_compatible.model" /></label>
+                  <label><span>API Key</span><input v-model="settings.semantic_search.openai_compatible.api_key" /></label>
+                  <label><span>{{ t('settings.dimensions') }}</span><input v-model.number="settings.semantic_search.openai_compatible.dimensions" type="number" min="0" :placeholder="t('settings.automatic')" /></label>
+                </template>
                 <p class="path-value">
-                  {{ t('settings.sessionProgress', { processed: reindexProgress.processed_sessions, total: reindexProgress.total_sessions }) }}
-                  · {{ t('settings.ready', { count: reindexProgress.ready_chunks }) }}
-                  · {{ t('settings.pending', { count: reindexProgress.pending_chunks }) }}
+                  {{ t('settings.status', { status: semanticStatus?.status || 'unknown' }) }}
+                  · {{ t('settings.ready', { count: semanticStatus?.ready_chunks ?? 0 }) }}
+                  · {{ t('settings.pendingIndex', { count: semanticStatus?.pending_chunks ?? 0 }) }}
+                  <template v-if="semanticStatus?.message"> · {{ semanticStatus.message }}</template>
                 </p>
+                <div class="setting-actions">
+                  <button class="secondary-button compact" :disabled="semanticBusy" @click="emit('checkEmbedding')">{{ t('settings.testBackend') }}</button>
+                  <button class="secondary-button compact" :disabled="!!(semanticBusy && reindexProgress && reindexProgress.stage !== 'done' && reindexProgress.stage !== 'error' && reindexProgress.stage !== 'cancelled')" @click="emit('reindexSemantic')">
+                    <RefreshCw :size="14" :class="{ spinning: semanticBusy && reindexProgress && reindexProgress.stage !== 'done' && reindexProgress.stage !== 'error' && reindexProgress.stage !== 'cancelled' }" />
+                    {{ semanticBusy && reindexProgress && reindexProgress.stage !== 'done' && reindexProgress.stage !== 'error' && reindexProgress.stage !== 'cancelled' ? t('settings.rebuilding') : t('settings.rebuildIndex') }}
+                  </button>
+                  <button v-if="semanticBusy && reindexProgress && reindexProgress.stage !== 'done' && reindexProgress.stage !== 'error' && reindexProgress.stage !== 'cancelled'" class="secondary-button compact" @click="emit('cancelSemanticWork')">{{ t('settings.cancelEncoding') }}</button>
+                </div>
+                <Transition name="setting-expand">
+                  <div v-if="reindexProgress" class="download-progress" :data-stage="reindexProgress.stage">
+                    <div class="download-progress-meta">
+                      <span>{{ reindexProgress.message }}</span>
+                      <strong>{{ Math.round((reindexProgress.fraction || 0) * 100) }}%</strong>
+                    </div>
+                    <div class="download-progress-track" aria-hidden="true">
+                      <i :style="{ width: `${Math.max(2, Math.round((reindexProgress.fraction || 0) * 100))}%` }"></i>
+                    </div>
+                    <p class="path-value">
+                      {{ t('settings.sessionProgress', { processed: reindexProgress.processed_sessions, total: reindexProgress.total_sessions }) }}
+                      · {{ t('settings.ready', { count: reindexProgress.ready_chunks }) }}
+                      · {{ t('settings.pending', { count: reindexProgress.pending_chunks }) }}
+                    </p>
+                  </div>
+                </Transition>
               </div>
-            </div>
+            </Transition>
           </section>
             </section>
             <section
@@ -519,7 +528,9 @@ const dtypeOptions = computed<SelectOption<LocalEmbeddingDType>[]>(() => [
           </section>
           <section class="setting-group">
             <div class="setting-row"><div><h3>{{ t('settings.secretTitle') }}</h3><p>{{ t('settings.secretDescription') }}</p></div><label class="switch"><input v-model="settings.secret_enabled" type="checkbox" /><span></span></label></div>
-            <div v-if="settings.secret_enabled" class="secret-field"><code>{{ settings.secret || t('settings.secretAfterSave') }}</code><button class="icon-button" :title="secretCopied ? t('settings.copied') : t('settings.copySecret')" :disabled="!settings.secret" @click="emit('copySecret')"><Check v-if="secretCopied" :size="17" /><Clipboard v-else :size="17" /></button><button class="secondary-button compact" @click="emit('rotateSecret')">{{ t('settings.rotateSecret') }}</button></div>
+            <Transition name="setting-expand">
+              <div v-if="settings.secret_enabled" class="secret-field"><code>{{ settings.secret || t('settings.secretAfterSave') }}</code><button class="icon-button" :title="secretCopied ? t('settings.copied') : t('settings.copySecret')" :disabled="!settings.secret" @click="emit('copySecret')"><Check v-if="secretCopied" :size="17" /><Clipboard v-else :size="17" /></button><button class="secondary-button compact" @click="emit('rotateSecret')">{{ t('settings.rotateSecret') }}</button></div>
+            </Transition>
           </section>
           <section class="setting-group">
             <div class="setting-row">
