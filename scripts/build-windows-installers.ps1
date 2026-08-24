@@ -222,6 +222,9 @@ try {
             $mode.silent = $true
         }
         $override = [ordered]@{
+            build = [ordered]@{
+                beforeBuildCommand = ""
+            }
             bundle = [ordered]@{
                 windows = [ordered]@{
                     webviewInstallMode = $mode
