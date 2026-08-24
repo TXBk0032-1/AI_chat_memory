@@ -5,9 +5,8 @@ import { describe, expect, it } from 'vitest'
 const styleSource = readFileSync(fileURLToPath(new URL('./style.css', import.meta.url)), 'utf8')
 
 describe('application motion enhancements and micro-interactions', () => {
-  it('defines fast and subtle session item list transitions', () => {
-    expect(styleSource).toContain('.session-item-enter-active')
-    expect(styleSource).toContain('.session-item-move')
+  it('does not reorder session items with sliding motion and keeps session-state transition', () => {
+    expect(styleSource).not.toContain('.session-item-move')
     expect(styleSource).toContain('.session-state-enter-active')
   })
 
@@ -17,6 +16,16 @@ describe('application motion enhancements and micro-interactions', () => {
     expect(styleSource).toContain('.export-toolbar-enter-active')
     expect(styleSource).toContain('.search-nav-enter-active')
     expect(styleSource).toContain('.detail-pane-view-enter-active')
+  })
+
+  it('defines smooth ease-in and ease-out transitions for context menu', () => {
+    expect(styleSource).toContain('.context-menu-enter-active')
+    expect(styleSource).toContain('.context-menu-leave-active')
+    expect(styleSource).toMatch(/\.context-menu\s*\{[^}]*transform-origin:\s*top left/)
+  })
+
+  it('adapts PDF export options to dark mode', () => {
+    expect(styleSource).toMatch(/html\[data-theme="dark"\]\s+\.export-pdf-options\s*\{[^}]*background:/)
   })
 
   it('defines active scale feedback for interactive buttons', () => {

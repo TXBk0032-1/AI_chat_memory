@@ -111,7 +111,7 @@ function cloneCloudSyncSettings(value: CloudSyncSettings): CloudSyncSettings {
   return { ...value, s3: { ...value.s3 } }
 }
 const apiStatus = ref<ApiStatus>({ service: { state: 'starting' }, userscript_connected: false, mcp: { state: 'stopped' }, mcp_url: 'http://127.0.0.1:19821/mcp' })
-const contextMenu = ref({ visible: false, x: 0, y: 0, selectedText: '' })
+const contextMenu = ref({ visible: false, x: 0, y: 0, selectedText: '', key: 0 })
 const sidebarCollapsed = ref(loadSidebarCollapsed())
 const clickDebounceMs = 250
 let statusTimer: number | undefined
@@ -754,6 +754,7 @@ function handleContextMenu(event: MouseEvent) {
     x: Math.min(event.clientX, window.innerWidth - menuWidth - 8),
     y: Math.min(event.clientY, window.innerHeight - menuHeight - 8),
     selectedText,
+    key: Date.now(),
   }
 }
 
@@ -1111,7 +1112,7 @@ onBeforeUnmount(() => {
       />
     </div>
     <Transition name="context-menu">
-      <div v-if="contextMenu.visible" class="context-menu" role="menu" :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }" @click.stop>
+      <div v-if="contextMenu.visible" :key="contextMenu.key" class="context-menu" role="menu" :style="{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }" @click.stop>
         <button role="menuitem" :disabled="!contextMenu.selectedText" @click="copyContextSelection"><Copy :size="15" /><span>{{ t('app.copy') }}</span><kbd>Ctrl+C</kbd></button>
         <button role="menuitem" @click="selectConversationContent"><Clipboard :size="15" /><span>{{ t('app.selectConversationContent') }}</span><kbd>Ctrl+A</kbd></button>
       </div>
