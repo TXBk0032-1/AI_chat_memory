@@ -137,7 +137,7 @@ const theme = useTheme(settings, (animate) => {
     void renderMermaidDiagrams()
   }, animate ? 180 : 0)
 })
-const { effectiveTheme, commitTheme, previewTheme } = theme
+const { effectiveTheme, commitTheme, previewTheme, previewThemeId } = theme
 const locale = useLocale((value) => desktopApi.setNativeLocale(value))
 const { applyPreference, previewLanguage } = locale
 const {
@@ -840,7 +840,7 @@ onMounted(async () => {
     applySettings(value) {
       settings.value = value
       searchMode.value = value.semantic_search?.default_mode || 'hybrid'
-      commitTheme(value.theme, false)
+      commitTheme(value.theme, value.light_theme_id, value.dark_theme_id, false)
     },
   })
   unlistenCloseRequest = await listen('close-behavior-requested', () => {
@@ -1053,6 +1053,7 @@ onBeforeUnmount(() => {
       @close="closeSettings"
       @save="saveSettings"
       @preview-theme="previewTheme"
+      @preview-theme-id="previewThemeId"
       @preview-language="previewLanguage"
       @change-data-directory="changeDataDirectory"
       @copy-secret="copySecret"

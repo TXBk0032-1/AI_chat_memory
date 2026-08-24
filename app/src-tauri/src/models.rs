@@ -369,6 +369,10 @@ pub struct AppSettings {
     #[serde(default)]
     pub theme: ThemePreference,
     #[serde(default)]
+    pub light_theme_id: Option<String>,
+    #[serde(default)]
+    pub dark_theme_id: Option<String>,
+    #[serde(default)]
     pub language: LanguagePreference,
     #[serde(default)]
     pub semantic_search: SemanticSearchSettings,
@@ -615,6 +619,8 @@ impl Default for AppSettings {
             close_behavior: CloseBehavior::Ask,
             tray_click_behavior: TrayClickBehavior::ShowMenu,
             theme: ThemePreference::System,
+            light_theme_id: Some("green".into()),
+            dark_theme_id: Some("black".into()),
             language: LanguagePreference::System,
             semantic_search: SemanticSearchSettings::default(),
             mcp_enabled: true,

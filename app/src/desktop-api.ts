@@ -45,6 +45,8 @@ export type SettingsModel = {
   close_behavior: CloseBehavior
   tray_click_behavior: TrayClickBehavior
   theme: ThemePreference
+  light_theme_id?: string
+  dark_theme_id?: string
   language: LanguagePreference
   semantic_search: SemanticSearchSettings
   mcp_enabled: boolean

@@ -8,6 +8,7 @@ import {
   FolderOpen,
   Monitor,
   Moon,
+  Palette,
   RefreshCw,
   Search,
   ShieldCheck,
@@ -17,6 +18,7 @@ import {
 import AppSelect, { type SelectOption } from './AppSelect.vue'
 import CloudSyncSettings from './CloudSyncSettings.vue'
 import { cloudSyncProfileSnapshot, cloudSyncProfilesEqual } from '../cloud-sync-profile'
+import { lightThemes, darkThemes, type ThemeDefinition } from '../theme'
 import type {
   ApiStatus,
   EmbeddingBackendKind,
@@ -59,7 +61,7 @@ const props = defineProps<{
 }>()
 const settings = defineModel<SettingsModel>('settings', { required: true })
 const originText = defineModel<string>('originText', { required: true })
-type SettingsPage = 'general' | 'semantic' | 'connections' | 'cloud-sync'
+type SettingsPage = 'general' | 'appearance' | 'semantic' | 'connections' | 'cloud-sync'
 
 const activePage = ref<SettingsPage>('general')
 const cloudPassword = ref('')
@@ -94,7 +96,8 @@ watch(() => props.visible, (visible) => {
 const emit = defineEmits<{
   close: []
   save: [credentials: CloudCredentialInput | null]
-  previewTheme: [theme: ThemePreference]
+  previewTheme: [theme: ThemePreference, lightId?: string, darkId?: string]
+  previewThemeId: [id: string, isDark: boolean]
   previewLanguage: [language: LanguagePreference]
   changeDataDirectory: []
   copySecret: []
@@ -296,8 +299,16 @@ const dtypeOptions = computed<SelectOption<LocalEmbeddingDType>[]>(() => [
   { value: 'f16', label: 'F16' },
   { value: 'f32', label: 'F32' },
 ])
-const pages: SettingsPage[] = ['general', 'semantic', 'connections', 'cloud-sync']
+const pages: SettingsPage[] = ['general', 'appearance', 'semantic', 'connections', 'cloud-sync']
 const activePageIndex = computed(() => pages.indexOf(activePage.value))
+
+function onThemeModeChange(mode: ThemePreference) {
+  emit('previewTheme', mode, settings.value.light_theme_id, settings.value.dark_theme_id)
+}
+
+function onSelectTheme(themeDef: ThemeDefinition) {
+  emit('previewThemeId', themeDef.id, themeDef.isDark)
+}
 </script>
 
 <template>
@@ -319,6 +330,18 @@ const activePageIndex = computed(() => pages.indexOf(activePage.value))
             >
               <SlidersHorizontal :size="16" aria-hidden="true" />
               <span>{{ t('settings.general') }}</span>
+            </button>
+            <button
+              id="settings-navigation-appearance"
+              type="button"
+              class="settings-navigation__button"
+              :class="{ active: activePage === 'appearance' }"
+              :aria-current="activePage === 'appearance' ? 'page' : undefined"
+              aria-controls="settings-page-appearance"
+              @click="activePage = 'appearance'"
+            >
+              <Palette :size="16" aria-hidden="true" />
+              <span>{{ t('settings.appearance') }}</span>
             </button>
             <button
               id="settings-navigation-semantic"
@@ -362,34 +385,104 @@ const activePageIndex = computed(() => pages.indexOf(activePage.value))
               role="region"
               aria-labelledby="settings-navigation-general"
             >
-          <section class="setting-group theme-setting">
-            <div><h3>{{ t('settings.appearanceTitle') }}</h3><p>{{ t('settings.appearanceDescription') }}</p></div>
-            <div class="theme-options" role="radiogroup" :aria-label="t('settings.themeGroup')">
-              <button :class="{ active: settings.theme === 'system' }" role="radio" :aria-checked="settings.theme === 'system'" @click="emit('previewTheme', 'system')"><Monitor :size="16" /><span>{{ t('settings.themeSystem') }}</span></button>
-              <button :class="{ active: settings.theme === 'light' }" role="radio" :aria-checked="settings.theme === 'light'" @click="emit('previewTheme', 'light')"><Sun :size="16" /><span>{{ t('settings.themeLight') }}</span></button>
-              <button :class="{ active: settings.theme === 'dark' }" role="radio" :aria-checked="settings.theme === 'dark'" @click="emit('previewTheme', 'dark')"><Moon :size="16" /><span>{{ t('settings.themeDark') }}</span></button>
-            </div>
-          </section>
-          <section class="setting-group behavior-settings">
-            <div><h3>{{ t('settings.language.title') }}</h3><p>{{ t('settings.language.description') }}</p></div>
-            <label>
-              <span>{{ t('settings.language.title') }}</span>
-              <AppSelect
-                v-model="settings.language"
-                :options="languageOptions"
-                block
-                @update:model-value="emit('previewLanguage', settings.language)"
-              />
-            </label>
-          </section>
-          <section class="setting-group">
-            <div class="setting-row"><div><h3>{{ t('settings.dataLocation') }}</h3><p class="path-value">{{ settings.data_directory || t('settings.defaultDataLocation') }}</p></div><button class="secondary-button" @click="emit('changeDataDirectory')">{{ t('settings.changeLocation') }}</button></div>
-          </section>
-          <section class="setting-group behavior-settings">
-            <label><span>{{ t('settings.closeBehavior') }}</span><AppSelect v-model="settings.close_behavior" :options="closeBehaviorOptions" block /></label>
-            <label><span>{{ t('settings.trayClick') }}</span><AppSelect v-model="settings.tray_click_behavior" :options="trayClickOptions" block /></label>
-          </section>
+              <section class="setting-group behavior-settings">
+                <div><h3>{{ t('settings.language.title') }}</h3><p>{{ t('settings.language.description') }}</p></div>
+                <label>
+                  <span>{{ t('settings.language.title') }}</span>
+                  <AppSelect
+                    v-model="settings.language"
+                    :options="languageOptions"
+                    block
+                    @update:model-value="emit('previewLanguage', settings.language)"
+                  />
+                </label>
+              </section>
+              <section class="setting-group">
+                <div class="setting-row"><div><h3>{{ t('settings.dataLocation') }}</h3><p class="path-value">{{ settings.data_directory || t('settings.defaultDataLocation') }}</p></div><button class="secondary-button" @click="emit('changeDataDirectory')">{{ t('settings.changeLocation') }}</button></div>
+              </section>
+              <section class="setting-group behavior-settings">
+                <label><span>{{ t('settings.closeBehavior') }}</span><AppSelect v-model="settings.close_behavior" :options="closeBehaviorOptions" block /></label>
+                <label><span>{{ t('settings.trayClick') }}</span><AppSelect v-model="settings.tray_click_behavior" :options="trayClickOptions" block /></label>
+              </section>
             </section>
+
+            <section
+              v-show="activePage === 'appearance'"
+              id="settings-page-appearance"
+              class="settings-content settings-page"
+              role="region"
+              aria-labelledby="settings-navigation-appearance"
+            >
+              <section class="setting-group theme-setting">
+                <div><h3>{{ t('settings.appearanceTitle') }}</h3><p>{{ t('settings.appearanceDescription') }}</p></div>
+                <div class="theme-options" role="radiogroup" :aria-label="t('settings.themeGroup')">
+                  <button :class="{ active: settings.theme === 'system' }" role="radio" :aria-checked="settings.theme === 'system'" @click="onThemeModeChange('system')"><Monitor :size="16" /><span>{{ t('settings.themeSystem') }}</span></button>
+                  <button :class="{ active: settings.theme === 'light' }" role="radio" :aria-checked="settings.theme === 'light'" @click="onThemeModeChange('light')"><Sun :size="16" /><span>{{ t('settings.themeLight') }}</span></button>
+                  <button :class="{ active: settings.theme === 'dark' }" role="radio" :aria-checked="settings.theme === 'dark'" @click="onThemeModeChange('dark')"><Moon :size="16" /><span>{{ t('settings.themeDark') }}</span></button>
+                </div>
+              </section>
+
+              <section v-show="settings.theme !== 'dark'" class="setting-group theme-palette-group">
+                <div class="setting-heading">
+                  <div>
+                    <h3>{{ t('settings.lightThemesTitle') }}</h3>
+                    <p>{{ t('settings.lightThemesDescription') }}</p>
+                  </div>
+                </div>
+                <div class="theme-card-grid" role="radiogroup" :aria-label="t('settings.lightThemesTitle')">
+                  <button
+                    v-for="item in lightThemes"
+                    :key="item.id"
+                    type="button"
+                    class="theme-card"
+                    :class="{ active: (settings.light_theme_id || 'green') === item.id }"
+                    :aria-checked="(settings.light_theme_id || 'green') === item.id"
+                    role="radio"
+                    @click="onSelectTheme(item)"
+                  >
+                    <div class="theme-card-preview" :style="{ '--preview-color': item.config.primary, '--preview-bg': item.config.extInfo?.['--color-app-background'] || '#f7f9fa' }">
+                      <span class="theme-card-swatch"></span>
+                      <span class="theme-card-accent"></span>
+                    </div>
+                    <div class="theme-card-info">
+                      <strong>{{ t(item.nameKey) }}</strong>
+                      <span v-if="(settings.light_theme_id || 'green') === item.id" class="theme-card-badge">{{ t('settings.selectedTheme') }}</span>
+                    </div>
+                  </button>
+                </div>
+              </section>
+
+              <section v-show="settings.theme !== 'light'" class="setting-group theme-palette-group">
+                <div class="setting-heading">
+                  <div>
+                    <h3>{{ t('settings.darkThemesTitle') }}</h3>
+                    <p>{{ t('settings.darkThemesDescription') }}</p>
+                  </div>
+                </div>
+                <div class="theme-card-grid" role="radiogroup" :aria-label="t('settings.darkThemesTitle')">
+                  <button
+                    v-for="item in darkThemes"
+                    :key="item.id"
+                    type="button"
+                    class="theme-card is-dark-card"
+                    :class="{ active: (settings.dark_theme_id || 'black') === item.id }"
+                    :aria-checked="(settings.dark_theme_id || 'black') === item.id"
+                    role="radio"
+                    @click="onSelectTheme(item)"
+                  >
+                    <div class="theme-card-preview" :style="{ '--preview-color': item.config.primary, '--preview-bg': item.config.extInfo?.['--color-app-background'] || '#171b1e' }">
+                      <span class="theme-card-swatch"></span>
+                      <span class="theme-card-accent"></span>
+                    </div>
+                    <div class="theme-card-info">
+                      <strong>{{ t(item.nameKey) }}</strong>
+                      <span v-if="(settings.dark_theme_id || 'black') === item.id" class="theme-card-badge">{{ t('settings.selectedTheme') }}</span>
+                    </div>
+                  </button>
+                </div>
+              </section>
+            </section>
+
             <section
               v-show="activePage === 'semantic'"
               id="settings-page-semantic"
