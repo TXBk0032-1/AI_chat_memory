@@ -15,7 +15,7 @@ describe('application motion enhancements and micro-interactions', () => {
     expect(styleSource).toContain('.alert-bar-enter-active')
     expect(styleSource).toContain('.export-toolbar-enter-active')
     expect(styleSource).toContain('.search-nav-enter-active')
-    expect(styleSource).toContain('.detail-pane-view-enter-active')
+    expect(styleSource).not.toContain('.detail-pane-view-enter-active')
   })
 
   it('defines smooth ease-in and ease-out transitions for context menu', () => {

@@ -181,8 +181,6 @@ i.deepseek { background: #5273e6; } i.doubao { background: #e36f53; } i.kimi { b
 .load-more:active:not(:disabled) { transform: scale(.98); }
 .detail-pane { display: flex; flex-direction: column; }
 .detail-container { display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; }
-.detail-pane-view-enter-active, .detail-pane-view-leave-active { transition: opacity .18s ease; }
-.detail-pane-view-enter-from, .detail-pane-view-leave-to { opacity: 0; }
 .detail-header { min-height: 112px; display: flex; padding: 20px 24px 16px; border-bottom: 1px solid #e2e5e6; }
 .detail-actions { position: relative; margin-left: auto; }
 .detail-menu { position: absolute; z-index: 20; top: 38px; right: 0; width: 164px; padding: 5px; border: 1px solid #d9dee0; border-radius: 14px; background: #fff; box-shadow: 0 10px 28px #1f2a2f24; transform-origin: top right; }
@@ -236,8 +234,7 @@ i.deepseek { background: #5273e6; } i.doubao { background: #e36f53; } i.kimi { b
 .detail-camera-enter-active, .detail-camera-leave-active { transition: opacity .2s ease, transform .24s cubic-bezier(.2, .8, .2, 1), filter .22s ease; }
 .detail-camera-enter-from { opacity: 0; transform: translateX(16px) scale(.985); filter: blur(2px); }
 .detail-camera-leave-to { opacity: 0; transform: translateX(-12px) scale(1.01); filter: blur(1px); }
-.message-block { padding: 20px 0; border-bottom: 1px solid #eceeef; animation: message-fade-in .15s cubic-bezier(.2, .8, .2, 1); }
-@keyframes message-fade-in { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: translateY(0); } }
+.message-block { padding: 20px 0; border-bottom: 1px solid #eceeef; }
 .message-author { display: flex; align-items: center; margin-bottom: 10px; }
 .message-author span { min-width: 30px; color: #475055; font-size: 11px; font-weight: 700; }
 .message-block.user .message-author span { color: #167961; }
@@ -739,7 +736,7 @@ html[data-theme="dark"] .export-document .mermaid-diagram { border-color: #d7ddd
 @keyframes spin { to { transform: rotate(360deg); } }
 
 @media (prefers-reduced-motion: reduce) {
-  .app-frame, .sidebar, .identity-content, .sidebar-toggle, .nav-item-expanded, .nav-item-count, .service-state, .settings-modal-enter-active, .settings-modal-leave-active, .settings-modal-enter-active .settings-dialog, .settings-modal-leave-active .settings-dialog, .settings-navigation__button, .source-highlight, .source-item, .source-item > span, .source-item i, .segmented-highlight, .segmented-control button, .filter-chevron, .filter-panel-enter-active, .filter-panel-leave-active, .detail-camera-enter-active, .detail-camera-leave-active, .thinking, .thinking-reveal, .thinking-toggle::before, .mcp-copy-button, .mcp-copy-button__clipboard, .mcp-copy-button__check, .mcp-copy-button__check polyline, .mcp-copy-button__label > span, .session-state-enter-active, .session-state-leave-active, .detail-menu-enter-active, .detail-menu-leave-active, .detail-pane-view-enter-active, .detail-pane-view-leave-active, .alert-bar-enter-active, .alert-bar-leave-active, .export-toolbar-enter-active, .export-toolbar-leave-active, .search-nav-enter-active, .search-nav-leave-active, .pdf-options-enter-active, .pdf-options-leave-active, .setting-expand-enter-active, .setting-expand-leave-active, .settings-nav-highlight, .code-copy-button, .message-block, .context-menu-enter-active, .context-menu-leave-active { transition-duration: .01ms; transition-delay: 0s; }
+  .app-frame, .sidebar, .identity-content, .sidebar-toggle, .nav-item-expanded, .nav-item-count, .service-state, .settings-modal-enter-active, .settings-modal-leave-active, .settings-modal-enter-active .settings-dialog, .settings-modal-leave-active .settings-dialog, .settings-navigation__button, .source-highlight, .source-item, .source-item > span, .source-item i, .segmented-highlight, .segmented-control button, .filter-chevron, .filter-panel-enter-active, .filter-panel-leave-active, .detail-camera-enter-active, .detail-camera-leave-active, .thinking, .thinking-reveal, .thinking-toggle::before, .mcp-copy-button, .mcp-copy-button__clipboard, .mcp-copy-button__check, .mcp-copy-button__check polyline, .mcp-copy-button__label > span, .session-state-enter-active, .session-state-leave-active, .detail-menu-enter-active, .detail-menu-leave-active, .alert-bar-enter-active, .alert-bar-leave-active, .export-toolbar-enter-active, .export-toolbar-leave-active, .search-nav-enter-active, .search-nav-leave-active, .pdf-options-enter-active, .pdf-options-leave-active, .setting-expand-enter-active, .setting-expand-leave-active, .settings-nav-highlight, .code-copy-button, .context-menu-enter-active, .context-menu-leave-active { transition-duration: .01ms; transition-delay: 0s; }
   .sidebar-collapsed .settings-button.connected { animation: none; }
   .branch-overview .vue-flow__edge.animated path { animation: none; }
   .branch-overview .vue-flow__node, .branch-card, .branch-overview .vue-flow__edge-path { transition-duration: .01ms; }
