@@ -494,6 +494,20 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+fn safe_new_cuda(ordinal: usize) -> std::result::Result<Device, String> {
+    std::panic::catch_unwind(|| Device::new_cuda(ordinal))
+        .map_err(|payload| {
+            if let Some(s) = payload.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "CUDA 初始化异常（动态库未就绪或设备不可用）".to_string()
+            }
+        })
+        .and_then(|res| res.map_err(|e| e.to_string()))
+}
+
 fn load_model(
     model_dir: &Path,
     preferred_device: &LocalEmbeddingDevice,
@@ -510,7 +524,7 @@ fn load_model(
     match preferred_device {
         LocalEmbeddingDevice::Cpu => candidates.push((Device::Cpu, "CPU")),
         LocalEmbeddingDevice::Cuda | LocalEmbeddingDevice::Auto => {
-            match Device::new_cuda(0) {
+            match safe_new_cuda(0) {
                 Ok(device) => candidates.push((device, "CUDA:0")),
                 Err(error) => {
                     if matches!(preferred_device, LocalEmbeddingDevice::Cuda) {

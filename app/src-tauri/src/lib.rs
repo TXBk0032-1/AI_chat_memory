@@ -25,6 +25,17 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn SetErrorMode(uMode: u32) -> u32;
+        }
+        const SEM_FAILCRITICALERRORS: u32 = 0x0001;
+        const SEM_NOOPENFILEERRORBOX: u32 = 0x8000;
+        SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             tracing::info!("second instance requested; focusing main window");

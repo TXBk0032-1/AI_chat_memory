@@ -508,16 +508,30 @@ fn dtype_pref_label(dtype: &LocalEmbeddingDType) -> &'static str {
     }
 }
 
+fn safe_new_cuda(ordinal: usize) -> std::result::Result<Device, String> {
+    std::panic::catch_unwind(|| Device::new_cuda(ordinal))
+        .map_err(|payload| {
+            if let Some(s) = payload.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "CUDA 初始化异常（动态库未就绪或设备不可用）".to_string()
+            }
+        })
+        .and_then(|res| res.map_err(|e| e.to_string()))
+}
+
 fn select_device(preferred: &LocalEmbeddingDevice) -> Result<(Device, String)> {
     match preferred {
         LocalEmbeddingDevice::Cpu => Ok((Device::Cpu, "CPU".into())),
         LocalEmbeddingDevice::Cuda => {
-            let device = Device::new_cuda(0).map_err(|error| {
+            let device = safe_new_cuda(0).map_err(|error| {
                 AppError::Configuration(format!("无法初始化 CUDA 设备: {error}"))
             })?;
             Ok((device, "CUDA:0".into()))
         }
-        LocalEmbeddingDevice::Auto => match Device::new_cuda(0) {
+        LocalEmbeddingDevice::Auto => match safe_new_cuda(0) {
             Ok(device) => Ok((device, "CUDA:0".into())),
             Err(error) => {
                 tracing::warn!(%error, "CUDA unavailable; falling back to CPU for local embeddings");
