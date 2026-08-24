@@ -134,46 +134,109 @@ if (-not (Test-Path $installMarker) -or (Get-Item $lockFile).LastWriteTimeUtc -g
     Write-Host "==> Frontend dependencies are current" -ForegroundColor DarkGray
 }
 
-Invoke-Step "Validate userscript syntax" {
-    node --check (Join-Path $Root "userscript/dist/ai-chat-memory.user.js")
+function Invoke-ParallelSteps {
+    param(
+        [Parameter(Mandatory)]
+        [array]$Branches
+    )
+
+    $watch = [System.Diagnostics.Stopwatch]::StartNew()
+    $processes = @()
+
+    foreach ($branch in $Branches) {
+        $name = $branch.Name
+        $cmd = $branch.Command
+        $cwd = if ($branch.WorkingDirectory) { $branch.WorkingDirectory } else { $Root }
+
+        Write-Host "`n==> [Parallel: Start] $name" -ForegroundColor Cyan
+
+        $psi = [System.Diagnostics.ProcessStartInfo]::new()
+        $psi.FileName = "cmd.exe"
+        $psi.Arguments = "/c $cmd"
+        $psi.WorkingDirectory = $cwd
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.CreateNoWindow = $true
+
+        $process = [System.Diagnostics.Process]::new()
+        $process.StartInfo = $psi
+        $process.Start() | Out-Null
+
+        $outTask = $process.StandardOutput.ReadToEndAsync()
+        $errTask = $process.StandardError.ReadToEndAsync()
+
+        $processes += [pscustomobject]@{
+            Name = $name
+            Process = $process
+            OutTask = $outTask
+            ErrTask = $errTask
+            StartWatch = [System.Diagnostics.Stopwatch]::StartNew()
+        }
+    }
+
+    $hasFailed = $false
+    $failedNames = @()
+
+    foreach ($item in $processes) {
+        $item.Process.WaitForExit()
+        $item.StartWatch.Stop()
+        [System.Threading.Tasks.Task]::WaitAll(@($item.OutTask, $item.ErrTask))
+
+        $outContent = $item.OutTask.Result
+        $errContent = $item.ErrTask.Result
+
+        Write-Host "`n--- [Parallel Output] $($item.Name) ($('{0:n1}s' -f $item.StartWatch.Elapsed.TotalSeconds)) ---" -ForegroundColor DarkCyan
+        if ($outContent -and $outContent.Trim()) { Write-Host $outContent.TrimEnd() }
+        if ($errContent -and $errContent.Trim()) { Write-Host $errContent.TrimEnd() -ForegroundColor Yellow }
+
+        if ($item.Process.ExitCode -ne 0) {
+            Write-Host "FAILED [Parallel: Exit $($item.Process.ExitCode)] $($item.Name)" -ForegroundColor Red
+            $hasFailed = $true
+            $failedNames += "$($item.Name) (exit code $($item.Process.ExitCode))"
+        } else {
+            Write-Host ("OK  {0} ({1:n1}s)" -f $item.Name, $item.StartWatch.Elapsed.TotalSeconds) -ForegroundColor Green
+        }
+    }
+
+    $watch.Stop()
+    if ($hasFailed) {
+        throw "Parallel execution failed: $($failedNames -join ', ')"
+    }
+    Write-Host ("`nOK  Parallel group completed ({0:n1}s)" -f $watch.Elapsed.TotalSeconds) -ForegroundColor Green
 }
 
-Invoke-Step "Run userscript tests" {
-    node --test (Join-Path $Root "userscript/tests/capture.test.mjs")
-}
+$installerContractTest = Join-Path $PSScriptRoot "tests\build-windows-installers.Tests.ps1"
+$portableContractTest = Join-Path $PSScriptRoot "tests\build-dev-portable.Tests.ps1"
+$userscriptPath = Join-Path $Root "userscript\dist\ai-chat-memory.user.js"
+$userscriptTestPath = Join-Path $Root "userscript\tests\capture.test.mjs"
 
-Invoke-Step "Test Windows installer contract" {
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "tests\build-windows-installers.Tests.ps1")
-}
-
-Invoke-Step "Test development single-file builder contract" {
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "tests\build-dev-portable.Tests.ps1")
-}
-
-Invoke-Step "Check Rust formatting" {
-    Push-Location $Rust
-    try { cargo fmt --check } finally { Pop-Location }
-}
-
-Invoke-Step "Lint Rust" {
-    Push-Location $Rust
-    try { cargo clippy --all-targets --all-features -- -D warnings } finally { Pop-Location }
-}
-
-Invoke-Step "Type-check and build frontend" {
-    Push-Location $App
-    try { npm run build } finally { Pop-Location }
-}
+Invoke-ParallelSteps @(
+    @{
+        Name = "Type-check and build frontend (Vite)"
+        WorkingDirectory = $App
+        Command = "npm run build"
+    },
+    @{
+        Name = "Static checks, contracts & Rust lint"
+        WorkingDirectory = $Rust
+        Command = "node --check `"$userscriptPath`" && node --test `"$userscriptTestPath`" && powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$installerContractTest`" && powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$portableContractTest`" && cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings"
+    }
+)
 
 if ($Stage -in "test", "release") {
-    Invoke-Step "Run frontend tests" {
-        Push-Location $App
-        try { npm test } finally { Pop-Location }
-    }
-    Invoke-Step "Run Rust tests" {
-        Push-Location $Rust
-        try { cargo test --all-features } finally { Pop-Location }
-    }
+    Invoke-ParallelSteps @(
+        @{
+            Name = "Run frontend tests"
+            WorkingDirectory = $App
+            Command = "npm test"
+        },
+        @{
+            Name = "Run Rust tests"
+            WorkingDirectory = $Rust
+            Command = "cargo test --all-features"
+        }
+    )
 }
 
 if ($Stage -eq "release") {
