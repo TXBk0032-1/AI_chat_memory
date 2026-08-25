@@ -22,14 +22,17 @@ static ZIP_IMPORT_SEMAPHORE: tokio::sync::Semaphore = tokio::sync::Semaphore::co
 pub async fn serve(service: AppService) -> crate::error::Result<()> {
     let app = Router::new()
         .route("/api/v1/health", get(health))
-        .route("/api/v1/sessions/import", post(import))
+        .route(
+            "/api/v1/sessions/import",
+            post(import).layer(DefaultBodyLimit::max(20 * 1024 * 1024)),
+        )
         .route(
             "/api/v1/sessions/import/deepseek-export",
             post(import_zip).layer(DefaultBodyLimit::max(128 * 1024 * 1024)),
         )
         .route("/api/v1/sessions/sync-status", get(sync_status))
         .fallback(options)
-        .layer(DefaultBodyLimit::max(20 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(128 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(service.clone(), authorize))
         .layer(middleware::from_fn(log_request))
         .with_state(service.clone());

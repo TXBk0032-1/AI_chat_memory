@@ -269,6 +269,26 @@ fn parse_multistatus(bytes: &[u8]) -> CloudResult<Vec<RemoteEntry>> {
                     }
                 }
             }
+            Ok(Event::GeneralRef(entity)) => {
+                if field.is_some() {
+                    let name: &[u8] = entity.as_ref();
+                    match name {
+                        b"amp" => current_text.push('&'),
+                        b"lt" => current_text.push('<'),
+                        b"gt" => current_text.push('>'),
+                        b"quot" => current_text.push('"'),
+                        b"apos" => current_text.push('\''),
+                        _ => {
+                            let raw = String::from_utf8_lossy(name);
+                            if let Ok(unescaped) =
+                                quick_xml::escape::unescape(&format!("&{};", raw))
+                            {
+                                current_text.push_str(&unescaped);
+                            }
+                        }
+                    }
+                }
+            }
             Ok(Event::CData(cdata)) => {
                 if field.is_some() {
                     current_text.push_str(&String::from_utf8_lossy(cdata.as_ref()));
@@ -390,5 +410,39 @@ mod tests {
         for method in ["PROPFIND", "MKCOL", "GET", "PUT", "DELETE"] {
             assert!(methods.iter().any(|value| value == method));
         }
+    }
+
+    #[test]
+    fn parse_multistatus_unescapes_xml_entities_and_buffers_text() {
+        let xml = br#"<?xml version="1.0" encoding="utf-8"?>
+<D:multistatus xmlns:D="DAV:">
+  <D:response>
+    <D:href>/remote.php/dav/files/user/test%20dir/file&amp;name&lt;1&gt;.json</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:getetag>&quot;etag-&amp;-123&quot;</D:getetag>
+        <D:getcontentlength> 1048576 </D:getcontentlength>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+  <D:response>
+    <D:href>/remote.php/dav/files/user/folder/</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:resourcetype><D:collection/></D:resourcetype>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>"#;
+        let entries = super::parse_multistatus(xml).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "file&name<1>.json");
+        assert_eq!(entries[0].etag.as_deref(), Some("\"etag-&-123\""));
+        assert_eq!(entries[0].size, Some(1048576));
+        assert!(!entries[0].is_collection);
+        assert_eq!(entries[1].name, "folder");
+        assert!(entries[1].is_collection);
     }
 }

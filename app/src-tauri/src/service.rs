@@ -1744,7 +1744,7 @@ impl AppService {
             .await?;
         let mut settings = self.settings().await;
         settings.data_directory = Some(directory.to_string_lossy().into_owned());
-        self.update_settings(settings).await?;
+        self.settings.update(settings).await?;
         tracing::info!(destination=%directory.display(), "database copied to configured directory; restarting application");
         Ok(())
     }

@@ -15,13 +15,16 @@ use crate::{
 pub fn build(app: &tauri::App, service: &AppService, locale: SupportedLocale) -> tauri::Result<()> {
     let settings = service.current_settings();
     let menu = build_menu(app, locale)?;
-    TrayIconBuilder::with_id("main-tray")
+    let mut builder = TrayIconBuilder::with_id("main-tray")
         .menu(&menu)
         .show_menu_on_left_click(matches!(
             settings.tray_click_behavior,
             TrayClickBehavior::ShowMenu
-        ))
-        .icon(app.default_window_icon().unwrap().clone())
+        ));
+    if let Some(icon) = app.default_window_icon() {
+        builder = builder.icon(icon.clone());
+    }
+    builder
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => show_main_window(app),
             "quit" => {

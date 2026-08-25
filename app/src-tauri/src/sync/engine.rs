@@ -402,10 +402,16 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
         let cursor_anchor = persisted_cursor
             .as_ref()
             .and_then(|value| value.anchor.as_ref());
+        const MAX_PULL_BUNDLE_CHAIN_DEPTH: usize = 1000;
         let mut chain = Vec::new();
         let mut current = Some(head.clone());
         let mut released_v1_boundary = None;
         while let Some(document) = current {
+            if chain.len() >= MAX_PULL_BUNDLE_CHAIN_DEPTH {
+                return Err(AppError::InvalidData(
+                    "remote bundle chain exceeded maximum depth limit".into(),
+                ));
+            }
             if document.end_seq < cursor {
                 return Err(AppError::InvalidData(
                     "remote bundle chain skipped below the persisted cursor anchor".into(),

@@ -304,6 +304,7 @@ impl EmbeddingBackend for LocalBgeBackend {
     }
 
     async fn healthcheck(&self) -> Result<EmbeddingHealth> {
+        // Avoid loading the 500MB+ model during startup/status polls if files are present.
         if !model_files_present(&self.model_dir) {
             return Ok(EmbeddingHealth {
                 ok: false,
@@ -313,29 +314,15 @@ impl EmbeddingBackend for LocalBgeBackend {
                 message: format!("模型文件未就绪：{}", self.model_dir.display()),
             });
         }
-        match self.embed_queries(&["健康检查".into()]).await {
-            Ok(vectors) => Ok(EmbeddingHealth {
-                ok: vectors
-                    .first()
-                    .map(|v| v.len() == self.dimensions)
-                    .unwrap_or(false),
-                backend: EmbeddingBackendKind::Local,
-                model_id: self.model_id.clone(),
-                dimensions: Some(self.dimensions),
-                message: format!(
-                    "ok · {}/{}",
-                    self.runtime_device_label(),
-                    self.runtime_dtype_label()
-                ),
-            }),
-            Err(error) => Ok(EmbeddingHealth {
-                ok: false,
-                backend: EmbeddingBackendKind::Local,
-                model_id: self.model_id.clone(),
-                dimensions: Some(self.dimensions),
-                message: error.to_string(),
-            }),
-        }
+        let device = self.runtime_device_label();
+        let dtype = self.runtime_dtype_label();
+        Ok(EmbeddingHealth {
+            ok: true,
+            backend: EmbeddingBackendKind::Local,
+            model_id: self.model_id.clone(),
+            dimensions: Some(self.dimensions),
+            message: format!("ok · {device}/{dtype}"),
+        })
     }
 }
 
@@ -630,7 +617,13 @@ fn warmup_model(loaded: &mut LoadedModel, dimensions: usize) -> Result<()> {
     Ok(())
 }
 
-const SUB_BATCH_SIZE: usize = 32;
+fn sub_batch_size(loaded: &LoadedModel) -> usize {
+    if matches!(loaded.device, Device::Cpu) {
+        16
+    } else {
+        32
+    }
+}
 
 fn embed_texts(
     loaded: &LoadedModel,
@@ -643,7 +636,7 @@ fn embed_texts(
         return Ok(Vec::new());
     }
     let mut all_vectors = Vec::with_capacity(texts.len());
-    for chunk in texts.chunks(SUB_BATCH_SIZE) {
+    for chunk in texts.chunks(sub_batch_size(loaded)) {
         if cancel_flag.load(Ordering::SeqCst) {
             return Err(AppError::Cancelled("本地编码已取消".into()));
         }

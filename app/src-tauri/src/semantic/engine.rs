@@ -526,11 +526,16 @@ impl SemanticEngine {
         query: &str,
         mode: SearchMode,
     ) -> Result<Vec<SessionSearchHit>> {
-        let mut hits = if matches!(mode, SearchMode::Keyword | SearchMode::Hybrid) {
-            crate::database::search_session_hits(&self.pool, session_id, query).await?
-        } else {
-            Vec::new()
-        };
+        let mut seen = std::collections::HashSet::new();
+        let mut hits = Vec::new();
+
+        if matches!(mode, SearchMode::Keyword | SearchMode::Hybrid) {
+            for hit in crate::database::search_session_hits(&self.pool, session_id, query).await? {
+                if seen.insert(hit.message_id.clone()) {
+                    hits.push(hit);
+                }
+            }
+        }
 
         if matches!(mode, SearchMode::Semantic | SearchMode::Hybrid)
             && let Ok(Some(embedding)) = self.embed_query(query).await
@@ -540,9 +545,14 @@ impl SemanticEngine {
                 index::semantic_session_hits(&self.pool, session_id, &identity, &embedding, 20)
                     .await
             {
-                hits.extend(semantic_hits);
+                for hit in semantic_hits {
+                    if seen.insert(hit.message_id.clone()) {
+                        hits.push(hit);
+                    }
+                }
             }
         }
+        hits.sort_by_key(|h| h.seq);
         Ok(hits)
     }
 

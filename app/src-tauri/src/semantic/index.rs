@@ -5,7 +5,7 @@ use super::chunker::chunk_message;
 use crate::{
     database,
     embedding::BackendIdentity,
-    error::Result,
+    error::{AppError, Result},
     models::{SearchHitField, SearchQuery, SessionSearchHit, SessionSummary},
 };
 
@@ -83,6 +83,7 @@ pub async fn queue_session_chunks_with_force(
     let mut keep = HashSet::new();
     let now = chrono::Utc::now().to_rfc3339();
     let mut queued = 0usize;
+    let mut tx = pool.begin().await?;
 
     for chunk in desired {
         keep.insert((chunk.message_id.clone(), chunk.chunk_index));
@@ -102,11 +103,11 @@ pub async fn queue_session_chunks_with_force(
             .bind(identity.dimensions as i64)
             .bind(&now)
             .bind(id)
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
             let _ = sqlx::query("DELETE FROM embedding_vec WHERE chunk_id = ?")
                 .bind(id)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await;
             queued += 1;
         } else {
@@ -125,7 +126,7 @@ pub async fn queue_session_chunks_with_force(
             .bind(&identity.model_id)
             .bind(identity.dimensions as i64)
             .bind(&now)
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
             queued += 1;
         }
@@ -138,14 +139,15 @@ pub async fn queue_session_chunks_with_force(
         let id: i64 = row.try_get("id")?;
         let _ = sqlx::query("DELETE FROM embedding_vec WHERE chunk_id = ?")
             .bind(id)
-            .execute(pool)
+            .execute(&mut *tx)
             .await;
         sqlx::query("DELETE FROM embedding_chunks WHERE id = ?")
             .bind(id)
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
     }
 
+    tx.commit().await?;
     Ok(queued)
 }
 
@@ -255,20 +257,19 @@ pub async fn mark_chunks_ready(
     let total_started = std::time::Instant::now();
 
     let prepare_started = std::time::Instant::now();
-    let prepared = items
-        .iter()
-        .map(|(chunk_id, session_id, message_id, platform, embedding)| {
-            let mut vector = embedding.clone();
-            let dim = identity.dimensions.max(1);
-            if vector.len() < dim {
-                vector.resize(dim, 0.0);
-            } else if vector.len() > dim {
-                vector.truncate(dim);
-            }
-            let bytes = f32_slice_as_bytes(&vector);
-            (*chunk_id, *session_id, *message_id, *platform, bytes)
-        })
-        .collect::<Vec<_>>();
+    let dim = identity.dimensions.max(1);
+    let mut prepared = Vec::with_capacity(items.len());
+    for (chunk_id, session_id, message_id, platform, embedding) in items {
+        if embedding.len() != dim {
+            return Err(AppError::Configuration(format!(
+                "embedding dimension mismatch: expected {}, got {}",
+                dim,
+                embedding.len()
+            )));
+        }
+        let bytes = f32_slice_as_bytes(embedding);
+        prepared.push((*chunk_id, *session_id, *message_id, *platform, bytes));
+    }
     let prepare_ms = prepare_started.elapsed().as_millis();
 
     let mut tx = pool.begin().await?;

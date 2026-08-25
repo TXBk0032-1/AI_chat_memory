@@ -154,7 +154,11 @@ impl VaultProtection {
     pub fn passphrase_matches(&self, vault_id: &str, passphrase: &str) -> Result<bool> {
         match self.derive_protector(vault_id, passphrase) {
             Ok(_) => Ok(true),
-            Err(AppError::Crypto(_)) => Ok(false),
+            Err(AppError::Crypto(ref msg))
+                if msg == "sync passphrase does not match remote vault" =>
+            {
+                Ok(false)
+            }
             Err(error) => Err(error),
         }
     }

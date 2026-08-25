@@ -39,11 +39,32 @@ async fn authorize_mcp(
         return next.run(request).await;
     }
 
+    let origin = headers.get("origin").and_then(|v| v.to_str().ok());
+    let settings = service.settings().await;
+
+    // Validate Origin header when present (e.g. from web browsers)
+    let is_origin_allowed = match origin {
+        Some(val) => settings
+            .allowed_origins
+            .iter()
+            .any(|allowed| allowed == val),
+        None => true,
+    };
+
     let method = request.method().clone();
+    if !is_origin_allowed {
+        tracing::warn!(%method, path, origin=origin.unwrap_or("<none>"), "MCP request rejected: origin not allowed");
+        return (StatusCode::FORBIDDEN, "origin_not_allowed").into_response();
+    }
+
     if method == Method::OPTIONS {
         let mut res = StatusCode::NO_CONTENT.into_response();
-        res.headers_mut()
-            .insert("access-control-allow-origin", HeaderValue::from_static("*"));
+        if let Some(origin_val) = origin.and_then(|o| HeaderValue::from_str(o).ok()) {
+            res.headers_mut()
+                .insert("access-control-allow-origin", origin_val);
+            res.headers_mut()
+                .insert("vary", HeaderValue::from_static("Origin"));
+        }
         res.headers_mut().insert(
             "access-control-allow-methods",
             HeaderValue::from_static("GET, POST, OPTIONS"),
@@ -55,7 +76,6 @@ async fn authorize_mcp(
         return res;
     }
 
-    let settings = service.settings().await;
     if settings.secret_enabled {
         let configured_secret = settings.secret.as_deref().unwrap_or_default();
         let header_secret = headers.get(SECRET_HEADER).and_then(|v| v.to_str().ok());
@@ -68,12 +88,7 @@ async fn authorize_mcp(
                     .or_else(|| auth.strip_prefix("bearer "))
             });
 
-        let query_secret = request
-            .uri()
-            .query()
-            .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("secret=")));
-
-        let provided = header_secret.or(bearer_secret).or(query_secret);
+        let provided = header_secret.or(bearer_secret);
         let authorized = match provided {
             Some(token) if !configured_secret.is_empty() => {
                 constant_time_eq(token, configured_secret)
@@ -88,9 +103,14 @@ async fn authorize_mcp(
     }
 
     let mut response = next.run(request).await;
-    response
-        .headers_mut()
-        .insert("access-control-allow-origin", HeaderValue::from_static("*"));
+    if let Some(origin_val) = origin.and_then(|o| HeaderValue::from_str(o).ok()) {
+        response
+            .headers_mut()
+            .insert("access-control-allow-origin", origin_val);
+        response
+            .headers_mut()
+            .insert("vary", HeaderValue::from_static("Origin"));
+    }
     response.headers_mut().insert(
         "access-control-allow-headers",
         HeaderValue::from_static("content-type, authorization, x-ai-chat-memory-secret"),

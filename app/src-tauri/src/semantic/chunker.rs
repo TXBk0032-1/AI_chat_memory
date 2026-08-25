@@ -27,7 +27,12 @@ pub fn chunk_message(
     if body.is_empty() {
         return Vec::new();
     }
-    let prefix = format!("[{platform}] {title}\n{role}: ");
+    let truncated_title = if title.graphemes(true).count() > 100 {
+        title.graphemes(true).take(100).collect::<String>()
+    } else {
+        title.to_owned()
+    };
+    let prefix = format!("[{platform}] {truncated_title}\n{role}: ");
     let prefix_len = prefix.graphemes(true).count();
     let target_body = TARGET_CHARS.saturating_sub(prefix_len).max(100);
     let overlap_body = OVERLAP_CHARS.min(target_body / 2);

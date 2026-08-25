@@ -78,10 +78,12 @@ pub async fn delete_session(pool: &SqlitePool, id: &str, record_sync: bool) -> R
 }
 
 pub async fn sync_status(pool: &SqlitePool, platform: &str) -> Result<Option<String>> {
-    Ok(
-        sqlx::query_scalar("SELECT MAX(updated_at) FROM sessions WHERE platform = ?")
-            .bind(platform)
-            .fetch_one(pool)
-            .await?,
-    )
+    let expr = crate::database::timestamp::expression("updated_at");
+    let query = format!(
+        "SELECT updated_at FROM sessions WHERE platform = ? AND updated_at IS NOT NULL AND trim(updated_at) != '' ORDER BY ({expr}) DESC LIMIT 1"
+    );
+    Ok(sqlx::query_scalar(&query)
+        .bind(platform)
+        .fetch_optional(pool)
+        .await?)
 }

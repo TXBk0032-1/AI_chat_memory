@@ -185,7 +185,9 @@ impl HttpEmbeddingBackend {
             .await
             .map_err(|error| AppError::Configuration(error.to_string()))?;
         let mut items = payload.data;
-        items.sort_by_key(|item| item.index);
+        if items.iter().all(|item| item.index.is_some()) {
+            items.sort_by_key(|item| item.index.unwrap_or(0));
+        }
         let vectors = items
             .into_iter()
             .map(|item| item.embedding)
@@ -248,7 +250,8 @@ struct OpenAiEmbeddingResponse {
 
 #[derive(Debug, Deserialize)]
 struct OpenAiEmbeddingItem {
-    index: usize,
+    #[serde(default)]
+    index: Option<usize>,
     embedding: Vec<f32>,
 }
 
