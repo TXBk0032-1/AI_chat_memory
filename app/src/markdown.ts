@@ -78,9 +78,7 @@ function replaceReferenceMarkers(html: string, message: Message, references: Map
 }
 
 export function renderMarkdown(value: string, message: Message, references: Map<number, Reference>, query: string) {
-  const source = (value || '')
-    .replace(/\\\[([\s\S]*?)\\\]/g, (_, formula) => `\n$$${formula}$$\n`)
-    .replace(/\\\((.+?)\\\)/g, (_, formula) => `$${formula}$`)
+  const source = value || ''
   const rendered = replaceReferenceMarkers(markdown.render(source), message, references)
   return highlightHtml(rendered, query)
 }

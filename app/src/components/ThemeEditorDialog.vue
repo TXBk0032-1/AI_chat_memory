@@ -71,12 +71,14 @@ const navFontColor = ref('')
 const badgePrimaryColor = ref('')
 const badgeSecondaryColor = ref('')
 const badgeTertiaryColor = ref('')
+const extraExtInfo = ref<Record<string, string>>({})
 const showAdvanced = ref(false)
 const errorMessage = ref('')
 const fileInputRef = ref<HTMLInputElement | null>(null)
 
 function resetFormFromTheme(target: ThemeDefinition | null, isCreatingNew = false) {
   errorMessage.value = ''
+  extraExtInfo.value = {}
   if (!target || isCreatingNew) {
     const defaultTheme = createDefaultCustomTheme(target?.isDark ?? isDark.value)
     id.value = defaultTheme.id
@@ -104,6 +106,22 @@ function resetFormFromTheme(target: ThemeDefinition | null, isCreatingNew = fals
     badgePrimaryColor.value = target.config.extInfo?.['--color-badge-primary'] ? toHex6(target.config.extInfo['--color-badge-primary']) : ''
     badgeSecondaryColor.value = target.config.extInfo?.['--color-badge-secondary'] ? toHex6(target.config.extInfo['--color-badge-secondary']) : ''
     badgeTertiaryColor.value = target.config.extInfo?.['--color-badge-tertiary'] ? toHex6(target.config.extInfo['--color-badge-tertiary']) : ''
+
+    if (target.config?.extInfo) {
+      const knownKeys = new Set([
+        '--color-app-background',
+        '--color-main-background',
+        '--color-nav-font',
+        '--color-badge-primary',
+        '--color-badge-secondary',
+        '--color-badge-tertiary',
+      ])
+      for (const [k, v] of Object.entries(target.config.extInfo)) {
+        if (!knownKeys.has(k)) {
+          extraExtInfo.value[k] = v
+        }
+      }
+    }
   }
 }
 
@@ -139,6 +157,7 @@ function selectAccent(hex: string) {
 
 const computedExtInfo = computed(() => {
   const ext: Record<string, string> = {
+    ...extraExtInfo.value,
     '--color-app-background': normalizeColor(appBgColor.value),
     '--color-main-background': normalizeColor(mainBgColor.value),
   }

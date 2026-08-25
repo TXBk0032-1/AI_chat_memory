@@ -51,4 +51,11 @@ describe('markdown rendering', () => {
     expect(html).not.toContain('&<mark')
     expect(html).toContain('&amp;')
   })
+
+  it('renders math formulas with brackets and preserves bracket syntax in code blocks', () => {
+    const html = renderMarkdown('\\[E = mc^2\\]\n\\(a^2 + b^2 = c^2\\)\n\n```python\nregex = r"\\[a-z\\]"\n```', message, new Map(), '')
+    expect(html).toContain('class="katex"')
+    expect(html).toContain('regex = r&quot;\\[a-z\\]&quot;')
+    expect(html).not.toContain('$$a-z$$')
+  })
 })

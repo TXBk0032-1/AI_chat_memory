@@ -850,7 +850,7 @@ onMounted(async () => {
     showClosePrompt.value = true
   })
   await Promise.allSettled([settingsReady, refreshApiStatus(), sessionsReady])
-  statusTimer = window.setInterval(refreshApiStatus, 3000)
+  statusTimer = window.setInterval(() => { void refreshApiStatus().catch(() => {}) }, 3000)
 })
 watch([expandedThinking, detailMode], () => { void renderMermaidDiagrams() }, { flush: 'post' })
 watch(committedQuery, () => {
@@ -1019,7 +1019,7 @@ onBeforeUnmount(() => {
                       @toggle-thinking="toggleThinking"
                       @content-rendered="renderMermaidDiagrams"
                     />
-                    <div v-else class="message-placeholder" @vue:mounted="ensureMessageLoaded(displayedMessageSeqs[virtualMessage.index])"><LoaderCircle class="spinning" :size="16" /><span>{{ t('app.loadMessage') }}</span></div>
+                    <div v-else class="message-placeholder" @vue:mounted="void ensureMessageLoaded(displayedMessageSeqs[virtualMessage.index]).catch(() => {})"><LoaderCircle class="spinning" :size="16" /><span>{{ t('app.loadMessage') }}</span></div>
                   </div>
                 </div>
                 <div v-else key="branches" class="branch-view">

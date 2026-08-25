@@ -6,6 +6,7 @@ import { translate as t } from '../i18n'
 
 const appWindow = getCurrentWindow()
 let unlistenResize: (() => void) | undefined
+let isMounted = false
 
 async function syncMaximizedState() {
   const maximized = await appWindow.isMaximized()
@@ -17,13 +18,21 @@ function runWindowAction(action: () => Promise<void>) {
 }
 
 onMounted(() => {
+  isMounted = true
   void syncMaximizedState().catch((error) => console.error('Failed to read window state', error))
   void appWindow.onResized(() => {
     void syncMaximizedState().catch((error) => console.error('Failed to read window state', error))
-  }).then((unlisten) => { unlistenResize = unlisten })
+  }).then((unlisten) => {
+    if (!isMounted) {
+      unlisten()
+    } else {
+      unlistenResize = unlisten
+    }
+  })
 })
 
 onBeforeUnmount(() => {
+  isMounted = false
   unlistenResize?.()
   document.documentElement.classList.remove('window-maximized')
 })
