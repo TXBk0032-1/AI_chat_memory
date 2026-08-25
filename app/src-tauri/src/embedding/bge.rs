@@ -222,7 +222,7 @@ impl LocalBgeBackend {
             let loaded = guard
                 .as_mut()
                 .ok_or_else(|| AppError::Configuration("local model not loaded".into()))?;
-            embed_batch(loaded, &texts, is_query, dimensions, &cancel_flag)
+            embed_texts(loaded, &texts, is_query, dimensions, &cancel_flag)
         })
         .await
     }
@@ -614,13 +614,8 @@ fn try_load(
 }
 
 fn warmup_model(loaded: &mut LoadedModel, dimensions: usize) -> Result<()> {
-    let vectors = embed_batch(
-        loaded,
-        &["warmup".into()],
-        false,
-        dimensions,
-        &AtomicBool::new(false),
-    )?;
+    let dummy_cancel = AtomicBool::new(false);
+    let vectors = embed_texts(loaded, &["warmup".into()], false, dimensions, &dummy_cancel)?;
     if vectors.len() != 1 || vectors[0].len() != dimensions {
         return Err(AppError::Configuration(
             "bge warmup returned unexpected shape".into(),
@@ -635,16 +630,35 @@ fn warmup_model(loaded: &mut LoadedModel, dimensions: usize) -> Result<()> {
     Ok(())
 }
 
-fn embed_batch(
-    loaded: &mut LoadedModel,
+const SUB_BATCH_SIZE: usize = 32;
+
+fn embed_texts(
+    loaded: &LoadedModel,
     texts: &[String],
     is_query: bool,
     dimensions: usize,
     cancel_flag: &AtomicBool,
 ) -> Result<Vec<Vec<f32>>> {
-    if cancel_flag.load(Ordering::SeqCst) {
-        return Err(AppError::Cancelled("本地编码已取消".into()));
+    if texts.is_empty() {
+        return Ok(Vec::new());
     }
+    let mut all_vectors = Vec::with_capacity(texts.len());
+    for chunk in texts.chunks(SUB_BATCH_SIZE) {
+        if cancel_flag.load(Ordering::SeqCst) {
+            return Err(AppError::Cancelled("本地编码已取消".into()));
+        }
+        let batch_vectors = embed_single_batch(loaded, chunk, is_query, dimensions)?;
+        all_vectors.extend(batch_vectors);
+    }
+    Ok(all_vectors)
+}
+
+fn embed_single_batch(
+    loaded: &LoadedModel,
+    texts: &[String],
+    is_query: bool,
+    dimensions: usize,
+) -> Result<Vec<Vec<f32>>> {
     let prepared = texts
         .iter()
         .map(|text| {

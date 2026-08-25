@@ -39,4 +39,16 @@ describe('markdown rendering', () => {
     expect(html).toContain('typescript')
     expect(html).toContain('class="code-copy-button"')
   })
+
+  it('does not replace [reference:N] inside code blocks', () => {
+    const html = renderMarkdown('```python\nx = data[reference:1]\n```', message, new Map(), '')
+    expect(html).not.toContain('class="reference-marker"')
+    expect(html).toContain('data[reference:1]')
+  })
+
+  it('does not corrupt HTML entities when highlighting query matches', () => {
+    const html = renderMarkdown('Tom &amp; Jerry &quot;Show&quot;', message, new Map(), 'amp')
+    expect(html).not.toContain('&<mark')
+    expect(html).toContain('&amp;')
+  })
 })

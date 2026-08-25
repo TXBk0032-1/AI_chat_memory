@@ -46,8 +46,8 @@ use crate::{
     },
 };
 
-const MAX_CONVERSATIONS_JSON_BYTES: u64 = 512 * 1024 * 1024;
-const CONVERSATIONS_JSON_TOO_LARGE: &str = "conversations.json 解压后超过 512 MB 限制";
+const MAX_CONVERSATIONS_JSON_BYTES: u64 = 128 * 1024 * 1024;
+const CONVERSATIONS_JSON_TOO_LARGE: &str = "conversations.json 解压后超过 128 MB 限制";
 
 fn read_zip_entry_with_limit<R: Read>(reader: R, max_bytes: u64) -> Result<String> {
     let mut content = String::new();
@@ -1737,6 +1737,7 @@ impl AppService {
                 "目标目录中已存在 chat_memory.db，请选择其他目录".into(),
             ));
         }
+        let _guard = self.sync_gate.lock().await;
         sqlx::query("VACUUM INTO ?")
             .bind(destination.to_string_lossy().as_ref())
             .execute(&self.pool)

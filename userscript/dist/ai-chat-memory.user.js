@@ -111,17 +111,33 @@
             return result;
         }
 
+        function redactRawString(text) {
+            if (typeof text !== 'string' || !text) return text;
+            return text
+                .replace(/"(authorization|token|access_token|refresh_token|secret|password)"\s*:\s*"[^"]+"/gi, '"$1":"{REDACTED}"')
+                .replace(/(Bearer\s+)[a-zA-Z0-9_\-\.]{16,}/gi, '$1{REDACTED}')
+                .replace(/(pow.*(?:response|answer))\s*:\s*"[^"]+"/gi, '"$1":"{REDACTED}"');
+        }
+
         function redactExchange(exchange) {
             const result = redactValue(exchange);
             if (result?.request) {
                 result.request.url = redactUrl(result.request.url);
                 result.request.headers = redactHeaders(exchange?.request?.headers);
+                if (typeof result.request.data_raw === 'string') {
+                    result.request.data_raw = redactRawString(result.request.data_raw);
+                }
             }
-            if (result?.response) result.response.headers = redactHeaders(exchange?.response?.headers);
+            if (result?.response) {
+                result.response.headers = redactHeaders(exchange?.response?.headers);
+                if (typeof result.response.data_raw === 'string') {
+                    result.response.data_raw = redactRawString(result.response.data_raw);
+                }
+            }
             return result;
         }
 
-        return Object.freeze({ redactExchange, redactHeaders, redactUrl, redactValue });
+        return Object.freeze({ redactExchange, redactHeaders, redactUrl, redactValue, redactRawString });
     })();
 
     const SseParser = Object.freeze({
@@ -346,12 +362,21 @@
         }
 
         _enforceSessionBudget(session) {
-            const overBudget = () => JsonTools.byteLength(session) > this.config.maxSessionBytes;
-            while (session.other_exchanges.length && overBudget()) session.other_exchanges.shift();
-            while (session.completion_exchanges.length > 1 && overBudget()) session.completion_exchanges.shift();
-            while (session.file_exchanges.length > 1 && overBudget()) session.file_exchanges.shift();
-            while (session.completion_exchanges.length && overBudget()) session.completion_exchanges.shift();
-            while (session.file_exchanges.length && overBudget()) session.file_exchanges.shift();
+            let currentBytes = JsonTools.byteLength(session);
+            if (currentBytes <= this.config.maxSessionBytes) return;
+
+            const prune = (list, minRemaining = 0) => {
+                while (list.length > minRemaining && currentBytes > this.config.maxSessionBytes) {
+                    const removed = list.shift();
+                    currentBytes -= JsonTools.byteLength(removed);
+                }
+            };
+
+            prune(session.other_exchanges, 0);
+            if (currentBytes > this.config.maxSessionBytes) prune(session.completion_exchanges, 1);
+            if (currentBytes > this.config.maxSessionBytes) prune(session.file_exchanges, 1);
+            if (currentBytes > this.config.maxSessionBytes) prune(session.completion_exchanges, 0);
+            if (currentBytes > this.config.maxSessionBytes) prune(session.file_exchanges, 0);
         }
 
         record(exchange, fallbackPath = '') {
@@ -632,8 +657,14 @@
                    : location.hostname.includes('doubao') ? 'doubao'
                    : location.hostname.includes('kimi') ? 'kimi' : null;
 
-    if (!PLATFORM && !TEST_MODE) return;
-    console.log(`🧠 AI Chat Memory 已加载 [${PLATFORM}]`);
+    const defaultSleep = (ms, signal) => new Promise((resolve, reject) => {
+        if (signal?.aborted) return reject(new Error('Aborted'));
+        const timer = setTimeout(resolve, ms);
+        signal?.addEventListener?.('abort', () => {
+            clearTimeout(timer);
+            reject(new Error('Aborted'));
+        }, { once: true });
+    });
 
     class CredentialStore {
         constructor(options = {}) {
@@ -642,7 +673,7 @@
             this.setValue = options.setValue || options.gmSet || storage.set || ((key, value) => GM_setValue(key, value));
             this.deleteValue = options.deleteValue || options.gmDelete || storage.delete || (key => GM_deleteValue(key));
             this.now = options.now || (() => Date.now());
-            this.sleep = options.sleep || (ms => new Promise(resolve => setTimeout(resolve, ms)));
+            this.sleep = options.sleep || defaultSleep;
             this.tokenTtlMs = Number(options.tokenTtlMs ?? RuntimeConfig.tokenTtlMs);
             this.waitTimeoutMs = Number(options.waitTimeoutMs ?? options.waitMs ?? 5000);
             this.pollIntervalMs = Number(options.pollIntervalMs ?? options.pollMs ?? 100);
@@ -889,7 +920,7 @@
             this.xhrFactory = options.xhrFactory || (() => new this.window.XMLHttpRequest());
             this.credentials = options.credentials || new CredentialStore();
             this.location = options.location || globalThis.location || { pathname: '' };
-            this.sleep = options.sleep || (ms => new Promise(resolve => setTimeout(resolve, ms)));
+            this.sleep = options.sleep || defaultSleep;
             this.tokenWaitOptions = options.tokenWaitOptions || {};
             this.randomUUID = options.randomUUID || (() => globalThis.crypto?.randomUUID?.()
                 || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`);
@@ -979,8 +1010,9 @@
             return this.credentials.getToken(this.tokenKey);
         }
 
-        async _xhr(url, retry = 0) {
-            const token = await this.getToken({ wait: true });
+        async _xhr(url, retry = 0, signal = null) {
+            if (signal?.aborted) throw new Error('Aborted');
+            const token = await this.getToken({ wait: true, signal });
             if (this.needsToken && !token) throw new Error('Token 未就绪');
             if (this.request) {
                 const value = await this.request(url, {
@@ -992,11 +1024,13 @@
                         'x-client-locale': 'zh_CN',
                         'x-client-platform': 'web',
                         'x-client-timezone-offset': '28800'
-                    }
+                    },
+                    signal
                 });
                 return value && typeof value.json === 'function' ? value.json() : value;
             }
             return new Promise((resolve, reject) => {
+                if (signal?.aborted) return reject(new Error('Aborted'));
                 const xhr = this.xhrFactory();
                 xhr.open('GET', url);
                 xhr.withCredentials = true;
@@ -1006,11 +1040,17 @@
                 xhr.setRequestHeader('x-client-locale', 'zh_CN');
                 xhr.setRequestHeader('x-client-platform', 'web');
                 xhr.setRequestHeader('x-client-timezone-offset', '28800');
+                const onAbort = () => {
+                    try { xhr.abort(); } catch {}
+                    reject(new Error('Aborted'));
+                };
+                signal?.addEventListener?.('abort', onAbort, { once: true });
                 xhr.onload = () => {
+                    signal?.removeEventListener?.('abort', onAbort);
                     if (xhr.status === 429 && retry < 3) {
                         const wait = (retry + 1) * 15000;
                         console.warn(`⚠️ 429限流，${wait/1000}s 后重试 (${retry+1}/3)`);
-                        this.sleep(wait).then(() => this._xhr(url, retry + 1).then(resolve, reject), reject);
+                        this.sleep(wait, signal).then(() => this._xhr(url, retry + 1, signal).then(resolve, reject), reject);
                         return;
                     }
 
@@ -1025,7 +1065,10 @@
                         reject(new Error(`DeepSeek 响应解析失败: ${e.message}`));
                     }
                 };
-                xhr.onerror = () => reject(new Error(`XHR error: ${xhr.status}`));
+                xhr.onerror = () => {
+                    signal?.removeEventListener?.('abort', onAbort);
+                    reject(new Error(`XHR error: ${xhr.status}`));
+                };
                 xhr.send();
             });
         }
@@ -1380,6 +1423,38 @@
             return this.platform === 'doubao' ? session?.conversation?.conversation_id : session?.id;
         }
 
+        async _downloadOfficialZip(zipUrl) {
+            if (typeof GM_xmlhttpRequest === 'function') {
+                try {
+                    const blob = await new Promise((resolve, reject) => {
+                        const req = GM_xmlhttpRequest({
+                            method: 'GET',
+                            url: zipUrl,
+                            responseType: 'blob',
+                            onload: (res) => {
+                                if (res.status >= 200 && res.status < 300) resolve(res.response);
+                                else reject(new Error(`GM_xmlhttpRequest failed ${res.status}`));
+                            },
+                            onerror: (err) => reject(new Error(`GM_xmlhttpRequest error: ${err}`)),
+                            ontimeout: () => reject(new Error('GM_xmlhttpRequest timeout'))
+                        });
+                        this.abortController?.signal?.addEventListener('abort', () => {
+                            try { req?.abort?.(); } catch {}
+                            reject(new Error('Aborted'));
+                        }, { once: true });
+                    });
+                    if (blob && blob.size) return blob;
+                } catch (e) {
+                    console.warn('GM_xmlhttpRequest failed, falling back to fetch', e);
+                }
+            }
+            const zipResponse = await this.fetchImpl(zipUrl, {
+                method: 'GET', credentials: 'omit', mode: 'cors', signal: this.abortController?.signal
+            });
+            if (!zipResponse.ok) throw new Error(`ZIP 下载失败 ${zipResponse.status}: ${await zipResponse.text()}`);
+            return zipResponse.blob();
+        }
+
         async syncDeepSeekOfficialExport() {
             const token = await this.adapter.getToken({ wait: true });
             if (!token) throw new Error('Token 未就绪');
@@ -1395,18 +1470,14 @@
                 zipUrl = this.adapter.extractOfficialZipUrl(status);
                 if (zipUrl) break;
                 this._status(this.adapter.describeExportStatus(status));
-                await this.sleep(this.exportPollDelayMs);
+                await this.sleep(this.exportPollDelayMs, this.abortController?.signal);
             }
             if (this._isStopped()) return { state: 'stopped' };
             if (!zipUrl) throw new Error('官方导出超时，未获取到 ZIP 下载地址');
 
             this._progress(3, 4, '下载官方 ZIP...');
-            const zipResponse = await this.fetchImpl(zipUrl, {
-                method: 'GET', credentials: 'omit', mode: 'cors', signal: this.abortController?.signal
-            });
-            if (!zipResponse.ok) throw new Error(`ZIP 下载失败 ${zipResponse.status}: ${await zipResponse.text()}`);
-            const zipBlob = await zipResponse.blob();
-            if (!zipBlob.size) throw new Error('ZIP 下载为空');
+            const zipBlob = await this._downloadOfficialZip(zipUrl);
+            if (!zipBlob || !zipBlob.size) throw new Error('ZIP 下载为空');
             if (this._isStopped()) return { state: 'stopped' };
 
             this._progress(4, 4, '导入官方 ZIP...');

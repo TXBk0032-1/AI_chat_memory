@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { Archive, LoaderCircle } from 'lucide-vue-next'
 import type { SessionSummary } from '../conversation'
-import { escapeTitle } from '../markdown'
+import { escapeTitle, highlightHtml } from '../markdown'
 import { currentLocale, translate as t } from '../i18n'
 import { formatDate as localizedDate } from '../i18n/locale'
 
@@ -15,14 +15,10 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ select: [id: string]; loadMore: [] }>()
 
-function escapeRegExp(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-}
 function highlightTitle(value: string) {
   const html = escapeTitle(value)
   if (!props.query) return html
-  const pattern = new RegExp(escapeRegExp(props.query), 'gi')
-  return html.replace(pattern, (match) => `<mark class="search-hit">${match}</mark>`)
+  return highlightHtml(html, props.query)
 }
 function platformName(value: string) {
   return ({ deepseek: 'DeepSeek', doubao: t('app.platformDoubao'), kimi: 'Kimi' } as Record<string, string>)[value] || value

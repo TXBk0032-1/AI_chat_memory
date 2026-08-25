@@ -351,7 +351,8 @@ export function useSettings(
   async function copyMcpConfig() {
     clearMcpConfigCopiedTimer()
     const url = settingsApiStatus.value?.mcp_url
-    await navigator.clipboard.writeText(url ? buildMcpClientConfig(url) : buildMcpClientConfig())
+    const secret = settings.value.secret_enabled ? settings.value.secret : undefined
+    await navigator.clipboard.writeText(url ? buildMcpClientConfig(url, secret) : buildMcpClientConfig(undefined, secret))
     mcpConfigCopied.value = true
     mcpConfigCopiedTimer = window.setTimeout(() => {
       mcpConfigCopied.value = false

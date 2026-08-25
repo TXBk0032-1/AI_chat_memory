@@ -73,6 +73,7 @@ export function useSessionCatalog(
   }
 
   async function loadMore() {
+    if (loading.value || sessions.value.length >= total.value) return
     page.value += 1
     await loadSessions(false)
   }

@@ -3,14 +3,100 @@
 
 use crate::mcp::server::ChatMemoryMcp;
 use crate::service::AppService;
-use axum::Json;
-use axum::Router;
+use axum::extract::{DefaultBodyLimit, Request, State};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use axum::{Json, Router};
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
 use serde_json::{Value, json};
 use std::sync::Arc;
+
+const SECRET_HEADER: &str = "x-ai-chat-memory-secret";
+
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    let a_hash = Sha256::digest(a.as_bytes());
+    let b_hash = Sha256::digest(b.as_bytes());
+    let mut diff = 0u8;
+    for (x, y) in a_hash.iter().zip(b_hash.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+async fn authorize_mcp(
+    State(service): State<AppService>,
+    headers: HeaderMap,
+    request: Request,
+    next: Next,
+) -> Response {
+    let path = request.uri().path();
+    if path == "/health" {
+        return next.run(request).await;
+    }
+
+    let method = request.method().clone();
+    if method == Method::OPTIONS {
+        let mut res = StatusCode::NO_CONTENT.into_response();
+        res.headers_mut()
+            .insert("access-control-allow-origin", HeaderValue::from_static("*"));
+        res.headers_mut().insert(
+            "access-control-allow-methods",
+            HeaderValue::from_static("GET, POST, OPTIONS"),
+        );
+        res.headers_mut().insert(
+            "access-control-allow-headers",
+            HeaderValue::from_static("content-type, authorization, x-ai-chat-memory-secret"),
+        );
+        return res;
+    }
+
+    let settings = service.settings().await;
+    if settings.secret_enabled {
+        let configured_secret = settings.secret.as_deref().unwrap_or_default();
+        let header_secret = headers.get(SECRET_HEADER).and_then(|v| v.to_str().ok());
+
+        let bearer_secret = headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|auth| {
+                auth.strip_prefix("Bearer ")
+                    .or_else(|| auth.strip_prefix("bearer "))
+            });
+
+        let query_secret = request
+            .uri()
+            .query()
+            .and_then(|q| q.split('&').find_map(|pair| pair.strip_prefix("secret=")));
+
+        let provided = header_secret.or(bearer_secret).or(query_secret);
+        let authorized = match provided {
+            Some(token) if !configured_secret.is_empty() => {
+                constant_time_eq(token, configured_secret)
+            }
+            _ => false,
+        };
+
+        if !authorized {
+            tracing::warn!(%method, path, "MCP request rejected: missing or invalid secret");
+            return (StatusCode::UNAUTHORIZED, "invalid or missing MCP secret").into_response();
+        }
+    }
+
+    let mut response = next.run(request).await;
+    response
+        .headers_mut()
+        .insert("access-control-allow-origin", HeaderValue::from_static("*"));
+    response.headers_mut().insert(
+        "access-control-allow-headers",
+        HeaderValue::from_static("content-type, authorization, x-ai-chat-memory-secret"),
+    );
+    response
+}
 
 /// Build the MCP Axum router: `GET /health` + Streamable HTTP at `/mcp`.
 pub fn build_mcp_router(app_service: AppService) -> Router {
@@ -28,6 +114,12 @@ pub fn build_mcp_router(app_service: AppService) -> Router {
     Router::new()
         .route("/health", get(health))
         .nest_service("/mcp", service)
+        .layer(DefaultBodyLimit::max(20 * 1024 * 1024))
+        .layer(middleware::from_fn_with_state(
+            app_service.clone(),
+            authorize_mcp,
+        ))
+        .with_state(app_service)
 }
 
 async fn health() -> Json<Value> {

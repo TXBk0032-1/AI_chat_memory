@@ -394,7 +394,9 @@ async function localizeExportImages(root: HTMLElement) {
   await Promise.all(images.map(async (image) => {
     if (!/^https?:\/\//i.test(image.src)) return
     try {
-      const response = await fetch(image.src)
+      const controller = new AbortController()
+      const timeoutId = window.setTimeout(() => controller.abort(), 8000)
+      const response = await fetch(image.src, { signal: controller.signal }).finally(() => window.clearTimeout(timeoutId))
       if (!response.ok) throw new Error(String(response.status))
       image.src = await blobDataUrl(await response.blob())
       await image.decode()

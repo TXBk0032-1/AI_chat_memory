@@ -86,7 +86,8 @@ export function sanitizeExportFilename(title: string, date: string, format: Expo
   let stem = title.replace(invalidFilenameCharacters, ' ').replace(/\s+/g, ' ').trim().replace(/[. ]+$/g, '')
   if (!stem) stem = t('app.untitledConversation')
   if (reservedWindowsFilename.test(stem)) stem = `_${stem}`
-  return `${stem.slice(0, 100)}-${date}.${extension}`
+  const truncatedStem = Array.from(stem).slice(0, 100).join('').trim().replace(/[. ]+$/g, '')
+  return `${truncatedStem || t('app.untitledConversation')}-${date}.${extension}`
 }
 
 export function toExportMessages(messages: Message[], includeThinking: boolean): ExportMessage[] {

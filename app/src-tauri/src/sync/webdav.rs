@@ -228,7 +228,8 @@ fn parse_multistatus(bytes: &[u8]) -> CloudResult<Vec<RemoteEntry>> {
     let mut etag = None;
     let mut size = None;
     let mut collection = false;
-    let mut field = None;
+    let mut field: Option<&'static str> = None;
+    let mut current_text = String::new();
     loop {
         match reader.read_event() {
             Ok(Event::Start(event)) => match event.local_name().as_ref() {
@@ -237,10 +238,21 @@ fn parse_multistatus(bytes: &[u8]) -> CloudResult<Vec<RemoteEntry>> {
                     etag = None;
                     size = None;
                     collection = false;
+                    field = None;
+                    current_text.clear();
                 }
-                b"href" => field = Some("href"),
-                b"getetag" => field = Some("etag"),
-                b"getcontentlength" => field = Some("size"),
+                b"href" => {
+                    field = Some("href");
+                    current_text.clear();
+                }
+                b"getetag" => {
+                    field = Some("etag");
+                    current_text.clear();
+                }
+                b"getcontentlength" => {
+                    field = Some("size");
+                    current_text.clear();
+                }
                 b"collection" => collection = true,
                 _ => {}
             },
@@ -248,32 +260,53 @@ fn parse_multistatus(bytes: &[u8]) -> CloudResult<Vec<RemoteEntry>> {
                 collection = true;
             }
             Ok(Event::Text(text)) => {
-                let value = String::from_utf8_lossy(text.as_ref()).into_owned();
-                match field.take() {
-                    Some("href") => href = Some(value),
-                    Some("etag") => etag = Some(value),
-                    Some("size") => size = value.parse().ok(),
-                    _ => {}
-                }
-            }
-            Ok(Event::End(event)) if event.local_name().as_ref() == b"response" => {
-                if let Some(href) = href.take() {
-                    let name = href
-                        .trim_end_matches('/')
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or_default()
-                        .to_owned();
-                    if !name.is_empty() {
-                        entries.push(RemoteEntry {
-                            name,
-                            is_collection: collection,
-                            etag: etag.take(),
-                            size,
-                        });
+                if field.is_some() {
+                    let raw = String::from_utf8_lossy(text.as_ref());
+                    if let Ok(unescaped) = quick_xml::escape::unescape(&raw) {
+                        current_text.push_str(&unescaped);
+                    } else {
+                        current_text.push_str(&raw);
                     }
                 }
             }
+            Ok(Event::CData(cdata)) => {
+                if field.is_some() {
+                    current_text.push_str(&String::from_utf8_lossy(cdata.as_ref()));
+                }
+            }
+            Ok(Event::End(event)) => match event.local_name().as_ref() {
+                b"href" if field == Some("href") => {
+                    href = Some(current_text.clone());
+                    field = None;
+                }
+                b"getetag" if field == Some("etag") => {
+                    etag = Some(current_text.clone());
+                    field = None;
+                }
+                b"getcontentlength" if field == Some("size") => {
+                    size = current_text.trim().parse().ok();
+                    field = None;
+                }
+                b"response" => {
+                    if let Some(href) = href.take() {
+                        let name = href
+                            .trim_end_matches('/')
+                            .rsplit('/')
+                            .next()
+                            .unwrap_or_default()
+                            .to_owned();
+                        if !name.is_empty() {
+                            entries.push(RemoteEntry {
+                                name,
+                                is_collection: collection,
+                                etag: etag.take(),
+                                size,
+                            });
+                        }
+                    }
+                }
+                _ => {}
+            },
             Ok(Event::Eof) => break,
             Ok(_) => {}
             Err(_) => return Err(protocol("invalid WebDAV multistatus XML")),

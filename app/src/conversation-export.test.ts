@@ -92,6 +92,12 @@ describe('conversation export', () => {
     expect(sanitizeExportFilename(' A/B:*?  ', '2025-07-14', 'jpeg')).toBe('A B-2025-07-14.jpeg')
     expect(sanitizeExportFilename(' My Conversation ', '2025-07-14', 'pdf')).toBe('My Conversation-2025-07-14.pdf')
     expect(sanitizeExportFilename('CON', '2025-07-14', 'md')).toBe('_CON-2025-07-14.md')
+
+    // Truncates at unicode boundary without lone surrogates
+    const longTitleWithEmoji = 'a'.repeat(99) + '🧠extra'
+    const result = sanitizeExportFilename(longTitleWithEmoji, '2025-07-14', 'md')
+    expect(result).toBe(`${'a'.repeat(99)}🧠-2025-07-14.md`)
+    expect(() => encodeURIComponent(result)).not.toThrow()
   })
 
   it('detects image exports that exceed the canvas limits', () => {

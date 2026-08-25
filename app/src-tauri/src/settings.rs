@@ -40,7 +40,13 @@ impl SettingsStore {
         })
     }
     pub fn current(&self) -> AppSettings {
-        self.value.read().expect("settings lock poisoned").clone()
+        match self.value.read() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => {
+                tracing::warn!("settings read lock poisoned, recovering data");
+                poisoned.into_inner().clone()
+            }
+        }
     }
     pub async fn get(&self) -> AppSettings {
         self.current()
@@ -71,7 +77,13 @@ impl SettingsStore {
             return Err(error.into());
         }
         let _ = tokio::fs::remove_file(&backup).await;
-        *self.value.write().expect("settings lock poisoned") = value.clone();
+        match self.value.write() {
+            Ok(mut guard) => *guard = value.clone(),
+            Err(poisoned) => {
+                tracing::warn!("settings write lock poisoned, recovering state");
+                *poisoned.into_inner() = value.clone();
+            }
+        }
         tracing::info!(secret_enabled=value.secret_enabled, origin_count=value.allowed_origins.len(), theme=?value.theme, "application settings updated");
         Ok(value)
     }

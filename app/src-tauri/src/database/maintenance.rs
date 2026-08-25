@@ -78,10 +78,10 @@ pub async fn delete_session(pool: &SqlitePool, id: &str, record_sync: bool) -> R
 }
 
 pub async fn sync_status(pool: &SqlitePool, platform: &str) -> Result<Option<String>> {
-    Ok(sqlx::query_scalar(
-        "SELECT CAST(MAX(CAST(updated_at AS REAL)) AS TEXT) FROM sessions WHERE platform = ?",
+    Ok(
+        sqlx::query_scalar("SELECT MAX(updated_at) FROM sessions WHERE platform = ?")
+            .bind(platform)
+            .fetch_one(pool)
+            .await?,
     )
-    .bind(platform)
-    .fetch_one(pool)
-    .await?)
 }

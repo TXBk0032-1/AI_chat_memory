@@ -35,6 +35,29 @@ pub async fn import_sessions(
             .bind(&id)
             .execute(&mut *tx)
             .await?;
+        let has_chunks_table: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'embedding_chunks')",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap_or(false);
+        if has_chunks_table {
+            let chunk_ids: Vec<i64> =
+                sqlx::query_scalar("SELECT id FROM embedding_chunks WHERE session_id = ?")
+                    .bind(&id)
+                    .fetch_all(&mut *tx)
+                    .await?;
+            for chunk_id in chunk_ids {
+                let _ = sqlx::query("DELETE FROM embedding_vec WHERE chunk_id = ?")
+                    .bind(chunk_id)
+                    .execute(&mut *tx)
+                    .await;
+            }
+            sqlx::query("DELETE FROM embedding_chunks WHERE session_id = ?")
+                .bind(&id)
+                .execute(&mut *tx)
+                .await?;
+        }
         for (seq, message) in session.messages.iter().enumerate() {
             sqlx::query("INSERT INTO messages (id, session_id, role, content, metadata, created_at, seq) VALUES (?, ?, ?, ?, ?, ?, ?)")
                 .bind(format!("{id}_{seq}")).bind(&id).bind(&message.role).bind(&message.content)

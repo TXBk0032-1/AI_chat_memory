@@ -9,4 +9,10 @@ describe('buildMcpClientConfig', () => {
       'http://127.0.0.1:19821/mcp',
     )
   })
+
+  it('includes secret headers when secret is provided', () => {
+    const text = buildMcpClientConfig('http://127.0.0.1:19821/mcp', 'my-test-secret')
+    const config = JSON.parse(text)
+    expect(config.mcpServers['ai-chat-memory'].headers['x-ai-chat-memory-secret']).toBe('my-test-secret')
+  })
 })

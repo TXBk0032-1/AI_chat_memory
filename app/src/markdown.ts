@@ -41,30 +41,48 @@ function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
-function highlightRenderedHtml(html: string, query: string) {
+export function highlightHtml(html: string, query: string): string {
   const needle = query.trim()
   if (!needle) return html
   const pattern = new RegExp(escapeRegExp(needle), 'gi')
-  return html.split(/(<[^>]+>)/g).map((part) => part.startsWith('<') ? part : part.replace(pattern, (match) => `<mark class="search-hit">${match}</mark>`)).join('')
+  return html
+    .split(/(<[^>]+>|&[a-zA-Z0-9#]+;)/g)
+    .map((part) => {
+      if (part.startsWith('<') || (part.startsWith('&') && part.endsWith(';'))) {
+        return part
+      }
+      return part.replace(pattern, (match) => `<mark class="search-hit">${match}</mark>`)
+    })
+    .join('')
+}
+
+function replaceReferenceMarkers(html: string, message: Message, references: Map<number, Reference>): string {
+  const parts = html.split(/(<pre[\s\S]*?<\/pre>|<code[\s\S]*?<\/code>)/gi)
+  return parts.map((part) => {
+    if (/^<(pre|code)/i.test(part)) {
+      return part
+    }
+    return part.replace(/\[reference:(\d+)\]/gi, (_match, rawIndex) => {
+      const index = Number(rawIndex)
+      const reference = resolveReference(index, message, references)
+      const url = referenceValue(reference, ['url', 'link', 'href'])
+      if (!/^https?:\/\//i.test(url)) return `<span class="reference-marker reference-missing" title="${t('markdown.missingReference')}">${index}</span>`
+      const title = referenceValue(reference, ['title', 'name']) || t('markdown.reference', { index })
+      const summary = referenceValue(reference, ['snippet', 'summary', 'description', 'content']).replace(/\s+/g, ' ').slice(0, 280)
+      const safeTitle = markdown.utils.escapeHtml(title)
+      const safeSummary = markdown.utils.escapeHtml(summary)
+      const safeUrl = markdown.utils.escapeHtml(url)
+      return `<a class="reference-link reference-marker" href="${safeUrl}" target="_blank" rel="noopener noreferrer">${index}<span class="reference-preview"><strong>${safeTitle}</strong><span>${safeSummary || t('markdown.noSummary')}</span><small>${safeUrl}</small></span></a>`
+    })
+  }).join('')
 }
 
 export function renderMarkdown(value: string, message: Message, references: Map<number, Reference>, query: string) {
   const source = (value || '')
     .replace(/\\\[([\s\S]*?)\\\]/g, (_, formula) => `\n$$${formula}$$\n`)
     .replace(/\\\((.+?)\\\)/g, (_, formula) => `$${formula}$`)
-  const rendered = markdown.render(source).replace(/\[reference:(\d+)\]/gi, (_match, rawIndex) => {
-    const index = Number(rawIndex)
-    const reference = resolveReference(index, message, references)
-    const url = referenceValue(reference, ['url', 'link', 'href'])
-    if (!/^https?:\/\//i.test(url)) return `<span class="reference-marker reference-missing" title="${t('markdown.missingReference')}">${index}</span>`
-    const title = referenceValue(reference, ['title', 'name']) || t('markdown.reference', { index })
-    const summary = referenceValue(reference, ['snippet', 'summary', 'description', 'content']).replace(/\s+/g, ' ').slice(0, 280)
-    const safeTitle = markdown.utils.escapeHtml(title)
-    const safeSummary = markdown.utils.escapeHtml(summary)
-    const safeUrl = markdown.utils.escapeHtml(url)
-    return `<a class="reference-link reference-marker" href="${safeUrl}" target="_blank" rel="noopener noreferrer">${index}<span class="reference-preview"><strong>${safeTitle}</strong><span>${safeSummary || t('markdown.noSummary')}</span><small>${safeUrl}</small></span></a>`
-  })
-  return highlightRenderedHtml(rendered, query)
+  const rendered = replaceReferenceMarkers(markdown.render(source), message, references)
+  return highlightHtml(rendered, query)
 }
 
 export function escapeTitle(value: string) {
