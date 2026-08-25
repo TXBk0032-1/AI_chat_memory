@@ -13,6 +13,7 @@
 // @grant        GM_getValue
 // @grant        GM_deleteValue
 // @grant        GM_registerMenuCommand
+// @grant        GM_xmlhttpRequest
 // @grant        unsafeWindow
 // ==/UserScript==
 
@@ -59,8 +60,8 @@
     });
 
     const CaptureRedactor = (() => {
-        const sensitiveNames = /^(authorization|proxy-authorization|cookie|set-cookie|secret|token|access_token|refresh_token|x-settings-token)$/i;
-        const sensitiveQueryNames = /^(did|device_id|token|access_token|refresh_token|secret|signature|sign)$/i;
+        const sensitiveNames = /^(authorization|proxy-authorization|cookie|set-cookie|secret|token|access_token|refresh_token|x-settings-token|device_id|did|device_token|fingerprint|password|email|phone|mobile)$/i;
+        const sensitiveQueryNames = /^(did|device_id|token|access_token|refresh_token|secret|signature|sign|auth|key|password|email|phone)$/i;
         const powCredential = /pow.*(response|answer)|(?:response|answer).*pow/i;
 
         function isSensitive(name) {
@@ -114,7 +115,7 @@
         function redactRawString(text) {
             if (typeof text !== 'string' || !text) return text;
             return text
-                .replace(/"(authorization|token|access_token|refresh_token|secret|password)"\s*:\s*"[^"]+"/gi, '"$1":"{REDACTED}"')
+                .replace(/"(authorization|token|access_token|refresh_token|secret|password|device_id|did|device_token|cookie|email|phone)"\s*:\s*"[^"]+"/gi, '"$1":"{REDACTED}"')
                 .replace(/(Bearer\s+)[a-zA-Z0-9_\-\.]{16,}/gi, '$1{REDACTED}')
                 .replace(/(pow.*(?:response|answer))\s*:\s*"[^"]+"/gi, '"$1":"{REDACTED}"');
         }
@@ -127,11 +128,38 @@
                 if (typeof result.request.data_raw === 'string') {
                     result.request.data_raw = redactRawString(result.request.data_raw);
                 }
+                if (typeof result.request.dataRaw === 'string') {
+                    result.request.dataRaw = redactRawString(result.request.dataRaw);
+                }
             }
             if (result?.response) {
                 result.response.headers = redactHeaders(exchange?.response?.headers);
                 if (typeof result.response.data_raw === 'string') {
                     result.response.data_raw = redactRawString(result.response.data_raw);
+                }
+                if (typeof result.response.dataRaw === 'string') {
+                    result.response.dataRaw = redactRawString(result.response.dataRaw);
+                }
+                const events = result.response.sse_events || result.response.sseEvents;
+                if (Array.isArray(events)) {
+                    const redactedEvents = events.map(ev => {
+                        const nextEv = { ...ev };
+                        if (typeof nextEv.data_raw === 'string') {
+                            nextEv.data_raw = redactRawString(nextEv.data_raw);
+                        }
+                        if (typeof nextEv.dataRaw === 'string') {
+                            nextEv.dataRaw = redactRawString(nextEv.dataRaw);
+                        }
+                        if (nextEv.data_json) {
+                            nextEv.data_json = redactValue(nextEv.data_json);
+                        }
+                        if (nextEv.dataJson) {
+                            nextEv.dataJson = redactValue(nextEv.dataJson);
+                        }
+                        return nextEv;
+                    });
+                    if (result.response.sse_events) result.response.sse_events = redactedEvents;
+                    if (result.response.sseEvents) result.response.sseEvents = redactedEvents;
                 }
             }
             return result;
@@ -248,6 +276,7 @@
             this.now = options.now || (() => new Date().toISOString());
             this.config = { ...RuntimeConfig, ...(options.config || {}) };
             this.pendingWrite = Promise.resolve();
+            this._cachedState = null;
         }
 
         _emptyState() {
@@ -260,9 +289,51 @@
         }
 
         _load() {
+            if (this._cachedState) return this._cachedState;
             const stored = this.getValue(this.config.captureStorageKey, null);
-            if (!stored || stored.schema_version !== this.config.captureSchemaVersion) return this._emptyState();
-            return JsonTools.clone(stored);
+            if (!stored) {
+                this._cachedState = this._emptyState();
+                return this._cachedState;
+            }
+            if (stored.schema_version !== this.config.captureSchemaVersion) {
+                try {
+                    this.setValue(this.config.captureStorageKey + '_backup_' + Date.now(), stored);
+                } catch (e) {
+                    console.warn('CaptureStore: failed to backup legacy schema state', e);
+                }
+                this._cachedState = this._emptyState();
+                return this._cachedState;
+            }
+            this._cachedState = stored;
+            return this._cachedState;
+        }
+
+        _persistState(state) {
+            try {
+                this.setValue(this.config.captureStorageKey, state);
+            } catch (err) {
+                console.warn('CaptureStore: setValue failed, attempting quota recovery prune', err);
+                if (state.sessions && typeof state.sessions === 'object') {
+                    const sessionIds = Object.keys(state.sessions);
+                    if (sessionIds.length > 2) {
+                        sessionIds.sort((a, b) => {
+                            const tA = state.sessions[a]?.updated_at || '';
+                            const tB = state.sessions[b]?.updated_at || '';
+                            return tA.localeCompare(tB);
+                        });
+                        const toRemove = sessionIds.slice(0, Math.ceil(sessionIds.length / 2));
+                        for (const id of toRemove) delete state.sessions[id];
+                        try {
+                            this.setValue(this.config.captureStorageKey, state);
+                            return;
+                        } catch (retryErr) {
+                            console.error('CaptureStore: setValue retry after prune failed', retryErr);
+                            throw retryErr;
+                        }
+                    }
+                }
+                throw err;
+            }
         }
 
         _session(state, sessionId) {
@@ -407,7 +478,7 @@
                     this._storeInSession(session, copy, capturedAt);
                     this._enforceSessionBudget(session);
                 }
-                this.setValue(this.config.captureStorageKey, state);
+                this._persistState(state);
                 return copy;
             };
             this.pendingWrite = this.pendingWrite.then(operation, operation);
@@ -571,8 +642,22 @@
                 const url = typeof input === 'string' || input instanceof URL ? String(input) : String(input?.url || input);
                 const headers = init.headers || input?.headers || {};
                 capture._captureToken(url, headers);
+                let requestBody = init.body;
+                if (!requestBody && typeof Request !== 'undefined' && input instanceof Request) {
+                    try {
+                        const cloned = input.clone();
+                        cloned.text().then(text => {
+                            if (exchange?.request) {
+                                exchange.request.data_raw = text;
+                                exchange.request.data_json = JsonTools.safeParse(text);
+                                const sid = DeepSeekExchangeClassifier.sessionId(exchange, capture.getPath());
+                                if (sid) exchange.session_id = sid;
+                            }
+                        }).catch(() => {});
+                    } catch {}
+                }
                 const exchange = capture._isCapturable(url)
-                    ? capture._baseExchange('fetch', url, init.method || input?.method || 'GET', headers, init.body)
+                    ? capture._baseExchange('fetch', url, init.method || input?.method || 'GET', headers, requestBody)
                     : null;
                 const result = originalFetch.apply(this, arguments);
                 if (exchange) Promise.resolve(result).then(response => capture._captureFetchResponse(exchange, response)).catch(error => {
@@ -1099,20 +1184,25 @@
             const token = await this.getToken({ wait: true });
             if (!token) throw new Error('Token 未就绪');
             const allSessions = [];
+            const MAX_PAGES = 500;
+            let pageCount = 0;
 
             let json = await this.fetchSessionPage();
             let { sessions, hasMore } = this._extractSessionsPage(json);
             allSessions.push(...sessions);
             console.log(`📋 首页 ${sessions.length} 条, hasMore=${hasMore}`);
 
-            if (hasMore) {
-                do {
-                    const cursor = sessions[sessions.length - 1].updated_at;
-                    json = await this.fetchSessionPage(cursor);
-                    ({ sessions, hasMore } = this._extractSessionsPage(json));
-                    allSessions.push(...sessions);
-                    console.log(`📋 本页 ${sessions.length} 条, 累计 ${allSessions.length}, hasMore=${hasMore}`);
-                } while (hasMore);
+            while (hasMore && sessions.length > 0 && pageCount < MAX_PAGES) {
+                pageCount++;
+                const cursor = sessions[sessions.length - 1]?.updated_at;
+                if (!cursor) break;
+                json = await this.fetchSessionPage(cursor);
+                const next = this._extractSessionsPage(json);
+                if (!next.sessions || !next.sessions.length) break;
+                allSessions.push(...next.sessions);
+                hasMore = next.hasMore;
+                sessions = next.sessions;
+                console.log(`📋 本页 ${sessions.length} 条, 累计 ${allSessions.length}, hasMore=${hasMore}`);
             }
 
             console.log(`📋 会话获取完成，共 ${allSessions.length} 个`);
@@ -1250,7 +1340,7 @@
                         const auth = headers && typeof headers.get === 'function'
                             ? headers.get('authorization')
                             : headers?.authorization || headers?.Authorization;
-                        const match = typeof auth === 'string' && auth.match(/^Bearer\s+(.+)$/);
+                        const match = typeof auth === 'string' && auth.match(/^Bearer\s+(.+)$/i);
                         if (match && match[1].trim() !== '') {
                             credentials.saveToken(tokenKey, match[1], 'Kimi');
                         }
@@ -1296,15 +1386,20 @@
             if (!token) throw new Error('Kimi Token 未就绪');
             const all = [];
             let pageToken = '';
+            let pageCount = 0;
+            const MAX_PAGES = 500;
             do {
+                pageCount++;
                 const body = { project_id: '', page_size: 200, query: '' };
                 if (pageToken) body.page_token = pageToken;
                 const json = await this._fetch('https://www.kimi.com/apiv2/kimi.chat.v1.ChatService/ListChats', body);
                 const chats = json.chats || [];
                 all.push(...chats);
-                pageToken = json.nextPageToken || '';
+                const nextToken = json.nextPageToken || '';
+                if (!nextToken || nextToken === pageToken) break;
+                pageToken = nextToken;
                 console.log(`📋 Kimi: 本页 ${chats.length} 条, 累计 ${all.length}`);
-            } while (pageToken);
+            } while (pageToken && pageCount < MAX_PAGES);
             return all;
         }
 
@@ -1375,8 +1470,11 @@
             const lastUpdatedSeconds = this.toEpochSeconds(lastUpdatedAt);
             let cursor = null;
             let hasMore = true;
+            let pageCount = 0;
+            const MAX_INCREMENTAL_PAGES = 200;
 
-            while (hasMore && !this._isStopped()) {
+            while (hasMore && !this._isStopped() && pageCount < MAX_INCREMENTAL_PAGES) {
+                pageCount++;
                 const json = this.adapter.fetchSessionPage
                     ? await this.adapter.fetchSessionPage(cursor)
                     : await this.adapter._xhr(`https://chat.deepseek.com/api/v0/chat_session/fetch_page?lte_cursor.pinned=false${cursor ? `&lte_cursor.updated_at=${encodeURIComponent(cursor)}` : ''}`);
@@ -1402,7 +1500,9 @@
                     newSessions.push(session);
                 }
                 if (hitOld || !sessions.length) break;
-                cursor = sessions[sessions.length - 1].updated_at;
+                const nextCursor = sessions[sessions.length - 1]?.updated_at;
+                if (!nextCursor || nextCursor === cursor) break;
+                cursor = nextCursor;
             }
             return newSessions;
         }
@@ -1500,6 +1600,7 @@
             }
             const queue = [...sessions];
             const results = [];
+            const failed = [];
             let counter = 0;
             const worker = async () => {
                 while (queue.length && !this._isStopped()) {
@@ -1507,13 +1608,22 @@
                     const id = this._sessionId(session);
                     const number = ++counter;
                     this._progress(number, sessions.length, `获取详情 ${number}/${sessions.length}`);
-                    const conversation = await this.adapter.fetchConversation(id);
-                    results.push({ ...session, _conversation: conversation });
-                    if (this.detailDelayMs) await this.sleep(this.detailDelayMs);
+                    try {
+                        const conversation = await this.adapter.fetchConversation(id);
+                        results.push({ ...session, _conversation: conversation });
+                    } catch (err) {
+                        console.warn(`会话 ${id} 获取失败:`, err);
+                        failed.push({ id, session, error: String(err?.message || err) });
+                    }
+                    if (this.detailDelayMs) await this.sleep(this.detailDelayMs, this.abortController?.signal);
                 }
             };
             await Promise.all(Array.from({ length: this.detailConcurrency }, worker));
             if (this._isStopped()) return { state: 'stopped', sessions: results };
+
+            if (!results.length && failed.length > 0) {
+                throw new Error(`全部 ${failed.length} 个会话获取详情失败: ${failed[0].error}`);
+            }
 
             this._progress(1, 1, '推送到服务端...');
             const response = await this.bridge.request('/sessions/import', {
@@ -1524,13 +1634,15 @@
             });
             if (!response.ok) throw new Error(`导入失败 ${response.status}: ${await response.text()}`);
             const data = await response.json();
-            this._status(`✅ 导入 ${data.imported} 个, 跳过 ${data.skipped} 个`);
-            return { ...data, sessions: results };
+            const failMsg = failed.length ? `, 失败 ${failed.length} 个` : '';
+            this._status(`✅ 导入 ${data.imported} 个, 跳过 ${data.skipped} 个${failMsg}`);
+            return { ...data, sessions: results, failed };
         }
 
         async sync(fullSync = false) {
             if (!this.bridge) throw new Error('BridgeClient 未配置');
             this.stopped = false;
+            this.abortController = typeof AbortController === 'function' ? new AbortController() : null;
             let connection;
             try {
                 connection = await this.bridge.checkServer();
@@ -1543,7 +1655,6 @@
                 return { state: connection.state, connection };
             }
             if (this._isStopped()) return { state: 'stopped' };
-            this.abortController = typeof AbortController === 'function' ? new AbortController() : null;
             try { this.ui?.setSyncing(true); } catch {}
             try {
                 if (fullSync && this.platform === 'deepseek') return await this.syncDeepSeekOfficialExport();
@@ -1554,7 +1665,9 @@
                     this._status(`全量获取 ${sessions.length} 个会话`);
                 } else {
                     this._status('查询同步状态...');
-                    const statusResponse = await this.bridge.request(`/sessions/sync-status?platform=${encodeURIComponent(this.platform)}`);
+                    const statusResponse = await this.bridge.request(`/sessions/sync-status?platform=${encodeURIComponent(this.platform)}`, {
+                        signal: this.abortController?.signal
+                    });
                     if (!statusResponse.ok) throw new Error(`同步状态查询失败 ${statusResponse.status}: ${await statusResponse.text()}`);
                     const status = await statusResponse.json();
                     sessions = await this.selectSessions(status.last_updated_at);
