@@ -117,7 +117,7 @@ function resetFormFromTheme(target: ThemeDefinition | null, isCreatingNew = fals
         '--color-badge-tertiary',
       ])
       for (const [k, v] of Object.entries(target.config.extInfo)) {
-        if (!knownKeys.has(k)) {
+        if (!knownKeys.has(k) && typeof v === 'string') {
           extraExtInfo.value[k] = v
         }
       }
