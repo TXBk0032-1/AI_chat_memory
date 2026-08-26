@@ -47,11 +47,21 @@ pub async fn import_sessions(
                     .bind(&id)
                     .fetch_all(&mut *tx)
                     .await?;
-            for chunk_id in chunk_ids {
-                let _ = sqlx::query("DELETE FROM embedding_vec WHERE chunk_id = ?")
-                    .bind(chunk_id)
-                    .execute(&mut *tx)
-                    .await;
+            if !chunk_ids.is_empty() {
+                for chunk_batch in chunk_ids.chunks(64) {
+                    let placeholders = chunk_batch
+                        .iter()
+                        .map(|_| "?")
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let sql =
+                        format!("DELETE FROM embedding_vec WHERE chunk_id IN ({placeholders})");
+                    let mut query = sqlx::query(&sql);
+                    for cid in chunk_batch {
+                        query = query.bind(cid);
+                    }
+                    let _ = query.execute(&mut *tx).await;
+                }
             }
             sqlx::query("DELETE FROM embedding_chunks WHERE session_id = ?")
                 .bind(&id)

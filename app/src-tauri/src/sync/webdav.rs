@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use quick_xml::{Reader, events::Event};
 use reqwest::{Client, Method, Response, StatusCode, redirect::Policy};
+use std::time::Duration;
 use url::Url;
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -20,6 +21,22 @@ pub struct WebDavBackend {
 
 impl WebDavBackend {
     pub fn new(base_url: &str, username: &str, password: &str) -> CloudResult<Self> {
+        Self::new_with_timeouts(
+            base_url,
+            username,
+            password,
+            Duration::from_secs(30),
+            Duration::from_secs(120),
+        )
+    }
+
+    pub fn new_with_timeouts(
+        base_url: &str,
+        username: &str,
+        password: &str,
+        connect_timeout: Duration,
+        request_timeout: Duration,
+    ) -> CloudResult<Self> {
         let mut base_url = Url::parse(base_url).map_err(|_| protocol("invalid WebDAV URL"))?;
         if !base_url.username().is_empty()
             || base_url.password().is_some()
@@ -37,6 +54,8 @@ impl WebDavBackend {
         }
         let client = Client::builder()
             .redirect(Policy::none())
+            .connect_timeout(connect_timeout)
+            .timeout(request_timeout)
             .build()
             .map_err(|_| protocol("failed to construct WebDAV client"))?;
         Ok(Self {
@@ -78,12 +97,20 @@ impl WebDavBackend {
     async fn read_limited(response: Response) -> CloudResult<Vec<u8>> {
         let mut stream = response.bytes_stream();
         let mut bytes = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|_| offline("WebDAV response interrupted"))?;
-            if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
-                return Err(protocol("WebDAV response exceeds size limit"));
+        loop {
+            let next_chunk = tokio::time::timeout(Duration::from_secs(30), stream.next())
+                .await
+                .map_err(|_| offline("WebDAV response stream timed out"))?;
+            match next_chunk {
+                Some(chunk) => {
+                    let chunk = chunk.map_err(|_| offline("WebDAV response interrupted"))?;
+                    if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+                        return Err(protocol("WebDAV response exceeds size limit"));
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+                None => break,
             }
-            bytes.extend_from_slice(&chunk);
         }
         Ok(bytes)
     }
@@ -368,6 +395,7 @@ fn offline(message: &'static str) -> CloudError {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::sync::{backend::CloudBackend, test_server::TestWebDav};
 
     #[tokio::test]
@@ -444,5 +472,31 @@ mod tests {
         assert!(!entries[0].is_collection);
         assert_eq!(entries[1].name, "folder");
         assert!(entries[1].is_collection);
+    }
+
+    #[tokio::test]
+    async fn webdav_times_out_when_server_hangs() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let _ = tokio::io::AsyncWriteExt::shutdown(&mut socket).await;
+            }
+        });
+
+        let client = WebDavBackend::new_with_timeouts(
+            &format!("http://127.0.0.1:{port}/"),
+            "user",
+            "pass",
+            Duration::from_millis(50),
+            Duration::from_millis(100),
+        )
+        .unwrap();
+
+        let head = crate::sync::backend::RemotePath::parse("head.json").unwrap();
+        let err = client.get(&head).await.unwrap_err();
+        assert_eq!(err.kind(), "offline");
+        handle.abort();
     }
 }

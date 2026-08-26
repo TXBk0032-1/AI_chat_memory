@@ -445,9 +445,10 @@ pub async fn ensure_embedding_vec_table(
         desired,
         "recreating embedding_vec for active dimensions"
     );
-    let _ = sqlx::query("DROP TABLE IF EXISTS embedding_vec;")
-        .execute(pool)
-        .await;
+    let mut tx = pool.begin().await?;
+    sqlx::query("DROP TABLE IF EXISTS embedding_vec;")
+        .execute(&mut *tx)
+        .await?;
     sqlx::query(&format!(
         "CREATE VIRTUAL TABLE embedding_vec USING vec0(
             chunk_id INTEGER PRIMARY KEY,
@@ -457,23 +458,24 @@ pub async fn ensure_embedding_vec_table(
             +platform TEXT
         );"
     ))
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
     sqlx::query(
         "INSERT INTO embedding_index_meta(key, value) VALUES('vec_dimensions', ?)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",
     )
     .bind(desired.to_string())
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
     // Active vectors are gone; mark ready chunks pending so they re-embed under new dim.
-    let _ = sqlx::query(
+    sqlx::query(
         "UPDATE embedding_chunks SET status = 'pending', error = NULL, dim = ?, updated_at = ? WHERE status = 'ready'",
     )
     .bind(desired as i64)
     .bind(chrono::Utc::now().to_rfc3339())
-    .execute(pool)
-    .await;
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
     Ok(())
 }
 

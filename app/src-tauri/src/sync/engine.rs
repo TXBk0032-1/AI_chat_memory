@@ -1288,25 +1288,23 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
                 self.protector.as_deref(),
             )?;
             let path = self.bundle_path(&sealed, contents.start_seq, contents.end_seq)?;
+            let digest = sealed.file_sha256;
+            let bytes = sealed.bytes;
+            let end_seq = contents.end_seq;
+            let published_mutations = pending[..published_count].to_vec();
             self.store
                 .stage_bundle(
-                    &sealed.file_sha256,
+                    &digest,
                     &self.generation_id,
                     &self.device_id,
                     &path.display(),
                     contents.start_seq,
                     contents.end_seq,
-                    &sealed.bytes,
+                    &bytes,
                     current_time_millis(),
                 )
                 .await?;
-            (
-                path,
-                sealed.file_sha256,
-                sealed.bytes,
-                contents.end_seq,
-                pending[..published_count].to_vec(),
-            )
+            (path, digest, bytes, end_seq, published_mutations)
         };
         self.ensure_parent_collections(&path).await?;
         match self.backend.put_immutable(&path, &bytes).await {
@@ -1511,21 +1509,43 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
             return Ok((single_contents, single_sealed, 1));
         }
 
-        for count in (2..=candidate_count).rev() {
+        let full_contents = self.contents_from_mutations_for(
+            &pending[..candidate_count],
+            previous_head,
+            generation_id,
+            device_id,
+        )?;
+        match seal_contents_with_protector(&full_contents, protector, &self.bundle_limits) {
+            Ok(sealed) => return Ok((full_contents, sealed, candidate_count)),
+            Err(error) if is_bundle_limit_error(&error) => {}
+            Err(error) => return Err(error),
+        }
+
+        let mut low = 2;
+        let mut high = candidate_count.saturating_sub(1);
+        let mut best = (single_contents, single_sealed, 1);
+
+        while low <= high {
+            let mid = low + (high - low) / 2;
             let contents = self.contents_from_mutations_for(
-                &pending[..count],
+                &pending[..mid],
                 previous_head,
                 generation_id,
                 device_id,
             )?;
             match seal_contents_with_protector(&contents, protector, &self.bundle_limits) {
-                Ok(sealed) => return Ok((contents, sealed, count)),
-                Err(error) if is_bundle_limit_error(&error) => {}
+                Ok(sealed) => {
+                    best = (contents, sealed, mid);
+                    low = mid + 1;
+                }
+                Err(error) if is_bundle_limit_error(&error) => {
+                    high = mid - 1;
+                }
                 Err(error) => return Err(error),
             }
         }
 
-        Ok((single_contents, single_sealed, 1))
+        Ok(best)
     }
 
     fn bundle_path(&self, sealed: &SealedBundle, start: i64, end: i64) -> Result<RemotePath> {

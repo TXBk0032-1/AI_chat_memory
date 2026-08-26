@@ -102,10 +102,26 @@ function resetFormFromTheme(target: ThemeDefinition | null, isCreatingNew = fals
     appBgColor.value = toHex6(target.config.extInfo?.['--color-app-background'] || (target.isDark ? '#171b1e' : '#f7f9fa'))
     mainBgColor.value = toHex6(target.config.extInfo?.['--color-main-background'] || (target.isDark ? '#1e2428' : '#ffffff'))
     fontColor.value = toHex6(target.config.font || (target.isDark ? '#e5e5e5' : '#212121'))
-    navFontColor.value = target.config.extInfo?.['--color-nav-font'] ? toHex6(target.config.extInfo['--color-nav-font']) : ''
-    badgePrimaryColor.value = target.config.extInfo?.['--color-badge-primary'] ? toHex6(target.config.extInfo['--color-badge-primary']) : ''
-    badgeSecondaryColor.value = target.config.extInfo?.['--color-badge-secondary'] ? toHex6(target.config.extInfo['--color-badge-secondary']) : ''
-    badgeTertiaryColor.value = target.config.extInfo?.['--color-badge-tertiary'] ? toHex6(target.config.extInfo['--color-badge-tertiary']) : ''
+    navFontColor.value = target.config.extInfo?.['--color-nav-font']
+      ? isValidColor(target.config.extInfo['--color-nav-font'])
+        ? toHex6(target.config.extInfo['--color-nav-font'])
+        : target.config.extInfo['--color-nav-font']
+      : ''
+    badgePrimaryColor.value = target.config.extInfo?.['--color-badge-primary']
+      ? isValidColor(target.config.extInfo['--color-badge-primary'])
+        ? toHex6(target.config.extInfo['--color-badge-primary'])
+        : target.config.extInfo['--color-badge-primary']
+      : ''
+    badgeSecondaryColor.value = target.config.extInfo?.['--color-badge-secondary']
+      ? isValidColor(target.config.extInfo['--color-badge-secondary'])
+        ? toHex6(target.config.extInfo['--color-badge-secondary'])
+        : target.config.extInfo['--color-badge-secondary']
+      : ''
+    badgeTertiaryColor.value = target.config.extInfo?.['--color-badge-tertiary']
+      ? isValidColor(target.config.extInfo['--color-badge-tertiary'])
+        ? toHex6(target.config.extInfo['--color-badge-tertiary'])
+        : target.config.extInfo['--color-badge-tertiary']
+      : ''
 
     if (target.config?.extInfo) {
       const knownKeys = new Set([
@@ -161,17 +177,17 @@ const computedExtInfo = computed(() => {
     '--color-app-background': normalizeColor(appBgColor.value),
     '--color-main-background': normalizeColor(mainBgColor.value),
   }
-  if (navFontColor.value && isValidColor(navFontColor.value)) {
-    ext['--color-nav-font'] = normalizeColor(navFontColor.value)
+  if (navFontColor.value) {
+    ext['--color-nav-font'] = isValidColor(navFontColor.value) ? normalizeColor(navFontColor.value) : navFontColor.value
   }
-  if (badgePrimaryColor.value && isValidColor(badgePrimaryColor.value)) {
-    ext['--color-badge-primary'] = normalizeColor(badgePrimaryColor.value)
+  if (badgePrimaryColor.value) {
+    ext['--color-badge-primary'] = isValidColor(badgePrimaryColor.value) ? normalizeColor(badgePrimaryColor.value) : badgePrimaryColor.value
   }
-  if (badgeSecondaryColor.value && isValidColor(badgeSecondaryColor.value)) {
-    ext['--color-badge-secondary'] = normalizeColor(badgeSecondaryColor.value)
+  if (badgeSecondaryColor.value) {
+    ext['--color-badge-secondary'] = isValidColor(badgeSecondaryColor.value) ? normalizeColor(badgeSecondaryColor.value) : badgeSecondaryColor.value
   }
-  if (badgeTertiaryColor.value && isValidColor(badgeTertiaryColor.value)) {
-    ext['--color-badge-tertiary'] = normalizeColor(badgeTertiaryColor.value)
+  if (badgeTertiaryColor.value) {
+    ext['--color-badge-tertiary'] = isValidColor(badgeTertiaryColor.value) ? normalizeColor(badgeTertiaryColor.value) : badgeTertiaryColor.value
   }
   return ext
 })
@@ -240,7 +256,7 @@ function handleImportFile(event: Event) {
   reader.onload = (e) => {
     try {
       const parsed = JSON.parse(e.target?.result as string) as ThemeDefinition
-      if (!parsed || !parsed.config || !parsed.config.primary) {
+      if (!parsed || !parsed.config || !parsed.config.primary || !isValidColor(parsed.config.primary)) {
         errorMessage.value = t('settings.themeEditor.importInvalid')
         return
       }

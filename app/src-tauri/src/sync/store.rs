@@ -969,6 +969,17 @@ impl SyncStore {
         ))
     }
 
+    pub async fn remove_staged_bundle(&self, bundle_sha256: &str) -> Result<()> {
+        let _gate = self.write_gate.lock().await;
+        sqlx::query(
+            "DELETE FROM sync_published_bundles WHERE bundle_sha256 = ? AND stage = 'staged'",
+        )
+        .bind(bundle_sha256)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     pub async fn mark_bundle_published(
         &self,
         bundle_sha256: &str,

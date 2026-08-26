@@ -115,7 +115,7 @@
         function redactRawString(text) {
             if (typeof text !== 'string' || !text) return text;
             return text
-                .replace(/"(authorization|token|access_token|refresh_token|secret|password|device_id|did|device_token|cookie|email|phone)"\s*:\s*"[^"]+"/gi, '"$1":"{REDACTED}"')
+                .replace(/"(authorization|proxy-authorization|cookie|set-cookie|secret|token|access_token|refresh_token|x-settings-token|device_id|did|device_token|fingerprint|password|email|phone|mobile)"\s*:\s*"[^"]+"/gi, '"$1":"{REDACTED}"')
                 .replace(/(Bearer\s+)[a-zA-Z0-9_\-\.]{16,}/gi, '$1{REDACTED}')
                 .replace(/(pow.*(?:response|answer))\s*:\s*"[^"]+"/gi, '"$1":"{REDACTED}"');
         }
@@ -938,11 +938,14 @@
             return this.request(path, options);
         }
 
-        async checkServer() {
+        async checkServer(options = {}) {
             let lastError = null;
             for (const candidate of this.urlCandidates()) {
                 try {
-                    const response = await this.fetchImpl(`${candidate}/health`, { headers: this.headers() });
+                    const response = await this.fetchImpl(`${candidate}/health`, {
+                        headers: this.headers(),
+                        signal: options?.signal,
+                    });
                     if (response.status === 403) {
                         const reason = await this._responseText(response);
                         if (reason === 'invalid_secret') return { state: 'secret', message: this._secretError() };
@@ -1641,20 +1644,27 @@
 
         async sync(fullSync = false) {
             if (!this.bridge) throw new Error('BridgeClient 未配置');
+            if (this.syncing) return { state: 'already_syncing' };
+            this.syncing = true;
             this.stopped = false;
             this.abortController = typeof AbortController === 'function' ? new AbortController() : null;
             let connection;
             try {
-                connection = await this.bridge.checkServer();
+                connection = await this.bridge.checkServer({ signal: this.abortController?.signal });
             } catch (error) {
+                this.syncing = false;
                 this._status('❌ ' + (error?.message || String(error)));
                 return { state: 'error', error };
             }
             if (connection.state !== 'connected') {
+                this.syncing = false;
                 this._status(`❌ ${connection.message}`);
                 return { state: connection.state, connection };
             }
-            if (this._isStopped()) return { state: 'stopped' };
+            if (this._isStopped()) {
+                this.syncing = false;
+                return { state: 'stopped' };
+            }
             try { this.ui?.setSyncing(true); } catch {}
             try {
                 if (fullSync && this.platform === 'deepseek') return await this.syncDeepSeekOfficialExport();
@@ -1674,12 +1684,13 @@
                     this._status(`需同步 ${sessions.length} 个会话`);
                 }
                 if (this._isStopped()) return { state: 'stopped', sessions: [] };
-                return this.fetchDetailsAndPush(sessions);
+                return await this.fetchDetailsAndPush(sessions);
             } catch (error) {
                 if (this._isStopped()) return { state: 'stopped' };
                 this._status('❌ ' + (error?.message || String(error)));
                 return { state: 'error', error };
             } finally {
+                this.syncing = false;
                 try { this.ui?.setSyncing(false); } catch {}
                 this.abortController = null;
             }
@@ -1786,7 +1797,7 @@
                 syncButton.disabled = !ok;
                 syncButton.style.opacity = ok ? '1' : '0.5';
             }
-            if (fullButton && !fullButton.dataset?.fullDisabled) {
+            if (fullButton && !fullButton.dataset?.fullDisabled && syncButton?.dataset?.syncing !== '1') {
                 fullButton.disabled = !ok;
                 fullButton.style.opacity = ok ? '1' : '0.5';
             }

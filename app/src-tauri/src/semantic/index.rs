@@ -490,24 +490,32 @@ pub async fn semantic_session_hits(
     }
     let bytes = f32_slice_as_bytes(&vector);
     let rows = sqlx::query(
-        "SELECT v.chunk_id AS chunk_id, v.message_id AS message_id, v.distance AS distance, c.text AS text, m.seq AS seq
-         FROM embedding_vec v
-         INNER JOIN embedding_chunks c ON c.id = v.chunk_id
-         INNER JOIN messages m ON m.id = v.message_id
-         WHERE v.session_id = ?
-           AND c.backend_id = ?
-           AND c.model_id = ?
-           AND c.status = 'ready'
-           AND v.embedding MATCH ?
-           AND k = ?
-         ORDER BY distance ASC
+        "WITH nearest AS (
+             SELECT chunk_id, distance
+             FROM embedding_vec
+             WHERE embedding MATCH ? AND k = ?
+               AND chunk_id IN (
+                   SELECT c.id
+                   FROM embedding_chunks c
+                   WHERE c.session_id = ?
+                     AND c.backend_id = ?
+                     AND c.model_id = ?
+                     AND c.status = 'ready'
+               )
+             ORDER BY distance ASC
+         )
+         SELECT n.chunk_id AS chunk_id, c.message_id AS message_id, n.distance AS distance, c.text AS text, m.seq AS seq
+         FROM nearest n
+         INNER JOIN embedding_chunks c ON c.id = n.chunk_id
+         INNER JOIN messages m ON m.id = c.message_id
+         ORDER BY n.distance ASC
          LIMIT ?",
     )
+    .bind(bytes)
+    .bind(limit)
     .bind(session_id)
     .bind(&identity.backend_id)
     .bind(&identity.model_id)
-    .bind(bytes)
-    .bind(limit)
     .bind(limit)
     .fetch_all(pool)
     .await?;
@@ -607,14 +615,19 @@ mod tests {
             "CREATE TABLE sessions (
                 id TEXT PRIMARY KEY, platform TEXT NOT NULL, updated_at TEXT
             );
+             CREATE TABLE messages (
+                id TEXT PRIMARY KEY, session_id TEXT NOT NULL, role TEXT NOT NULL, content TEXT, metadata TEXT, created_at TEXT, seq INTEGER
+             );
              CREATE TABLE embedding_chunks (
-                id INTEGER PRIMARY KEY, session_id TEXT NOT NULL,
-                backend_id TEXT NOT NULL, model_id TEXT NOT NULL, status TEXT NOT NULL
+                id INTEGER PRIMARY KEY, message_id TEXT, session_id TEXT NOT NULL,
+                backend_id TEXT NOT NULL, model_id TEXT NOT NULL, status TEXT NOT NULL, text TEXT
              );
              CREATE VIRTUAL TABLE embedding_vec USING vec0(
                 chunk_id INTEGER PRIMARY KEY,
                 embedding float[8] distance_metric=cosine,
-                +session_id TEXT
+                +session_id TEXT,
+                +message_id TEXT,
+                +platform TEXT
              );",
         )
         .execute(&pool)
@@ -641,22 +654,41 @@ mod tests {
         status: &str,
         embedding: [f32; 8],
     ) {
+        let msg_id = format!("msg-{chunk_id}");
         sqlx::query(
-            "INSERT INTO embedding_chunks (id, session_id, backend_id, model_id, status)
-             VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO messages (id, session_id, role, content, seq) VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(id) DO NOTHING",
+        )
+        .bind(&msg_id)
+        .bind(session_id)
+        .bind("assistant")
+        .bind("sample content")
+        .bind(chunk_id)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        sqlx::query(
+            "INSERT INTO embedding_chunks (id, message_id, session_id, backend_id, model_id, status, text)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(chunk_id)
+        .bind(&msg_id)
         .bind(session_id)
         .bind(backend_id)
         .bind(model_id)
         .bind(status)
+        .bind("sample chunk text")
         .execute(pool)
         .await
         .unwrap();
-        sqlx::query("INSERT INTO embedding_vec(chunk_id, embedding, session_id) VALUES (?, ?, ?)")
+
+        sqlx::query("INSERT INTO embedding_vec(chunk_id, embedding, session_id, message_id, platform) VALUES (?, ?, ?, ?, ?)")
             .bind(chunk_id)
             .bind(f32_slice_as_bytes(&embedding))
             .bind(session_id)
+            .bind(&msg_id)
+            .bind("chatgpt")
             .execute(pool)
             .await
             .unwrap();
@@ -765,7 +797,7 @@ mod tests {
         let pool = semantic_scores_pool().await;
         sqlx::raw_sql(
             "INSERT INTO sessions VALUES ('s1', 'chatgpt', '2026-01-01'), ('s2', 'claude', '2026-01-02');
-             INSERT INTO embedding_chunks VALUES
+             INSERT INTO embedding_chunks (id, session_id, backend_id, model_id, status) VALUES
                 (1, 's1', 'local', 'test', 'ready'),
                 (2, 's1', 'local', 'test', 'ready'),
                 (3, 's2', 'local', 'test', 'ready');",
@@ -961,5 +993,70 @@ mod tests {
             .unwrap();
             assert!(scores.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn semantic_session_hits_prefilter_by_session_before_knn_limit() {
+        let pool = semantic_scores_pool().await;
+        sqlx::raw_sql(
+            "INSERT INTO sessions VALUES
+                ('target-session', 'chatgpt', '200'),
+                ('other-session', 'chatgpt', '200');
+             INSERT INTO messages (id, session_id, role, seq, content) VALUES
+                ('msg-target', 'target-session', 'assistant', 1, 'target hit'),
+                ('msg-other-1', 'other-session', 'assistant', 1, 'other hit 1'),
+                ('msg-other-2', 'other-session', 'assistant', 2, 'other hit 2');",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        insert_semantic_score_chunk(
+            &pool,
+            1,
+            "other-session",
+            "local",
+            "test",
+            "ready",
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        )
+        .await;
+        insert_semantic_score_chunk(
+            &pool,
+            2,
+            "other-session",
+            "local",
+            "test",
+            "ready",
+            [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        )
+        .await;
+        insert_semantic_score_chunk(
+            &pool,
+            3,
+            "target-session",
+            "local",
+            "test",
+            "ready",
+            [0.9, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        )
+        .await;
+
+        let hits = semantic_session_hits(
+            &pool,
+            "target-session",
+            &semantic_scores_identity(),
+            &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            1,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            hits.len(),
+            1,
+            "target-session chunk must be recalled even when other sessions have higher similarity"
+        );
+        assert_eq!(hits[0].message_id, "msg-3");
     }
 }

@@ -648,7 +648,7 @@ impl Default for AppSettings {
             dark_theme_id: Some("black".into()),
             language: LanguagePreference::System,
             semantic_search: SemanticSearchSettings::default(),
-            mcp_enabled: true,
+            mcp_enabled: false,
             cloud_sync: CloudSyncSettings::default(),
             custom_themes: Vec::new(),
         }

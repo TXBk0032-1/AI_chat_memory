@@ -202,7 +202,7 @@ impl ServerHandler for ChatMemoryMcp {
             env!("CARGO_PKG_VERSION"),
         ))
         .with_instructions(
-            "只读本地 AI 聊天记忆库。需桌面应用在线。端点 http://127.0.0.1:19821/mcp，仅环回、无鉴权。可用 Tools 搜索/打开/读消息；Resources：sessions://recent、session://{id}、session://{id}/messages。"
+            "只读本地 AI 聊天记忆库。需桌面应用在线。端点 http://127.0.0.1:19821/mcp。可用 Tools 搜索/打开/读消息；Resources：sessions://recent、session://{id}、session://{id}/messages。"
                 .to_string(),
         )
     }

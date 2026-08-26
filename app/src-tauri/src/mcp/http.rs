@@ -42,7 +42,16 @@ async fn authorize_mcp(
     let origin = headers.get("origin").and_then(|v| v.to_str().ok());
     let settings = service.settings().await;
 
+    if !settings.mcp_enabled {
+        tracing::warn!(
+            path,
+            "MCP request rejected: MCP server is disabled in settings"
+        );
+        return (StatusCode::FORBIDDEN, "mcp_disabled").into_response();
+    }
+
     // Validate Origin header when present (e.g. from web browsers)
+    let is_browser_request = origin.is_some();
     let is_origin_allowed = match origin {
         Some(val) => settings
             .allowed_origins
@@ -76,30 +85,26 @@ async fn authorize_mcp(
         return res;
     }
 
-    if settings.secret_enabled {
-        let configured_secret = settings.secret.as_deref().unwrap_or_default();
-        let header_secret = headers.get(SECRET_HEADER).and_then(|v| v.to_str().ok());
+    let configured_secret = settings.secret.as_deref().unwrap_or_default();
+    let header_secret = headers.get(SECRET_HEADER).and_then(|v| v.to_str().ok());
 
-        let bearer_secret = headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|auth| {
-                auth.strip_prefix("Bearer ")
-                    .or_else(|| auth.strip_prefix("bearer "))
-            });
+    let bearer_secret = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|auth| {
+            auth.strip_prefix("Bearer ")
+                .or_else(|| auth.strip_prefix("bearer "))
+        });
 
-        let provided = header_secret.or(bearer_secret);
-        let authorized = match provided {
-            Some(token) if !configured_secret.is_empty() => {
-                constant_time_eq(token, configured_secret)
-            }
-            _ => false,
-        };
+    let provided = header_secret.or(bearer_secret);
+    let authorized = match provided {
+        Some(token) if !configured_secret.is_empty() => constant_time_eq(token, configured_secret),
+        _ => false,
+    };
 
-        if !authorized {
-            tracing::warn!(%method, path, "MCP request rejected: missing or invalid secret");
-            return (StatusCode::UNAUTHORIZED, "invalid or missing MCP secret").into_response();
-        }
+    if (settings.secret_enabled || is_browser_request) && !authorized {
+        tracing::warn!(%method, path, is_browser_request, "MCP request rejected: missing or invalid secret");
+        return (StatusCode::UNAUTHORIZED, "invalid or missing MCP secret").into_response();
     }
 
     let mut response = next.run(request).await;

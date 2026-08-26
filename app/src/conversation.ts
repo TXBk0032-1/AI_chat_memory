@@ -61,7 +61,7 @@ export type BranchOverview = {
 
 export type ReadingPosition = { seq: number; offset: number; updatedAt: number }
 
-const readingPositionKey = 'ai-chat-memory-reading-positions-v1'
+export const readingPositionKey = 'ai-chat-memory-reading-positions-v1'
 const maxReadingPositions = 500
 
 export function mergeMessageBatch(slots: Array<Message | undefined>, messages: Message[]) {
@@ -101,7 +101,6 @@ export function saveReadingPosition(sessionId: string, position: ReadingPosition
     cachedPositions = Object.fromEntries(entries)
     localStorage.setItem(readingPositionKey, JSON.stringify(cachedPositions))
   } catch {
-    cachedPositions = {}
     // Reading restoration is best-effort and must never block conversation rendering.
   }
 }
