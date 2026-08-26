@@ -476,17 +476,8 @@ mod tests {
 
     #[tokio::test]
     async fn webdav_times_out_when_server_hangs() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let handle = tokio::spawn(async move {
-            if let Ok((mut socket, _)) = listener.accept().await {
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                let _ = tokio::io::AsyncWriteExt::shutdown(&mut socket).await;
-            }
-        });
-
         let client = WebDavBackend::new_with_timeouts(
-            &format!("http://127.0.0.1:{port}/"),
+            "http://192.0.2.1:81/",
             "user",
             "pass",
             Duration::from_millis(50),
@@ -497,6 +488,5 @@ mod tests {
         let head = crate::sync::backend::RemotePath::parse("head.json").unwrap();
         let err = client.get(&head).await.unwrap_err();
         assert_eq!(err.kind(), "offline");
-        handle.abort();
     }
 }
