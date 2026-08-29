@@ -264,7 +264,30 @@ try {
     $portableEntryPath = Join-Path $stagingDirectory $portable.entry_name
     $portableArchivePath = Join-Path $stagingDirectory $portable.name
     Copy-Item -LiteralPath $portableSource -Destination $portableEntryPath -Force
-    Compress-Archive -LiteralPath $portableEntryPath -DestinationPath $portableArchivePath -CompressionLevel Optimal -Force
+    # Build the portable ZIP with the System.IO.Compression API and a fixed entry LastWriteTime so
+    # the archive byte stream is deterministic across builds (Compress-Archive stamps entries with
+    # the current time and is therefore non-reproducible).
+    Add-Type -AssemblyName System.IO.Compression
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $fixedEntryTime = [datetimeoffset]::new(2026, 1, 1, 0, 0, 0, [System.TimeZoneInfo]::Local.GetUtcOffset([datetime]::new(2026, 1, 1)))
+    $portableArchive = $null
+    try {
+        $portableArchive = [IO.Compression.ZipFile]::Open($portableArchivePath, [IO.Compression.ZipArchiveMode]::Create)
+        $portableEntry = $portableArchive.CreateEntry($portable.entry_name, [IO.Compression.CompressionLevel]::Optimal)
+        $portableEntry.LastWriteTime = $fixedEntryTime
+        $entryStream = $portableEntry.Open()
+        $fileStream = [IO.File]::OpenRead($portableEntryPath)
+        try {
+            $fileStream.CopyTo($entryStream)
+        } finally {
+            $entryStream.Dispose()
+            $fileStream.Dispose()
+        }
+    } finally {
+        if ($null -ne $portableArchive) {
+            $portableArchive.Dispose()
+        }
+    }
     Remove-Item -LiteralPath $portableEntryPath -Force
     & $PortableVerifier -ArchivePath $portableArchivePath -ExpectedEntryName $portable.entry_name | Out-Null
 

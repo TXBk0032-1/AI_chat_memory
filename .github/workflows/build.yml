@@ -33,7 +33,7 @@ jobs:
       - name: Setup CUDA Toolkit
         uses: Jimver/cuda-toolkit@v0.2.35
         with:
-          cuda: "13.2.0"
+          cuda: "13.3.0"
           method: network
           sub-packages: '["nvcc", "cudart", "cublas", "curand", "nvrtc", "visual_studio_integration"]'
 

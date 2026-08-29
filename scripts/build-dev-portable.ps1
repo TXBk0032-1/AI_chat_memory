@@ -59,11 +59,30 @@ foreach ($Command in "cargo", "npm") {
 }
 
 $env:RUSTUP_TOOLCHAIN = "1.97.0"
-$CudaRoot = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3"
-$VcVars = "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
-if (-not (Test-Path -LiteralPath (Join-Path $CudaRoot "bin\nvcc.exe"))) {
-    throw "CUDA 13.3 was not found: $CudaRoot"
+
+# Detect CUDA Toolkit: prefer $env:CUDA_PATH, otherwise pick the newest installed toolkit.
+$CudaRoot = $env:CUDA_PATH
+if (-not $CudaRoot -or -not (Test-Path -LiteralPath (Join-Path $CudaRoot "bin\nvcc.exe"))) {
+    $cudaBase = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA"
+    $CudaRoot = Get-ChildItem -LiteralPath $cudaBase -Directory -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "bin\nvcc.exe") } |
+        Sort-Object Name -Descending |
+        Select-Object -First 1 -ExpandProperty FullName
 }
+if (-not $CudaRoot -or -not (Test-Path -LiteralPath (Join-Path $CudaRoot "bin\nvcc.exe"))) {
+    throw "CUDA Toolkit (nvcc) was not found. Set CUDA_PATH or install it under $cudaBase"
+}
+
+# Detect Visual Studio 2022 via vswhere so the MSVC patch version is not hardcoded.
+$vswhere = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
+if (-not (Test-Path -LiteralPath $vswhere)) {
+    throw "vswhere.exe was not found: $vswhere"
+}
+$vsInstall = (& $vswhere -latest -products * -property installationPath).Trim()
+if (-not $vsInstall) {
+    throw "Visual Studio installation was not found via vswhere"
+}
+$VcVars = Join-Path $vsInstall "VC\Auxiliary\Build\vcvars64.bat"
 if (-not (Test-Path -LiteralPath $VcVars)) {
     throw "Visual Studio 2022 build environment was not found: $VcVars"
 }

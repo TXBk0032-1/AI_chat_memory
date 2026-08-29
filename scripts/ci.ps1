@@ -179,7 +179,12 @@ function Invoke-ParallelSteps {
     $failedNames = @()
 
     foreach ($item in $processes) {
-        $item.Process.WaitForExit()
+        if (-not $item.Process.WaitForExit([TimeSpan]::FromMinutes(30))) {
+            $item.StartWatch.Stop()
+            try { $item.Process.Kill() } catch { }
+            Write-Host "FAILED [Parallel: Timeout $($item.Name)] exceeded the 30 minute timeout" -ForegroundColor Red
+            throw "$($item.Name) exceeded the 30 minute timeout"
+        }
         $item.StartWatch.Stop()
         [System.Threading.Tasks.Task]::WaitAll(@($item.OutTask, $item.ErrTask))
 
