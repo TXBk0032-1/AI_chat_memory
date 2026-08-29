@@ -151,6 +151,28 @@ fn authorization_error(
     if !secret_ok {
         return Err("invalid_secret");
     }
+    // Write endpoints require a valid secret even when secret gating is
+    // disabled. A whitelisted origin is forgeable by any script on that
+    // page, so importing sessions must additionally prove knowledge of the
+    // shared secret. Without this, a malicious or hijacked third-party script on
+    // a whitelisted chat site could inject fabricated sessions. Read endpoints
+    // (sync-status, health) remain open under the origin+client checks.
+    let is_write = *method == Method::POST;
+    if is_write {
+        let configured = settings
+            .secret
+            .as_deref()
+            .filter(|secret| !secret.is_empty());
+        let has_valid_secret = configured.is_some_and(|secret| {
+            headers
+                .get(SECRET_HEADER)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|header_secret| constant_time_eq(header_secret, secret))
+        });
+        if !has_valid_secret {
+            return Err("invalid_secret");
+        }
+    }
     Ok(())
 }
 

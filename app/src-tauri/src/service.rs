@@ -3,7 +3,10 @@ use sqlx::SqlitePool;
 use std::{
     io::Read,
     path::{Path, PathBuf},
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::{
@@ -256,6 +259,12 @@ pub struct AppService {
     cloud_sync_scheduler: CloudSyncScheduler,
     sync_gate: Arc<Mutex<()>>,
     cloud_sync_runtime: Arc<RwLock<CloudSyncRuntime>>,
+    /// Set after `move_data_directory` snapshots the database to a new
+    /// location. Once set, every write path rejects new work with
+    /// `AppError::Cancelled` so nothing mutates the old pool between the
+    /// snapshot and the actual process restart. Reads are unaffected; the
+    /// cloud sync worker observes this and stops issuing writes.
+    shutdown: Arc<AtomicBool>,
 }
 
 pub(crate) async fn import_local_sessions(
@@ -308,6 +317,7 @@ impl AppService {
             cloud_sync_scheduler,
             sync_gate: Arc::new(Mutex::new(())),
             cloud_sync_runtime: Arc::new(RwLock::new(CloudSyncRuntime::default())),
+            shutdown: Arc::new(AtomicBool::new(false)),
         };
         service.start_cloud_sync_worker(worker_receiver);
         Ok(service)
@@ -320,6 +330,12 @@ impl AppService {
             worker.submit(SyncTrigger::Startup, Instant::now());
             let mut manual_waiters = Vec::new();
             loop {
+                // Stop issuing syncs once the database has been snapshotted to a
+                // new location: the old pool must not be touched before the
+                // process restarts.
+                if service.shutdown.load(Ordering::SeqCst) {
+                    break;
+                }
                 if let Some(due) = worker.pending_due() {
                     tokio::select! {
                         biased;
@@ -398,16 +414,12 @@ impl AppService {
         self.settings.current()
     }
 
-    pub async fn update_settings(&self, settings: AppSettings) -> Result<AppSettings> {
-        self.update_settings_with_cloud_credentials(settings, None)
-            .await
-    }
-
     pub async fn update_settings_with_cloud_credentials(
         &self,
         mut settings: AppSettings,
         credentials: Option<CloudCredentialInput>,
     ) -> Result<AppSettings> {
+        self.ensure_writable()?;
         let _guard = self.sync_gate.lock().await;
         let previous = self
             .reconcile_pending_credential_transition(self.settings.get().await)
@@ -757,6 +769,14 @@ impl AppService {
             )
             .await?;
         }
+        // The settings are committed and the credential rotation (if any) is
+        // finalized. Drop the sync_gate before reloading embeddings and seeding
+        // the baseline: a model download/reindex can take tens of seconds and
+        // holding the gate across it would block all local writes.
+        // rollback_settings_and_credentials only touches SettingsStore + the
+        // credential store, neither of which takes sync_gate, so rollback still
+        // works once the guard is released.
+        drop(_guard);
         if previous.semantic_search != updated.semantic_search
             && let Err(error) = self
                 .semantic
@@ -1095,6 +1115,7 @@ impl AppService {
     }
 
     async fn sync_now_direct(&self) -> Result<CloudSyncStatus> {
+        self.ensure_writable()?;
         let _guard = self.sync_gate.lock().await;
         let settings = self.settings().await;
         if !settings.cloud_sync.enabled {
@@ -1104,6 +1125,14 @@ impl AppService {
         self.mark_cloud_syncing().await;
         match self.sync_once_locked(settings).await {
             Ok(devices) => {
+                // Retire `stage='published'` rows older than the retention window so
+                // sync_published_bundles does not grow without bound. Recent
+                // rows stay for publish idempotency; only stale ones are removed.
+                let seven_days_ms: i64 = 7 * 24 * 60 * 60 * 1000;
+                let cutoff = chrono::Utc::now().timestamp_millis() - seven_days_ms;
+                if let Err(error) = self.sync_store.prune_published_bundles(cutoff).await {
+                    tracing::warn!(%error, "failed to prune published bundle records");
+                }
                 self.mark_cloud_success(devices).await;
                 Ok(self.cloud_sync_status().await)
             }
@@ -1729,6 +1758,19 @@ impl AppService {
         self.settings.rotate_secret().await
     }
 
+    /// Rejects writes once the service is shutting down. Call this at the top
+    /// of every write path, before acquiring the sync_gate, so a successful
+    /// `move_data_directory` blocks subsequent writes immediately rather than
+    /// queuing behind the gate or mutating the old pool.
+    fn ensure_writable(&self) -> Result<()> {
+        if self.shutdown.load(Ordering::SeqCst) {
+            return Err(AppError::Cancelled(
+                "应用正在重启以切换数据目录，请稍后重试".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub async fn move_data_directory(&self, directory: &Path) -> Result<()> {
         tokio::fs::create_dir_all(directory).await?;
         let destination = directory.join("chat_memory.db");
@@ -1745,18 +1787,49 @@ impl AppService {
         let mut settings = self.settings().await;
         settings.data_directory = Some(directory.to_string_lossy().into_owned());
         self.settings.update(settings).await?;
-        tracing::info!(destination=%directory.display(), "database copied to configured directory; restarting application");
+        // The snapshot is complete and a restart has been requested. Set the
+        // shutdown flag before releasing the sync_gate so every subsequent
+        // write path observes it and rejects new work, leaving the old pool
+        // untouched until the process actually restarts.
+        self.shutdown.store(true, Ordering::SeqCst);
+        tracing::info!(destination=%directory.display(), "database copied to configured directory; service is now draining pending restart");
         Ok(())
     }
 
     pub async fn set_close_behavior(&self, behavior: CloseBehavior) -> Result<()> {
         let mut settings = self.settings().await;
         settings.close_behavior = behavior;
-        self.update_settings(settings).await?;
+        // close_behavior is a pure local UI preference: persist it without taking
+        // sync_gate or running cloud credential reconciliation, so saving
+        // it is never blocked by a slow/unreachable cloud backend.
+        self.update_local_settings(settings).await?;
         Ok(())
     }
 
+    /// Persists pure-local settings (close behavior, tray click, theme, language)
+    /// without acquiring `sync_gate` and without cloud credential reconciliation
+    /// or remote validation. A local mutation is still queued so the
+    /// change propagates via the normal sync path on the next run, but saving the
+    /// preference itself only touches the local SettingsStore and is therefore
+    /// never blocked by cloud connectivity.
+    pub async fn update_local_settings(&self, mut settings: AppSettings) -> Result<AppSettings> {
+        // Preserve cloud-sync-affecting fields exactly as the committed copy held
+        // them: this path must not silently change cloud_sync/secret state, which
+        // would bypass the gated credential transition. Only local UI preferences
+        // are allowed to change.
+        let committed = self.settings.get().await;
+        settings.cloud_sync = committed.cloud_sync;
+        settings.secret = committed.secret.clone();
+        settings.secret_enabled = committed.secret_enabled;
+        settings.allowed_origins = committed.allowed_origins;
+        settings.semantic_search = committed.semantic_search;
+        let updated = self.settings.update(settings).await?;
+        self.notify_local_sync();
+        Ok(updated)
+    }
+
     pub async fn import(&self, request: ImportRequest) -> Result<ImportResponse> {
+        self.ensure_writable()?;
         let platform = request.platform.clone();
         let received = request.sessions.len();
         let normalized = request
@@ -1789,6 +1862,7 @@ impl AppService {
     }
 
     pub async fn import_deepseek_zip(&self, bytes: Vec<u8>) -> Result<ImportResponse> {
+        self.ensure_writable()?;
         let archive_bytes = bytes.len();
         if bytes.len() > 128 * 1024 * 1024 {
             return Err(AppError::InvalidData("ZIP 文件超过 128 MB 限制".into()));
@@ -1871,6 +1945,7 @@ impl AppService {
     }
 
     pub async fn delete(&self, id: &str) -> Result<()> {
+        self.ensure_writable()?;
         {
             let _guard = self.sync_gate.lock().await;
             delete_local_session(&self.pool, id).await?;

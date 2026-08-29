@@ -95,6 +95,7 @@ async fn service_with_local_session_fixture() -> (AppService, PathBuf) {
             cloud_sync_scheduler: CloudSyncScheduler::for_tests(),
             sync_gate: Arc::new(Mutex::new(())),
             cloud_sync_runtime: Arc::new(RwLock::new(CloudSyncRuntime::default())),
+            shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         },
         data_dir,
     )
@@ -981,6 +982,7 @@ async fn restart_reconciles_a_committed_generation_before_selecting_credentials(
         cloud_sync_scheduler: CloudSyncScheduler::for_tests(),
         sync_gate: Arc::new(Mutex::new(())),
         cloud_sync_runtime: Arc::new(RwLock::new(CloudSyncRuntime::default())),
+        shutdown: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
 
     restarted
@@ -2977,7 +2979,9 @@ async fn backend_switch_waits_for_running_sync_before_changing_configuration() {
         let transition_started = transition_started.clone();
         async move {
             transition_started.notify_one();
-            service.update_settings(next).await
+            service
+                .update_settings_with_cloud_credentials(next, None)
+                .await
         }
     });
     transition_started.notified().await;
@@ -3709,4 +3713,67 @@ async fn rewrite_cloud_archive_explicitly_retires_released_v1_compatibility() {
             .is_ok(),
         "explicit retirement must not delete released history"
     );
+}
+
+#[tokio::test]
+async fn move_data_directory_rejects_writes_until_restart() {
+    // After the DB is snapshotted to the new directory and a restart is
+    // scheduled, the service must reject all subsequent writes (import/delete/
+    // sync) so nothing mutates the old pool before the process actually
+    // restarts.
+    let (service, data_dir) = service_with_local_session_fixture().await;
+    let destination =
+        std::env::temp_dir().join(format!("ai-chat-memory-move-{}", uuid::Uuid::new_v4()));
+
+    service.move_data_directory(&destination).await.unwrap();
+    assert!(
+        destination.join("chat_memory.db").exists(),
+        "snapshot was written"
+    );
+
+    // Subsequent local writes must be rejected, not silently executed.
+    let delete_err = service.delete("local-session").await.unwrap_err();
+    assert!(
+        matches!(delete_err, AppError::Cancelled(_)),
+        "delete after move must be Cancelled, got {:?}",
+        delete_err
+    );
+
+    let import_err = service
+        .import(ImportRequest {
+            platform: "fixture".into(),
+            sessions: vec![serde_json::json!({
+                "id": "local-2",
+                "title": "after move",
+                "messages": []
+            })],
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(import_err, AppError::Cancelled(_)),
+        "import after move must be Cancelled, got {:?}",
+        import_err
+    );
+
+    // A manual sync must not run either; sync_now falls back to sync_now_direct
+    // when the scheduler channel is closed (for_tests), so it must surface the
+    // same shutdown rejection rather than touching the old pool.
+    let sync_err = service.sync_now().await.unwrap_err();
+    assert!(
+        matches!(sync_err, AppError::Cancelled(_)),
+        "sync_now after move must be Cancelled, got {:?}",
+        sync_err
+    );
+
+    // The original session row is still present in the old pool (nothing wrote
+    // through), proving the rejection happened before any mutation.
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
+        .fetch_one(&service.pool)
+        .await
+        .unwrap();
+    assert_eq!(count, 1, "no writes should have reached the old pool");
+
+    let _ = std::fs::remove_dir_all(&destination);
+    let _ = std::fs::remove_dir_all(&data_dir);
 }

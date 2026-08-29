@@ -29,6 +29,20 @@ use tokio::sync::Mutex;
 
 const MAX_MUTATIONS_PER_BUNDLE: usize = 500;
 
+/// Cumulative cap on the raw (still-encrypted) envelope bytes downloaded while
+/// pulling a single device's bundle chain. Protects against a malicious or
+/// runaway remote pinning arbitrarily many near-max-size bundles into memory.
+/// 1 GiB bounds a long legitimate chain while rejecting an adversarial flood.
+const MAX_PULL_CHAIN_BYTES: usize = 1024 * 1024 * 1024;
+
+/// Cap on candidate bundles inspected while reconstructing a released-v1 device
+/// history. The legacy bundles directory is enumerated without an inherent bound,
+/// so an adversary who drops many `.acmb` objects there could force unbounded
+/// download/decrypt.
+const MAX_RELEASED_V1_CANDIDATES: usize = 1000;
+const MAX_RELEASED_V1_BYTES: usize = 1024 * 1024 * 1024;
+const MAX_RELEASED_V1_EVENTS: usize = 500_000;
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HeadDocument {
     pub generation_id: String,
@@ -43,12 +57,27 @@ struct RemoteBundleDownload {
     released_v1_unchained: bool,
     path: String,
     sha256: String,
+    /// Size of the raw (still-encrypted) envelope bytes downloaded for this
+    /// bundle, used to cap cumulative pull memory/bandwidth.
+    raw_bytes_len: usize,
 }
 
 struct ReleasedV1BundleCandidate {
     path: String,
     sha256: String,
     bundle: RemoteBundleDownload,
+}
+
+/// A bundle that has been sealed (and, in the fresh-seal path, staged) and is
+/// ready for upload + head publication. Shared between the staged-reuse and
+/// fresh-seal publish paths so the crypto-failure reseal can reuse the
+/// same finalization logic.
+struct PreparedBundle {
+    path: RemotePath,
+    digest: String,
+    bytes: Vec<u8>,
+    end_seq: i64,
+    published_mutations: Vec<PendingMutation>,
 }
 
 struct ReleasedV1Reconstruction<'a> {
@@ -404,6 +433,7 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
             .and_then(|value| value.anchor.as_ref());
         const MAX_PULL_BUNDLE_CHAIN_DEPTH: usize = 1000;
         let mut chain = Vec::new();
+        let mut chain_bytes: usize = 0;
         let mut current = Some(head.clone());
         let mut released_v1_boundary = None;
         while let Some(document) = current {
@@ -427,6 +457,12 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
             let downloaded = self
                 .download_remote_bundle(&document, remote_device_id, compatibility)
                 .await?;
+            chain_bytes = chain_bytes.saturating_add(downloaded.raw_bytes_len);
+            if chain_bytes > MAX_PULL_CHAIN_BYTES {
+                return Err(AppError::InvalidData(
+                    "remote bundle chain exceeded the cumulative byte budget".into(),
+                ));
+            }
             if downloaded.released_v1_unchained {
                 released_v1_boundary = Some((document, downloaded));
                 break;
@@ -545,9 +581,15 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
             .await
             .map_err(|error| remote_read_error(error, "released v1 bundle listing"))?;
         let mut candidates = Vec::new();
+        let mut candidate_bytes: usize = 0;
         for entry in entries {
             if entry.is_collection || !entry.name.ends_with(".acmb") {
                 continue;
+            }
+            if candidates.len() >= MAX_RELEASED_V1_CANDIDATES {
+                return Err(AppError::InvalidData(
+                    "released v1 bundle listing exceeded the candidate limit".into(),
+                ));
             }
             let (start_seq, end_seq, sha256) = parse_bundle_object_name(&entry.name)?;
             if start_seq > legacy_head.end_seq || end_seq > legacy_head.end_seq {
@@ -571,6 +613,12 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
                     Some(VaultCompatibility::ReleasedV1Writers),
                 )
                 .await?;
+            candidate_bytes = candidate_bytes.saturating_add(bundle.raw_bytes_len);
+            if candidate_bytes > MAX_RELEASED_V1_BYTES {
+                return Err(AppError::InvalidData(
+                    "released v1 bundle download exceeded the cumulative byte budget".into(),
+                ));
+            }
             if bundle.decoded.header.start_seq != start_seq {
                 return Err(AppError::InvalidData(
                     "released v1 bundle filename does not match its sequence range".into(),
@@ -625,6 +673,11 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
                         ));
                     }
                     None => {
+                        if unique_events.len() >= MAX_RELEASED_V1_EVENTS {
+                            return Err(AppError::InvalidData(
+                                "released v1 history exceeded the event limit".into(),
+                            ));
+                        }
                         unique_events.insert(change.local_seq, change.clone());
                     }
                 }
@@ -656,6 +709,7 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
             released_v1_unchained: true,
             path: legacy_head.path.clone(),
             sha256: legacy_head.sha256.clone(),
+            raw_bytes_len: legacy_head_bundle.raw_bytes_len,
         }];
 
         if let Some(oldest_current) = strict_suffix.last() {
@@ -745,6 +799,7 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
             released_v1_unchained,
             path: document.path.clone(),
             sha256: document.sha256.clone(),
+            raw_bytes_len: object.bytes.len(),
         })
     }
 
@@ -1117,7 +1172,10 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
         if pending.is_empty() {
             return Ok(SyncReport::default());
         }
-        let (publication_vault, recovered_publication) = self.ensure_active_vault().await?;
+        // ENG-12：恢复残留发布后必须继续走正常发布流程——recovered_publication 只作
+        // 幂等背景（已推进的 head 会经 already_published 分支转为 acknowledge），
+        // 提前返回会让恢复期间积压的新 pending 被跳过到下一次 run。
+        let (publication_vault, _recovered_publication) = self.ensure_active_vault().await?;
         let head_path = self.head_path()?;
         let previous_head = match self.backend.get(&head_path).await {
             Ok(existing) => {
@@ -1169,13 +1227,6 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
                 .await?;
         }
         let pending = &pending[already_published..];
-        if let Some((owner_device_id, published)) = recovered_publication {
-            return Ok(SyncReport {
-                published: usize::from(owner_device_id == self.device_id) * published,
-                acknowledged,
-                ..SyncReport::default()
-            });
-        }
         if pending.is_empty() {
             return Ok(SyncReport {
                 acknowledged,
@@ -1199,15 +1250,46 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
             let path = RemotePath::parse(&staged.object_path)
                 .map_err(|error| AppError::InvalidData(error.to_string()))?;
             if sha256_hex(&staged.bundle_bytes) != staged.bundle_sha256 {
+                self.discard_staged_bundle(&staged.bundle_sha256).await;
                 return Err(AppError::InvalidData(
                     "staged bundle SHA-256 does not match its bytes".into(),
                 ));
             }
-            let decoded = open_bundle_protected(
+            // A Crypto error here means the staged bundle was sealed with a protector
+            // we no longer hold (e.g. the passphrase rotated). The staged bytes are
+            // permanently unrecoverable, so discard the record and reseal a fresh
+            // bundle from the current outbox instead of pinning the publish loop
+            // against a bad staged row forever.
+            let decoded = match open_bundle_protected(
                 &staged.bundle_bytes,
                 &self.bundle_limits,
                 self.protector.as_deref(),
-            )?;
+            ) {
+                Ok(decoded) => decoded,
+                Err(AppError::Crypto(_)) => {
+                    self.discard_staged_bundle(&staged.bundle_sha256).await;
+                    tracing::warn!(
+                        bundle_sha256 = %staged.bundle_sha256,
+                        "staged bundle could not be decrypted with current protector; resealing"
+                    );
+                    let prepared = self
+                        .seal_and_stage_fresh_bundle(
+                            pending,
+                            previous_head.as_ref().map(|(head, _etag)| head),
+                        )
+                        .await?;
+                    return self
+                        .finalize_publish(
+                            prepared,
+                            previous_head.as_ref(),
+                            &head_path,
+                            publication_vault,
+                            acknowledged,
+                        )
+                        .await;
+                }
+                Err(error) => return Err(error),
+            };
             if decoded.header.vault_id != self.vault_id
                 || decoded.header.generation_id != staged.generation_id
                 || decoded.header.device_id != staged.device_id
@@ -1216,6 +1298,7 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
                 || staged.generation_id != self.generation_id
                 || staged.device_id != self.device_id
             {
+                self.discard_staged_bundle(&staged.bundle_sha256).await;
                 return Err(AppError::InvalidData(
                     "staged bundle identity or range does not match its recovery record".into(),
                 ));
@@ -1233,6 +1316,7 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
                 decoded.header.previous_end_seq,
             );
             if actual_previous != expected_previous.unwrap_or((None, None, None)) {
+                self.discard_staged_bundle(&staged.bundle_sha256).await;
                 return Err(AppError::InvalidData(
                     "staged bundle does not extend the current remote head".into(),
                 ));
@@ -1247,6 +1331,7 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
                 staged.end_seq,
             )?;
             if expected_path != path {
+                self.discard_staged_bundle(&staged.bundle_sha256).await;
                 return Err(AppError::InvalidData(
                     "staged bundle path does not match its content address".into(),
                 ));
@@ -1268,6 +1353,11 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
                 || published_mutations.len() > pending.len()
                 || published_mutations != pending[..published_mutations.len()]
             {
+                // The outbox prefix changed (e.g. via coalescing) since this bundle
+                // was staged, so it no longer matches what we need to publish.
+                // Discard the orphaned staged row so the next attempt reseals fresh
+                // instead of retrying against a prefix that will never match.
+                self.discard_staged_bundle(&staged.bundle_sha256).await;
                 return Err(AppError::InvalidData(
                     "staged bundle does not match the current outbox prefix".into(),
                 ));
@@ -1280,32 +1370,97 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
                 published_mutations,
             )
         } else {
-            let (contents, sealed, published_count) = self.seal_largest_mutation_prefix(
-                pending,
-                previous_head.as_ref().map(|(head, _etag)| head),
-                &self.generation_id,
-                &self.device_id,
-                self.protector.as_deref(),
-            )?;
-            let path = self.bundle_path(&sealed, contents.start_seq, contents.end_seq)?;
-            let digest = sealed.file_sha256;
-            let bytes = sealed.bytes;
-            let end_seq = contents.end_seq;
-            let published_mutations = pending[..published_count].to_vec();
-            self.store
-                .stage_bundle(
-                    &digest,
-                    &self.generation_id,
-                    &self.device_id,
-                    &path.display(),
-                    contents.start_seq,
-                    contents.end_seq,
-                    &bytes,
-                    current_time_millis(),
+            let prepared = self
+                .seal_and_stage_fresh_bundle(
+                    pending,
+                    previous_head.as_ref().map(|(head, _etag)| head),
                 )
                 .await?;
-            (path, digest, bytes, end_seq, published_mutations)
+            (
+                prepared.path,
+                prepared.digest,
+                prepared.bytes,
+                prepared.end_seq,
+                prepared.published_mutations,
+            )
         };
+        let prepared = PreparedBundle {
+            path,
+            digest,
+            bytes,
+            end_seq,
+            published_mutations,
+        };
+        self.finalize_publish(
+            prepared,
+            previous_head.as_ref(),
+            &head_path,
+            publication_vault,
+            acknowledged,
+        )
+        .await
+    }
+
+    /// Seals the largest publishable prefix of `pending` into a fresh bundle and
+    /// records it as `stage='staged'` so a crash between staging and head publish
+    /// can be recovered on the next `publish_pending`. Used both by the normal
+    /// publish path and the crypto-failure reseal path.
+    async fn seal_and_stage_fresh_bundle(
+        &self,
+        pending: &[PendingMutation],
+        previous_head: Option<&HeadDocument>,
+    ) -> Result<PreparedBundle> {
+        let (contents, sealed, published_count) = self.seal_largest_mutation_prefix(
+            pending,
+            previous_head,
+            &self.generation_id,
+            &self.device_id,
+            self.protector.as_deref(),
+        )?;
+        let path = self.bundle_path(&sealed, contents.start_seq, contents.end_seq)?;
+        let digest = sealed.file_sha256;
+        let bytes = sealed.bytes;
+        let end_seq = contents.end_seq;
+        let published_mutations = pending[..published_count].to_vec();
+        self.store
+            .stage_bundle(
+                &digest,
+                &self.generation_id,
+                &self.device_id,
+                &path.display(),
+                contents.start_seq,
+                contents.end_seq,
+                &bytes,
+                current_time_millis(),
+            )
+            .await?;
+        Ok(PreparedBundle {
+            path,
+            digest,
+            bytes,
+            end_seq,
+            published_mutations,
+        })
+    }
+
+    /// Uploads the prepared bundle, advances the remote head, marks it published,
+    /// and acknowledges the mutations. Shared by the staged-reuse and fresh-seal
+    /// publish paths.
+    async fn finalize_publish(
+        &self,
+        prepared: PreparedBundle,
+        previous_head: Option<&(HeadDocument, String)>,
+        head_path: &RemotePath,
+        publication_vault: VersionedVaultIdentity,
+        mut acknowledged: usize,
+    ) -> Result<SyncReport> {
+        let PreparedBundle {
+            path,
+            digest,
+            bytes,
+            end_seq,
+            published_mutations,
+        } = prepared;
         self.ensure_parent_collections(&path).await?;
         match self.backend.put_immutable(&path, &bytes).await {
             Ok(()) => {}
@@ -1343,7 +1498,7 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
                 started_at_ms,
                 lease_expires_at_ms: started_at_ms.saturating_add(DEFAULT_MAINTENANCE_LEASE_MS),
                 head_path: head_path.display(),
-                expected_head_etag: previous_head.as_ref().map(|(_head, etag)| etag.clone()),
+                expected_head_etag: previous_head.map(|(_head, etag)| etag.clone()),
                 replacement_head_json: head_json,
                 published_mutation_count: published_mutations.len(),
             },
@@ -1362,6 +1517,17 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
             published: published_mutations.len(),
             acknowledged,
         })
+    }
+
+    /// Best-effort removal of a stale `stage='staged'` row so the next
+    /// `publish_pending` reseals from the current outbox instead of retrying
+    /// against a staged bundle that can never be reused.
+    /// Errors are logged, not propagated: cleanup must not mask the original
+    /// publish failure that triggered it.
+    async fn discard_staged_bundle(&self, bundle_sha256: &str) {
+        if let Err(error) = self.store.remove_staged_bundle(bundle_sha256).await {
+            tracing::warn!(%error, bundle_sha256, "failed to discard stale staged bundle");
+        }
     }
 
     async fn ensure_active_vault(
@@ -3879,7 +4045,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn encrypted_generation_rejects_a_legacy_plain_staged_bundle() {
+    async fn encrypted_generation_discards_legacy_plain_staged_bundle_and_reseals() {
         let (store, _pool) = test_store("device-a").await;
         store
             .queue_local_upsert(snapshot(0, "plain staged payload"), 1_000)
@@ -3918,18 +4084,34 @@ mod tests {
             .await
             .unwrap();
 
-        let error = engine.publish_pending().await.unwrap_err();
+        // The staged bundle is plain while the generation is encrypted, so the
+        // staged bytes cannot be opened with the current protector. Instead of
+        // pinning the publish loop against the unrecoverable staged row forever,
+        // the engine discards it and reseals the legitimate pending outbox with
+        // the correct protector.
+        let report = engine.publish_pending().await.unwrap();
 
-        assert!(matches!(error, AppError::Crypto(_)), "{error:?}");
-        assert_eq!(
-            backend
-                .get(&engine.head_path().unwrap())
-                .await
-                .unwrap_err()
-                .kind(),
-            "not_found"
-        );
-        assert_eq!(store.pending_mutations(10).await.unwrap(), pending);
+        assert_eq!(report.published, pending.len());
+        // The remote head now points at the freshly-sealed encrypted bundle, not
+        // the discarded plain one.
+        let head_bytes = backend
+            .get(&engine.head_path().unwrap())
+            .await
+            .unwrap()
+            .bytes;
+        let head: HeadDocument = serde_json::from_slice(&head_bytes).unwrap();
+        assert_ne!(head.sha256, sealed.file_sha256);
+        // All pending mutations have been acknowledged and cleared from the outbox.
+        assert!(store.pending_mutations(10).await.unwrap().is_empty());
+        // The orphaned staged row has been cleaned up: no stage='staged'
+        // rows remain for the legacy plain bundle.
+        let staged_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sync_published_bundles WHERE stage = 'staged'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(staged_count, 0);
     }
 
     #[tokio::test]
@@ -3994,6 +4176,19 @@ mod tests {
                 .kind(),
             "not_found"
         );
+        // The mismatched staged row is discarded so the next publish
+        // attempt reseals fresh instead of retrying against a prefix that will
+        // never match.
+        let staged_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sync_published_bundles WHERE stage = 'staged'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(staged_count, 0);
+        // A retry now succeeds: the outbox is intact and no stale staged row blocks it.
+        let report = engine.publish_pending().await.unwrap();
+        assert_eq!(report.published, pending.len());
     }
 
     #[tokio::test]
@@ -4469,7 +4664,9 @@ mod tests {
         );
 
         let retry = restarted_engine.publish_pending().await.unwrap();
-        assert_eq!((retry.published, retry.acknowledged), (1, 1));
+        // ENG-12：恢复不再提前返回。本次运行没有发布新 bundle，只是把崩溃残留的
+        // head 推进补完并把该变更幂等确认为 acknowledge，published 如实为 0。
+        assert_eq!((retry.published, retry.acknowledged), (0, 1));
         let final_objects = backend.bundle_objects().await;
         assert_eq!(
             final_objects.len(),
@@ -4559,8 +4756,16 @@ mod tests {
         );
         let retry = restarted_engine.publish_pending().await.unwrap();
 
-        assert_eq!((retry.published, retry.acknowledged), (1, 1));
-        assert_eq!(backend.bundle_objects().await.len(), 1);
+        // ENG-12：恢复不再提前返回——staged 前缀经 head 幂等确认为 acknowledge，
+        // 重启期间新增的变更在同一轮直接发布，不再被跳过到下一次 run。
+        assert_eq!((retry.published, retry.acknowledged), (1, 2));
+        let final_objects = backend.bundle_objects().await;
+        assert_eq!(final_objects.len(), 2);
+        assert_eq!(
+            final_objects.get(&first_path),
+            Some(&first_bytes),
+            "staged bundle must be recovered in place, not resealed"
+        );
         let head: HeadDocument = serde_json::from_slice(
             &backend
                 .get(&restarted_engine.head_path().unwrap())
@@ -4569,18 +4774,9 @@ mod tests {
                 .bytes,
         )
         .unwrap();
-        assert_eq!(head.path, first_path);
-        assert_eq!(
-            backend
-                .get(&RemotePath::parse(&head.path).unwrap())
-                .await
-                .unwrap()
-                .bytes,
-            first_bytes
-        );
-        let pending = store.pending_mutations(10).await.unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].local_seq, 2);
+        assert_eq!(head.end_seq, 2);
+        assert_ne!(head.path, first_path);
+        assert!(store.pending_mutations(10).await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -4627,9 +4823,20 @@ mod tests {
         );
         let recovered = restarted_engine.publish_pending().await.unwrap();
 
-        assert_eq!((recovered.published, recovered.acknowledged), (1, 0));
-        assert_eq!(backend.bundle_objects().await.len(), 1);
-        let first_head: HeadDocument = serde_json::from_slice(
+        // ENG-12：恢复后同一轮继续发布——被合并出 outbox 的 staged 变更经 head 幂等
+        // 确认为 acknowledge，合并后的新变更立即发布，staged bundle 原位复用不重封。
+        assert_eq!((recovered.published, recovered.acknowledged), (1, 1));
+        assert_eq!(backend.bundle_objects().await.len(), 2);
+        assert_eq!(
+            backend
+                .get(&RemotePath::parse(&first_path).unwrap())
+                .await
+                .unwrap()
+                .bytes,
+            first_bytes,
+            "staged bundle must be recovered in place, not resealed"
+        );
+        let head: HeadDocument = serde_json::from_slice(
             &backend
                 .get(&restarted_engine.head_path().unwrap())
                 .await
@@ -4637,20 +4844,12 @@ mod tests {
                 .bytes,
         )
         .unwrap();
-        assert_eq!(first_head.path, first_path);
-        assert_eq!(
-            backend
-                .get(&RemotePath::parse(&first_head.path).unwrap())
-                .await
-                .unwrap()
-                .bytes,
-            first_bytes
-        );
-
-        let newer = restarted_engine.publish_pending().await.unwrap();
-        assert_eq!((newer.published, newer.acknowledged), (1, 1));
-        assert_eq!(backend.bundle_objects().await.len(), 2);
+        assert_eq!(head.end_seq, 2);
         assert!(store.pending_mutations(10).await.unwrap().is_empty());
+
+        let next = restarted_engine.publish_pending().await.unwrap();
+        assert_eq!(next, SyncReport::default());
+        assert_eq!(backend.bundle_objects().await.len(), 2);
     }
 
     #[tokio::test]
@@ -5024,6 +5223,70 @@ mod tests {
         let recovered = engine.run_once(SyncTrigger::Manual).await.unwrap();
         assert_eq!((recovered.published, recovered.acknowledged), (0, 1));
         assert!(store.pending_mutations(1).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn publish_pending_continues_publishing_after_recovering_a_stuck_head_publish() {
+        let server = TestS3::start("AKID", None).await;
+        let backend = s3_backend(&server);
+        let (store, _pool) = test_store("device-a").await;
+        store
+            .queue_local_upsert(snapshot(0, "crashed-bundle"), 1_000)
+            .await
+            .unwrap();
+        initialize_test_vault(
+            backend.as_ref(),
+            "vault",
+            "generation",
+            VaultProtection::plain(),
+        )
+        .await;
+        let engine = SyncEngine::new(
+            store.clone(),
+            backend.clone(),
+            "vault",
+            "generation",
+            "device-a",
+        );
+        engine.run_once(SyncTrigger::Manual).await.unwrap();
+        assert!(store.pending_mutations(10).await.unwrap().is_empty());
+
+        // 模拟崩溃残留：vault 卡在 Publishing（历史 published_mutation_count=5），head 已推进。
+        let identity = load_versioned_identity(backend.as_ref()).await.unwrap();
+        let head = backend.get(&engine.head_path().unwrap()).await.unwrap();
+        begin_head_publish(
+            backend.as_ref(),
+            &identity,
+            HeadPublishRequest {
+                operation_id: "publish-stuck".into(),
+                owner_device_id: "device-a".into(),
+                started_at_ms: current_time_millis(),
+                lease_expires_at_ms: current_time_millis()
+                    .saturating_add(DEFAULT_MAINTENANCE_LEASE_MS),
+                head_path: engine.head_path().unwrap().display(),
+                expected_head_etag: None,
+                replacement_head_json: String::from_utf8(head.bytes).unwrap(),
+                published_mutation_count: 5,
+            },
+        )
+        .await
+        .unwrap();
+
+        // 恢复期间新产生的 pending 变更。
+        store
+            .queue_local_upsert(snapshot(1, "fresh-mutation"), 2_000)
+            .await
+            .unwrap();
+
+        let report = engine.publish_pending().await.unwrap();
+        assert_eq!(
+            report.published, 1,
+            "must publish the real new mutation instead of the stale recovered count"
+        );
+        assert!(
+            store.pending_mutations(10).await.unwrap().is_empty(),
+            "pending work must not be skipped until the next run"
+        );
     }
 
     #[tokio::test]

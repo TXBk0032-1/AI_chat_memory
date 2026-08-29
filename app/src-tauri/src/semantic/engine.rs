@@ -588,7 +588,16 @@ impl SemanticEngine {
             self.wake.notified().await;
             if let Err(error) = self.drain_pending().await {
                 *self.last_error.write().await = Some(error.to_string());
-                tracing::warn!(%error, "semantic index worker failed");
+                tracing::warn!(%error, "semantic index worker failed; scheduling retry");
+                // An embed failure leaves pending chunks un-processed and nothing else
+                // re-wakes the worker. Schedule a self-retry so indexing
+                // eventually resumes after a transient CUDA/HTTP failure instead of
+                // stalling until the next external import or reindex.
+                let engine = Arc::clone(&self);
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    engine.wake.notify_one();
+                });
             }
         }
     }

@@ -999,6 +999,24 @@ impl SyncStore {
         Ok(())
     }
 
+    /// Removes `stage='published'` rows older than `older_than_ms` so the
+    /// `sync_published_bundles` table does not grow without bound. Recent
+    /// rows are retained because `published_bundle` is consulted for publish
+    /// idempotency within the current generation, and a short retention window
+    /// protects against re-publishing a just-acknowledged bundle after a restart.
+    pub async fn prune_published_bundles(&self, older_than_ms: i64) -> Result<u64> {
+        let _gate = self.write_gate.lock().await;
+        let result = sqlx::query(
+            "DELETE FROM sync_published_bundles
+             WHERE stage = 'published' AND published_at_ms IS NOT NULL
+               AND published_at_ms < ?",
+        )
+        .bind(older_than_ms)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+
     pub async fn published_bundle(&self, bundle_sha256: &str) -> Result<Option<PublishedBundle>> {
         let bundle = sqlx::query_as::<_, (String, String, String, i64, Option<i64>)>(
             "SELECT bundle_sha256, generation_id, stage, staged_at_ms, published_at_ms
@@ -2159,5 +2177,61 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(marker, ("vault-old".into(), "generation-old".into()));
+    }
+
+    #[tokio::test]
+    async fn prune_published_bundles_removes_old_rows_and_keeps_recent() {
+        let store = SyncStore::new(test_pool().await);
+        store.initialize_device("device-a", "Laptop").await.unwrap();
+        // A "stale" published row (published in the distant past) and a "recent"
+        // published row. prune_published_bundles(cutoff) should delete only the
+        // stale one; staged rows must never be touched.
+        let stale_ms: i64 = 1_000_000;
+        let recent_ms: i64 = 2_000_000_000;
+        store
+            .mark_bundle_staged("stale-sha", "generation", stale_ms)
+            .await
+            .unwrap();
+        store
+            .mark_bundle_published("stale-sha", stale_ms)
+            .await
+            .unwrap();
+        store
+            .mark_bundle_staged("recent-sha", "generation", recent_ms)
+            .await
+            .unwrap();
+        store
+            .mark_bundle_published("recent-sha", recent_ms)
+            .await
+            .unwrap();
+        // A still-staged (not yet published) row must be preserved regardless of age.
+        store
+            .stage_bundle(
+                "staged-sha",
+                "generation",
+                "device-a",
+                "v1/path",
+                1,
+                2,
+                &[0u8; 4],
+                stale_ms,
+            )
+            .await
+            .unwrap();
+
+        let removed = store.prune_published_bundles(recent_ms).await.unwrap();
+        assert_eq!(removed, 1);
+
+        let remaining: Vec<(String, String)> = sqlx::query_as(
+            "SELECT bundle_sha256, stage FROM sync_published_bundles ORDER BY bundle_sha256",
+        )
+        .fetch_all(store.pool())
+        .await
+        .unwrap();
+        let map: std::collections::HashMap<String, String> = remaining.into_iter().collect();
+        // Stale published row was pruned; recent published + staged rows survive.
+        assert!(!map.contains_key("stale-sha"));
+        assert_eq!(map.get("recent-sha").map(String::as_str), Some("published"));
+        assert_eq!(map.get("staged-sha").map(String::as_str), Some("staged"));
     }
 }

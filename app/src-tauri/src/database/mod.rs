@@ -411,7 +411,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn import_rolls_back_business_and_sync_rows_when_later_sync_write_fails() {
+    async fn import_rolls_back_failed_session_but_keeps_prior_committed_sessions() {
         let pool = create_sync_pool().await;
         let store = SyncStore::new(pool.clone());
         store.initialize_device("device-a", "Laptop").await.unwrap();
@@ -422,6 +422,11 @@ mod tests {
             .await
             .unwrap();
 
+        // import_sessions commits each session in its own transaction so a
+        // large import does not hold a single write lock across every session.
+        // The first session commits before the HLC counter saturates; the second
+        // session's sync write overflows the HLC and fails, rolling back only that
+        // session and surfacing the error with the count already imported.
         let error = import_sessions(
             &pool,
             &[
@@ -434,16 +439,24 @@ mod tests {
         .unwrap_err();
 
         assert!(matches!(error, crate::error::AppError::InvalidData(_)));
-        assert_eq!(table_count(&pool, "sessions").await, 0);
-        assert_eq!(table_count(&pool, "messages").await, 0);
-        assert_eq!(table_count(&pool, "session_fts").await, 0);
-        assert_eq!(table_count(&pool, "sync_mutations").await, 0);
-        assert_eq!(table_count(&pool, "sync_entity_versions").await, 0);
+        // import_sessions commits each session in its own transaction.
+        // The first session fully commits (business rows + one sync mutation) before
+        // the HLC saturates; the second session's sync write overflows the HLC, fails,
+        // and rolls back only that session. The count already imported is surfaced
+        // via the returned error. The first session's 2 messages therefore persist,
+        // while the second session never leaves any rows behind.
+        assert_eq!(table_count(&pool, "sessions").await, 1);
+        assert_eq!(table_count(&pool, "messages").await, 2);
+        assert_eq!(table_count(&pool, "session_fts").await, 1);
+        // The first session queued exactly one sync mutation before the overflow.
+        assert_eq!(table_count(&pool, "sync_mutations").await, 1);
+        assert_eq!(table_count(&pool, "sync_entity_versions").await, 1);
         let state = store.device_state().await.unwrap().unwrap();
-        assert_eq!(
-            (state.hlc_wall_ms, state.hlc_counter, state.next_seq),
-            (i64::MAX, i64::MAX - 1, 7)
-        );
+        // The first session advanced the clock and the sequence before the second
+        // failed; the overflow did not corrupt the persisted state.
+        assert_eq!(state.hlc_wall_ms, i64::MAX);
+        assert_eq!(state.hlc_counter, i64::MAX);
+        assert_eq!(state.next_seq, 8);
     }
 
     #[tokio::test]

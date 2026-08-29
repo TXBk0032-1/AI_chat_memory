@@ -119,6 +119,19 @@ impl HttpEmbeddingBackend {
     }
 
     async fn embed_ollama(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        // Prefer the batch `/api/embed` endpoint: one round trip for the
+        // whole batch instead of one per text, which makes full index rebuilds over
+        // thousands of chunks dramatically faster. Fall back to the legacy
+        // single-text `/api/embeddings` endpoint for servers that don't implement
+        // the batch variant (older Ollama or compatible servers).
+        if texts.len() > 1 {
+            match self.embed_ollama_batch(texts).await {
+                Ok(vectors) => return Ok(vectors),
+                Err(error) => {
+                    tracing::warn!(%error, "ollama batch embed failed; falling back to per-text");
+                }
+            }
+        }
         let mut vectors = Vec::with_capacity(texts.len());
         for text in texts {
             let url = format!(
@@ -147,6 +160,41 @@ impl HttpEmbeddingBackend {
                 .await
                 .map_err(|error| AppError::Configuration(error.to_string()))?;
             vectors.push(payload.embedding);
+        }
+        self.lock_or_infer_dimensions(&vectors)?;
+        Ok(vectors)
+    }
+
+    async fn embed_ollama_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        let url = format!("{}/api/embed", self.settings.base_url.trim_end_matches('/'));
+        let response = self
+            .client
+            .post(url)
+            .json(&json!({
+                "model": self.settings.model,
+                "input": texts,
+            }))
+            .send()
+            .await
+            .map_err(|error| AppError::Configuration(error.to_string()))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(AppError::Configuration(format!(
+                "ollama embed batch failed ({status}): {body}"
+            )));
+        }
+        let payload: OllamaEmbedBatchResponse = response
+            .json()
+            .await
+            .map_err(|error| AppError::Configuration(error.to_string()))?;
+        let vectors = payload.embeddings;
+        if vectors.len() != texts.len() {
+            return Err(AppError::Configuration(format!(
+                "ollama embed batch returned {} vectors for {} inputs",
+                vectors.len(),
+                texts.len()
+            )));
         }
         self.lock_or_infer_dimensions(&vectors)?;
         Ok(vectors)
@@ -241,6 +289,11 @@ impl EmbeddingBackend for HttpEmbeddingBackend {
 #[derive(Debug, Deserialize)]
 struct OllamaEmbeddingResponse {
     embedding: Vec<f32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OllamaEmbedBatchResponse {
+    embeddings: Vec<Vec<f32>>,
 }
 
 #[derive(Debug, Deserialize)]
