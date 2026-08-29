@@ -3777,3 +3777,341 @@ async fn move_data_directory_rejects_writes_until_restart() {
     let _ = std::fs::remove_dir_all(&destination);
     let _ = std::fs::remove_dir_all(&data_dir);
 }
+
+#[tokio::test]
+async fn move_data_directory_rechecks_the_destination_inside_the_sync_gate() {
+    // SVC-5：目标存在性检查必须与 VACUUM 同处 sync_gate 临界区内。并发竞争者
+    // 在等锁期间创建了目标文件时，加锁后的复检必须给出明确的配置错误，
+    // 而不是让 VACUUM INTO 以晦涩的 SQLite 错误失败。
+    let (service, data_dir) = service_with_local_session_fixture().await;
+    let destination =
+        std::env::temp_dir().join(format!("ai-chat-memory-move-race-{}", uuid::Uuid::new_v4()));
+
+    // 先占用 sync_gate，让移动任务阻塞在临界区入口。
+    let gate_guard = service.sync_gate.lock().await;
+    let gated_service = service.clone();
+    let gated_destination = destination.clone();
+    let mover =
+        tokio::spawn(async move { gated_service.move_data_directory(&gated_destination).await });
+    // 等待移动任务阻塞在 sync_gate 上，再模拟竞争者写入目标文件。
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    tokio::fs::create_dir_all(&destination).await.unwrap();
+    tokio::fs::write(destination.join("chat_memory.db"), b"competing")
+        .await
+        .unwrap();
+    drop(gate_guard);
+    let error = mover
+        .await
+        .expect("move task must not panic")
+        .expect_err("the destination was created while the move waited on the sync gate");
+
+    assert!(
+        matches!(error, AppError::Configuration(ref message) if message.contains("已存在")),
+        "the recheck inside the sync gate must surface the friendly conflict, got {error:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&destination);
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+#[tokio::test]
+async fn rewrite_cloud_archive_surfaces_and_marks_a_failed_local_generation_commit() {
+    // SVC-6：云端已提交新代次后本地 settings 写入失败，必须重试并在彻底失败时
+    // 显式报告错配，让下一次同步以远端代次自愈，而不是静默留下代次错配窗口。
+    let (service, data_dir) = service_with_local_session_fixture().await;
+    let server = TestS3::start("AKID", None).await;
+    let remote_id = format!("svc6-test-{}", uuid::Uuid::new_v4().simple());
+    let old_generation = "generation-old".to_owned();
+    let mut settings = service.settings().await;
+    settings.cloud_sync = CloudSyncSettings {
+        backend: CloudBackendKind::S3,
+        enabled: true,
+        connection_verified: true,
+        remote_id: remote_id.clone(),
+        vault_id: "vault-svc6-test".into(),
+        generation_id: old_generation.clone(),
+        s3: S3CloudSyncSettings {
+            endpoint_url: server.endpoint().into(),
+            region: "us-east-1".into(),
+            bucket: "archive".into(),
+            prefix: "service-svc6".into(),
+            force_path_style: true,
+        },
+        ..CloudSyncSettings::default()
+    };
+    service.settings.update(settings.clone()).await.unwrap();
+    service
+        .credentials
+        .set(
+            &remote_id,
+            SecretKind::S3AccessKeyId,
+            SecretValue::new("AKID"),
+        )
+        .await
+        .unwrap();
+    service
+        .credentials
+        .set(
+            &remote_id,
+            SecretKind::S3SecretAccessKey,
+            SecretValue::new("secret-key"),
+        )
+        .await
+        .unwrap();
+    let backend = backend_from_store(&settings.cloud_sync, service.credentials.as_ref())
+        .await
+        .unwrap();
+    load_or_create_identity(
+        backend.as_ref(),
+        VaultIdentity {
+            format_version: 2,
+            vault_id: settings.cloud_sync.vault_id.clone(),
+            generation_id: old_generation.clone(),
+        },
+    )
+    .await
+    .unwrap();
+    service.ensure_local_device().await.unwrap();
+    service.sync_store.seed_local_baseline().await.unwrap();
+    // 让 settings.json 的原子写入必然失败（临时文件名被目录占用）。
+    tokio::fs::create_dir(data_dir.join("settings.json.tmp"))
+        .await
+        .unwrap();
+
+    let error = service.rewrite_cloud_archive().await.unwrap_err();
+
+    assert!(
+        matches!(error, AppError::Configuration(ref message)
+            if message.contains("云端存档已提交新代次") && message.contains("本地设置写入失败")),
+        "the failed local commit must surface the compensation context, got {error:?}"
+    );
+    assert_eq!(
+        service.settings().await.cloud_sync.generation_id,
+        old_generation,
+        "the persisted settings must still hold the stale generation"
+    );
+    let remote_generation = load_versioned_identity(backend.as_ref())
+        .await
+        .unwrap()
+        .identity
+        .generation_id;
+    assert_ne!(
+        remote_generation, old_generation,
+        "the remote generation must have advanced"
+    );
+
+    // 补偿语义：解除写入故障后，下一次同步以远端代次自愈本地设置。
+    tokio::fs::remove_dir(data_dir.join("settings.json.tmp"))
+        .await
+        .unwrap();
+    service
+        .sync_once_locked(service.settings().await)
+        .await
+        .unwrap();
+    assert_eq!(
+        service.settings().await.cloud_sync.generation_id,
+        remote_generation
+    );
+
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+#[tokio::test]
+async fn remove_cloud_device_record_refreshes_devices_without_faking_sync_success() {
+    // SVC-7：删除单个远端设备不是一次完整的云同步成功——不得刷新
+    // last_success_at/清空错误状态；且必须枚举删除设备前缀下的全部对象。
+    let service = service_with_local_session().await;
+    let server = TestS3::start("AKID", None).await;
+    let remote_id = format!("svc7-test-{}", uuid::Uuid::new_v4().simple());
+    let mut settings = service.settings().await;
+    settings.cloud_sync = CloudSyncSettings {
+        backend: CloudBackendKind::S3,
+        enabled: true,
+        connection_verified: true,
+        remote_id: remote_id.clone(),
+        vault_id: "vault-svc7-test".into(),
+        generation_id: "generation-svc7-test".into(),
+        s3: S3CloudSyncSettings {
+            endpoint_url: server.endpoint().into(),
+            region: "us-east-1".into(),
+            bucket: "archive".into(),
+            prefix: "service-svc7".into(),
+            force_path_style: true,
+        },
+        ..CloudSyncSettings::default()
+    };
+    service.settings.update(settings.clone()).await.unwrap();
+    service
+        .credentials
+        .set(
+            &remote_id,
+            SecretKind::S3AccessKeyId,
+            SecretValue::new("AKID"),
+        )
+        .await
+        .unwrap();
+    service
+        .credentials
+        .set(
+            &remote_id,
+            SecretKind::S3SecretAccessKey,
+            SecretValue::new("secret-key"),
+        )
+        .await
+        .unwrap();
+    service
+        .sync_store
+        .initialize_device("device-local", "本机")
+        .await
+        .unwrap();
+    let backend = backend_from_store(&settings.cloud_sync, service.credentials.as_ref())
+        .await
+        .unwrap();
+    let bundle_sha = "ab".repeat(32);
+    let remote_head =
+        RemotePath::parse("v1/generations/generation-svc7-test/devices/device-remote/head.json")
+            .unwrap();
+    let remote_bundle = RemotePath::parse(&format!(
+        "v1/generations/generation-svc7-test/devices/device-remote/bundles/1-1-{bundle_sha}.acmb"
+    ))
+    .unwrap();
+    backend
+        .put_if_absent(&remote_head, b"fixture")
+        .await
+        .unwrap();
+    backend
+        .put_immutable(&remote_bundle, b"stale-bundle")
+        .await
+        .unwrap();
+    service
+        .sync_store
+        .set_remote_cursor(
+            "generation-svc7-test",
+            "device-remote",
+            &crate::sync::store::RemoteObjectAnchor {
+                end_seq: 1,
+                path: remote_bundle.display(),
+                sha256: bundle_sha,
+            },
+            42,
+        )
+        .await
+        .unwrap();
+    // 预置一次失败的同步状态：删除设备记录不能把它洗成“成功”。
+    service
+        .mark_cloud_error(&AppError::Cloud(CloudError::new(
+            CloudErrorKind::Protocol,
+            "previous sync failure",
+        )))
+        .await;
+
+    let status = service
+        .remove_cloud_device_record("device-remote".into())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        status.last_success_at, None,
+        "removing a device record must not fabricate a sync success"
+    );
+    assert_eq!(
+        status.last_error_code.as_deref(),
+        Some("protocol"),
+        "the previous sync error state must be preserved"
+    );
+    assert!(
+        status
+            .last_error_message
+            .as_deref()
+            .is_some_and(|message| message.contains("previous sync failure"))
+    );
+    assert!(
+        !status
+            .devices
+            .iter()
+            .any(|device| device.device_id == "device-remote"),
+        "the deleted device must disappear from the refreshed device list"
+    );
+    assert_eq!(
+        backend.get(&remote_head).await.unwrap_err().kind(),
+        "not_found"
+    );
+    assert_eq!(
+        backend.get(&remote_bundle).await.unwrap_err().kind(),
+        "not_found",
+        "the whole device prefix must be enumerated and deleted, not just the head"
+    );
+    assert!(
+        service
+            .sync_store
+            .remote_cursor("generation-svc7-test", "device-remote")
+            .await
+            .unwrap()
+            .is_none(),
+        "the local sync cursor for the deleted device must be removed"
+    );
+}
+
+#[tokio::test]
+async fn remove_cloud_device_record_reports_cursor_cleanup_failures() {
+    // SVC-7：游标清理失败必须显式报错（远端已删、本地游标残留会导致下次
+    // 同步以陈旧游标计算拉取起点），而不是静默成功。
+    let service = service_with_local_session().await;
+    let server = TestS3::start("AKID", None).await;
+    let remote_id = format!("svc7-fail-test-{}", uuid::Uuid::new_v4().simple());
+    let mut settings = service.settings().await;
+    settings.cloud_sync = CloudSyncSettings {
+        backend: CloudBackendKind::S3,
+        enabled: true,
+        connection_verified: true,
+        remote_id: remote_id.clone(),
+        vault_id: "vault-svc7-fail-test".into(),
+        generation_id: "generation-svc7-fail-test".into(),
+        s3: S3CloudSyncSettings {
+            endpoint_url: server.endpoint().into(),
+            region: "us-east-1".into(),
+            bucket: "archive".into(),
+            prefix: "service-svc7-fail".into(),
+            force_path_style: true,
+        },
+        ..CloudSyncSettings::default()
+    };
+    service.settings.update(settings.clone()).await.unwrap();
+    service
+        .credentials
+        .set(
+            &remote_id,
+            SecretKind::S3AccessKeyId,
+            SecretValue::new("AKID"),
+        )
+        .await
+        .unwrap();
+    service
+        .credentials
+        .set(
+            &remote_id,
+            SecretKind::S3SecretAccessKey,
+            SecretValue::new("secret-key"),
+        )
+        .await
+        .unwrap();
+    service
+        .sync_store
+        .initialize_device("device-local", "本机")
+        .await
+        .unwrap();
+    sqlx::query("DROP TABLE sync_remote_cursors")
+        .execute(&service.pool)
+        .await
+        .unwrap();
+
+    let error = service
+        .remove_cloud_device_record("device-remote".into())
+        .await
+        .expect_err("cursor cleanup failure must surface instead of faking success");
+
+    assert!(
+        matches!(error, AppError::InvalidData(ref message) if message.contains("游标清理失败")),
+        "got {error:?}"
+    );
+}

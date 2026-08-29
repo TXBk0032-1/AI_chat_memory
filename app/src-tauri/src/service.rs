@@ -1257,7 +1257,41 @@ impl AppService {
         }
         settings.cloud_sync.generation_id = new_generation.clone();
         settings.cloud_sync.encryption_enabled = remote_encryption;
-        self.settings.update(settings.clone()).await?;
+        // SVC-6: the cloud generation is already committed at this point, so a
+        // failed local settings write must be retried and, if it keeps failing,
+        // surfaced as an explicit mismatch for the next sync to repair instead
+        // of silently leaving local settings on the old generation.
+        let mut last_commit_error = None;
+        let mut settings_committed = false;
+        for attempt in 0..3 {
+            match self.settings.update(settings.clone()).await {
+                Ok(_) => {
+                    settings_committed = true;
+                    break;
+                }
+                Err(error) => {
+                    last_commit_error = Some(error);
+                    if attempt + 1 < 3 {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                }
+            }
+        }
+        if !settings_committed {
+            let error = last_commit_error
+                .unwrap_or_else(|| AppError::InvalidData("settings update did not run".into()));
+            tracing::error!(
+                vault_id = %settings.cloud_sync.vault_id,
+                remote_generation = %new_generation,
+                stale_local_generation = %old_generation,
+                error = %error,
+                "cloud archive committed a new generation but the local settings commit failed; \
+                 the next successful sync adopts the remote generation to repair the mismatch"
+            );
+            return Err(AppError::Configuration(format!(
+                "云端存档已提交新代次，但本地设置写入失败：{error}；下次成功同步会自动校正代次，请重试同步"
+            )));
+        }
 
         let new_engine = SyncEngine::new_protected_with_policy(
             self.sync_store.clone(),
@@ -1331,13 +1365,43 @@ impl AppService {
             .delete(&device_path)
             .await
             .map_err(map_cloud_error)?;
-        self.sync_store
-            .remove_remote_cursor(&settings.cloud_sync.generation_id, &device_id)
-            .await?;
+        // SVC-7: the remote device is already gone, so a cursor cleanup failure
+        // must be retried and then reported instead of silently leaving a stale
+        // sync_remote_cursors row that would skew the next pull window.
+        let mut cursor_error = None;
+        for attempt in 0..3 {
+            match self
+                .sync_store
+                .remove_remote_cursor(&settings.cloud_sync.generation_id, &device_id)
+                .await
+            {
+                Ok(()) => {
+                    cursor_error = None;
+                    break;
+                }
+                Err(error) => {
+                    cursor_error = Some(error);
+                    if attempt + 1 < 3 {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                }
+            }
+        }
+        if let Some(error) = cursor_error {
+            return Err(AppError::InvalidData(format!(
+                "远端设备记录已删除，但本地同步游标清理失败：{error}；请先重试同步以校正拉取游标"
+            )));
+        }
         let devices = self
             .remote_devices(backend.as_ref(), &settings.cloud_sync, &local)
             .await?;
-        self.mark_cloud_success(devices).await;
+        // SVC-7: deleting a single device record is not a cloud sync success —
+        // only refresh the device list and leave state/timestamps/errors as
+        // they are instead of calling mark_cloud_success.
+        {
+            let mut runtime = self.cloud_sync_runtime.write().await;
+            runtime.devices = devices;
+        }
         Ok(self.cloud_sync_status().await)
     }
 
@@ -1772,6 +1836,12 @@ impl AppService {
     }
 
     pub async fn move_data_directory(&self, directory: &Path) -> Result<()> {
+        self.ensure_writable()?;
+        // SVC-5: the destination probe and the VACUUM snapshot must run inside
+        // the same sync_gate critical section. Checking the destination before
+        // taking the gate lets two concurrent moves both pass the probe and
+        // makes the loser fail inside VACUUM with an opaque SQLite error.
+        let _guard = self.sync_gate.lock().await;
         tokio::fs::create_dir_all(directory).await?;
         let destination = directory.join("chat_memory.db");
         if destination.exists() {
@@ -1779,7 +1849,6 @@ impl AppService {
                 "目标目录中已存在 chat_memory.db，请选择其他目录".into(),
             ));
         }
-        let _guard = self.sync_gate.lock().await;
         sqlx::query("VACUUM INTO ?")
             .bind(destination.to_string_lossy().as_ref())
             .execute(&self.pool)
