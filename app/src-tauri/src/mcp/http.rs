@@ -125,7 +125,7 @@ async fn authorize_mcp(
         }
         res.headers_mut().insert(
             "access-control-allow-methods",
-            HeaderValue::from_static("GET, POST, OPTIONS"),
+            HeaderValue::from_static("GET, POST, DELETE, OPTIONS"),
         );
         res.headers_mut().insert(
             "access-control-allow-headers",
@@ -151,6 +151,10 @@ async fn authorize_mcp(
 }
 
 /// Build the MCP Axum router: `GET /health` + Streamable HTTP at `/mcp`.
+///
+/// stateful 模式：initialize 下发 `Mcp-Session-Id`，GET 打开 SSE 长连接，
+/// DELETE 终止会话。GET/DELETE 与 POST 一样受 secret + Origin fail-closed
+/// 约束（见 `mcp_rejection_reason`），浏览器预检仍仅放行白名单 Origin。
 pub fn build_mcp_router(app_service: AppService) -> Router {
     let service = StreamableHttpService::new(
         {
@@ -159,8 +163,8 @@ pub fn build_mcp_router(app_service: AppService) -> Router {
         },
         Arc::new(LocalSessionManager::default()),
         StreamableHttpServerConfig::default()
-            .with_stateful_mode(false)
-            .with_json_response(true),
+            .with_stateful_mode(true)
+            .with_json_response(false),
     );
 
     Router::new()
@@ -183,7 +187,7 @@ async fn health() -> Json<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{McpRejection, health, mcp_rejection_reason};
+    use super::{McpRejection, build_mcp_router, health, mcp_rejection_reason};
     use crate::local_services::{
         LocalServiceId, LocalServiceManager, LocalServiceSpec, LocalServiceStatus,
     };
@@ -337,5 +341,250 @@ mod tests {
             ),
             Some(McpRejection::Disabled)
         );
+        // stateful SSE：DELETE 与 GET 长连接同样受 fail-closed 约束
+        assert_eq!(
+            mcp_rejection_reason(
+                &AppSettings::default(),
+                Method::DELETE,
+                Some("https://chat.example.com"),
+                Some("x")
+            ),
+            Some(McpRejection::Disabled)
+        );
+    }
+
+    #[test]
+    fn mcp_rejects_sse_get_and_delete_without_secret() {
+        let settings = mcp_settings(None);
+        for method in [Method::GET, Method::DELETE] {
+            assert_eq!(
+                mcp_rejection_reason(&settings, method.clone(), None, None),
+                Some(McpRejection::MissingSecret),
+                "{method} must require secret"
+            );
+            assert_eq!(
+                mcp_rejection_reason(&settings, method.clone(), None, Some("wrong")),
+                Some(McpRejection::MissingSecret),
+                "{method} must reject wrong secret"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_rejects_sse_get_and_delete_from_non_whitelisted_origin() {
+        let mut settings = mcp_settings(Some("s3cret"));
+        settings.allowed_origins = vec!["https://chat.example.com".into()];
+        for method in [Method::GET, Method::DELETE] {
+            assert_eq!(
+                mcp_rejection_reason(
+                    &settings,
+                    method.clone(),
+                    Some("https://evil.example.com"),
+                    Some("s3cret")
+                ),
+                Some(McpRejection::OriginNotAllowed),
+                "{method} must reject non-whitelisted origin"
+            );
+            assert_eq!(
+                mcp_rejection_reason(
+                    &settings,
+                    method.clone(),
+                    Some("https://chat.example.com"),
+                    Some("s3cret")
+                ),
+                None,
+                "{method} with valid secret and whitelisted origin must pass"
+            );
+        }
+    }
+
+    /// stateful SSE 全生命周期：initialize 下发 session id → GET SSE 长连接 →
+    /// 缺失/未知 session 的拒绝 → DELETE 终止 → 热停机重建后旧 id 失效。
+    #[tokio::test]
+    async fn mcp_stateful_sse_lifecycle_via_manager() {
+        use crate::mcp::test_support::test_app_service;
+
+        const SSE_TEST_PORT: u16 = 19992; // 避免与健康探测的 19991 并发冲突
+        let (app_service, _data_dir) = test_app_service().await;
+        let rotated = app_service.rotate_secret().await.unwrap();
+        let secret = rotated.secret.expect("rotate_secret stores a secret");
+
+        let manager = LocalServiceManager::new();
+        let build_service = app_service.clone();
+        manager
+            .register(LocalServiceSpec {
+                id: LocalServiceId::Mcp,
+                bind: SocketAddr::from(([127, 0, 0, 1], SSE_TEST_PORT)),
+                build: Arc::new(move || build_mcp_router(build_service.clone())),
+            })
+            .await;
+        manager.apply_desired(LocalServiceId::Mcp, true).await;
+
+        let base = format!("http://127.0.0.1:{SSE_TEST_PORT}");
+        let client = reqwest::Client::new();
+        const DUAL_ACCEPT: &str = "application/json, text/event-stream";
+        const SSE_ACCEPT: &str = "text/event-stream";
+
+        // initialize：POST 创建会话，响应头下发 Mcp-Session-Id，响应体为 SSE 流
+        let init_body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "mcp-test", "version": "0.0.0"}
+            }
+        });
+        let response = client
+            .post(format!("{base}/mcp"))
+            .header("x-ai-chat-memory-secret", &secret)
+            .header("accept", DUAL_ACCEPT)
+            .header("content-type", "application/json")
+            .body(init_body.to_string())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 200, "initialize must succeed");
+        let session_id = response
+            .headers()
+            .get("mcp-session-id")
+            .expect("stateful initialize must issue mcp-session-id")
+            .to_str()
+            .unwrap()
+            .to_string();
+        let body = read_sse_until(response, "\"id\":1").await;
+        assert!(body.contains("ai-chat-memory"), "{body}");
+
+        // initialized 通知（带 session id）
+        let notification = client
+            .post(format!("{base}/mcp"))
+            .header("x-ai-chat-memory-secret", &secret)
+            .header("mcp-session-id", &session_id)
+            .header("accept", DUAL_ACCEPT)
+            .header("content-type", "application/json")
+            .body(
+                serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"})
+                    .to_string(),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert!(notification.status().is_success());
+
+        // GET 打开 SSE 长连接 → 200 + text/event-stream + 首个事件
+        let sse = client
+            .get(format!("{base}/mcp"))
+            .header("x-ai-chat-memory-secret", &secret)
+            .header("mcp-session-id", &session_id)
+            .header("accept", SSE_ACCEPT)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(sse.status(), 200);
+        let content_type = sse
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            content_type.starts_with("text/event-stream"),
+            "unexpected content-type: {content_type}"
+        );
+        let mut stream = sse;
+        let first_chunk = tokio::time::timeout(Duration::from_secs(5), stream.chunk())
+            .await
+            .expect("GET SSE must emit priming event promptly")
+            .unwrap()
+            .expect("GET SSE stream must not be empty");
+        assert!(!first_chunk.is_empty());
+        drop(stream);
+
+        // 缺失 session id → 400；未知 session id → 404
+        let missing_session = client
+            .get(format!("{base}/mcp"))
+            .header("x-ai-chat-memory-secret", &secret)
+            .header("accept", SSE_ACCEPT)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(missing_session.status(), 400);
+        let unknown_session = client
+            .get(format!("{base}/mcp"))
+            .header("x-ai-chat-memory-secret", &secret)
+            .header("mcp-session-id", "does-not-exist")
+            .header("accept", SSE_ACCEPT)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(unknown_session.status(), 404);
+
+        // 断线重连：带 Last-Event-ID 的 resume 路径返回 200
+        //（本服务当前不推送 server 主动通知，重放内容为空，仅验证链路不报错）
+        let resumed = client
+            .get(format!("{base}/mcp"))
+            .header("x-ai-chat-memory-secret", &secret)
+            .header("mcp-session-id", &session_id)
+            .header("accept", SSE_ACCEPT)
+            .header("last-event-id", "0")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resumed.status(), 200);
+        drop(resumed);
+
+        // DELETE 终止会话 → 旧 id 一律 404
+        let deleted = client
+            .delete(format!("{base}/mcp"))
+            .header("x-ai-chat-memory-secret", &secret)
+            .header("mcp-session-id", &session_id)
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            deleted.status().is_success(),
+            "DELETE must terminate session"
+        );
+        let after_delete = client
+            .get(format!("{base}/mcp"))
+            .header("x-ai-chat-memory-secret", &secret)
+            .header("mcp-session-id", &session_id)
+            .header("accept", SSE_ACCEPT)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(after_delete.status(), 404);
+
+        // 热停机重建：LocalSessionManager 随路由重建，旧 session id 失效，
+        // 客户端按规范以 404 为信号重走 initialize。
+        manager.apply_desired(LocalServiceId::Mcp, false).await;
+        manager.apply_desired(LocalServiceId::Mcp, true).await;
+        let stale_after_restart = client
+            .get(format!("{base}/mcp"))
+            .header("x-ai-chat-memory-secret", &secret)
+            .header("mcp-session-id", &session_id)
+            .header("accept", SSE_ACCEPT)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(stale_after_restart.status(), 404);
+
+        manager.apply_desired(LocalServiceId::Mcp, false).await;
+    }
+
+    /// 读取 SSE 流直到出现目标片段（限时）；POST 响应流在交付结果后保持打开，
+    /// 因此不能整块 `.text()` 等待流结束。
+    async fn read_sse_until(mut response: reqwest::Response, needle: &str) -> String {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut buffer = String::new();
+        while !buffer.contains(needle) {
+            let chunk = match tokio::time::timeout_at(deadline, response.chunk()).await {
+                Ok(Ok(Some(chunk))) => chunk,
+                _ => break,
+            };
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+        }
+        buffer
     }
 }

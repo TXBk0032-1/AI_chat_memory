@@ -542,78 +542,10 @@ fn normalize_search_dates(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database;
-    use crate::models::EmbeddingBackendKind;
-    use crate::service::AppService;
-    use crate::settings::SettingsStore;
+    use crate::mcp::test_support::test_app_service;
     use chrono::{Local, TimeZone, Timelike};
     use rmcp::ServiceExt;
-    use std::sync::Arc;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
-    /// MCP 协议测试夹具：独立临时库 + Ollama 语义后端（构造期零网络/零 CUDA）。
-    async fn test_app_service() -> (AppService, std::path::PathBuf) {
-        let data_dir =
-            std::env::temp_dir().join(format!("ai-chat-memory-mcp-test-{}", uuid::Uuid::new_v4()));
-        let pool = database::connect(&data_dir.join("chat_memory.db"))
-            .await
-            .unwrap();
-        sqlx::query(
-            "INSERT INTO sessions (id, platform, platform_session_id, title, raw_data)
-             VALUES ('seed-session', 'deepseek', 'seed-1', 'Rust 异步编程讨论', '{}')",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO messages (id, session_id, role, content, metadata, seq)
-             VALUES ('seed-m1', 'seed-session', 'user', '如何理解 Rust 的 async/await？', '{}', 0)",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        sqlx::query(
-            "INSERT INTO messages (id, session_id, role, content, metadata, seq)
-             VALUES ('seed-m2', 'seed-session', 'assistant', 'async/await 是零开销抽象。', '{}', 1)",
-        )
-        .execute(&pool)
-        .await
-        .unwrap();
-        // keyword 检索走 session_fts（仅 import 路径维护），夹具需手动补 FTS 行。
-        sqlx::query("INSERT INTO session_fts_ids(session_id) VALUES ('seed-session')")
-            .execute(&pool)
-            .await
-            .unwrap();
-        let fts_rowid: i64 =
-            sqlx::query_scalar("SELECT fts_rowid FROM session_fts_ids WHERE session_id = ?")
-                .bind("seed-session")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        sqlx::query(
-            "INSERT INTO session_fts(rowid, session_id, title, content) VALUES (?, ?, ?, ?)",
-        )
-        .bind(fts_rowid)
-        .bind("seed-session")
-        .bind("Rust 异步编程讨论")
-        .bind("如何理解 Rust 的 async/await？\nasync/await 是零开销抽象。")
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        let settings = Arc::new(
-            SettingsStore::load(data_dir.join("settings.json"))
-                .await
-                .unwrap(),
-        );
-        let mut settings_value = settings.get().await;
-        settings_value.semantic_search.backend = EmbeddingBackendKind::Ollama;
-        settings.update(settings_value.clone()).await.unwrap();
-        let service = AppService::new(pool, settings, data_dir.clone())
-            .await
-            .unwrap();
-        (service, data_dir)
-    }
 
     fn prompt_text(result: &GetPromptResult) -> &str {
         match &result.messages[0].content {
