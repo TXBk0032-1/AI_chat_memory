@@ -67,10 +67,17 @@ export function isImageExportTooLarge(width: number, height: number): boolean {
     || outputWidth * outputHeight > exportImageMaxArea
 }
 
+// Numeric timestamps above this magnitude are already in milliseconds; anything
+// smaller is treated as seconds and scaled. Matches the heuristic used by
+// formatDate in i18n/locale.ts so both stay consistent for the same values.
+const millisecondsTimestampThreshold = 1e11
+
 export function exportDate(value: string | undefined, fallback = new Date()): string {
   if (!value) return localDate(fallback)
   const numeric = Number(value)
-  const date = Number.isFinite(numeric) ? new Date(numeric * 1000) : new Date(value)
+  const date = Number.isFinite(numeric)
+    ? new Date(Math.abs(numeric) > millisecondsTimestampThreshold ? numeric : numeric * 1000)
+    : new Date(value)
   return Number.isNaN(date.valueOf()) ? localDate(fallback) : localDate(date)
 }
 

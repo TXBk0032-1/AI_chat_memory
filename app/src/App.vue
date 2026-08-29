@@ -60,7 +60,8 @@ import {
 } from './conversation-export'
 import { branchMessageSeqs, branchReadingIndex, filterBranchMatches } from './branch-overview'
 import { loadSidebarCollapsed, saveSidebarCollapsed } from './sidebar'
-import { desktopApi, type ApiStatus, type CloudConnectionTestResult, type CloudCredentialInput, type CloudSyncSettings, type SettingsModel } from './desktop-api'
+import { desktopApi, type CloudConnectionTestResult, type CloudCredentialInput, type CloudSyncSettings, type SettingsModel } from './desktop-api'
+import { useApiStatus } from './composables/useApiStatus'
 import { useSessionCatalog } from './composables/useSessionCatalog'
 import { usePaneResize } from './composables/usePaneResize'
 import { useTheme } from './composables/useTheme'
@@ -72,6 +73,9 @@ import { useConversationSearch } from './composables/useConversationSearch'
 import { useSessionDetail } from './composables/useSessionDetail'
 import { useMermaidRenderer } from './composables/useMermaidRenderer'
 import { useLocale } from './composables/useLocale'
+import { createControlClickGuard } from './click-guard'
+import { createThemeRerenderScheduler } from './theme-rerender'
+import { runAppStartup } from './desktop-startup'
 import { initializeAppSettings } from './app-settings-initialization'
 import { currentLocale, translate as t } from './i18n'
 import { formatDate as localizedDate } from './i18n/locale'
@@ -110,15 +114,12 @@ const cloudSyncActiveProfile = ref<CloudSyncSettings | null>(null)
 function cloneCloudSyncSettings(value: CloudSyncSettings): CloudSyncSettings {
   return { ...value, s3: { ...value.s3 } }
 }
-const apiStatus = ref<ApiStatus>({ service: { state: 'starting' }, userscript_connected: false, mcp: { state: 'stopped' }, mcp_url: 'http://127.0.0.1:19821/mcp' })
+const { apiStatus, refreshApiStatus, startStatusPolling, dispose: disposeApiStatus } = useApiStatus()
 const contextMenu = ref({ visible: false, x: 0, y: 0, selectedText: '', key: 0 })
 const sidebarCollapsed = ref(loadSidebarCollapsed())
-const clickDebounceMs = 250
-let statusTimer: number | undefined
 let unlistenCloseRequest: UnlistenFn | undefined
 let readingPositionTimer: number | undefined
 let exportPreviewGeneration = 0
-const lastControlClicks = new WeakMap<Element, number>()
 const detail = useSessionDetail(desktopApi)
 const {
   selected,
@@ -130,13 +131,7 @@ const {
   ensureMessagesLoaded,
 } = detail
 const { sessionPaneWidth, resizingPanes, startPaneResize, resizePanes, stopPaneResize } = usePaneResize()
-const theme = useTheme(settings, (animate) => {
-  resetMermaid()
-  window.setTimeout(() => {
-    document.querySelectorAll<HTMLElement>('.mermaid-diagram').forEach((element) => element.removeAttribute('data-rendered'))
-    void renderMermaidDiagrams()
-  }, animate ? 180 : 0)
-})
+const theme = useTheme(settings, (animate) => { scheduleThemeRerender.schedule(animate) })
 const { effectiveTheme, commitTheme, previewTheme, previewThemeId } = theme
 const locale = useLocale((value) => desktopApi.setNativeLocale(value))
 const { applyPreference, previewLanguage } = locale
@@ -145,6 +140,9 @@ const {
   renderExportMermaidDiagrams,
   reset: resetMermaid,
 } = useMermaidRenderer(effectiveTheme)
+// Theme-switch Mermaid re-renders are serialized: a pending re-render is
+// replaced instead of stacking timers on rapid theme previews (FE-18).
+const scheduleThemeRerender = createThemeRerenderScheduler(resetMermaid, renderMermaidDiagrams)
 const { toasts, showToast, disposeToasts } = useToastQueue()
 const branches = useBranchNavigation(selected, desktopApi)
 const {
@@ -712,33 +710,9 @@ function toggleDetailMenu() {
   showDetailMenu.value = !showDetailMenu.value
 }
 
-function preventRapidControlClick(event: MouseEvent) {
-  const target = event.target instanceof Element ? event.target : null
-  const control = target?.closest('button, a[href], select, .switch, .close-options label, [role="button"], [role="menuitem"], [role="radio"]')
-  const now = performance.now()
-  if (control) {
-    const tagInfo = `${control.tagName.toLowerCase()}${control.className ? '.' + String(control.className).trim().replace(/\s+/g, '.') : ''}`
-    // Navigation items, tabs, and list rows must never be swallowed by click debouncing
-    const isNavigation = control.closest('.session-pane, .sidebar, .segmented-control, .source-picker, .nav-item') !== null
-    if (isNavigation) {
-      console.log(`%c[PERF:CLICK:NAV] Click on <${tagInfo}> (navigation, debounce bypassed)`, 'color: #16a34a')
-      return
-    }
-    const previous = lastControlClicks.get(control) ?? -Infinity
-    const diff = now - previous
-    if (diff < clickDebounceMs) {
-      console.warn(`%c[PERF:CLICK:DEBOUNCED] Click on <${tagInfo}> intercepted (${diff.toFixed(2)}ms < ${clickDebounceMs}ms debounce)`, 'color: #ea580c; font-weight: bold')
-      event.preventDefault()
-      event.stopImmediatePropagation()
-      return
-    }
-    console.log(`%c[PERF:CLICK:PASS] Click on <${tagInfo}> (interval: ${diff === Infinity ? 'first' : diff.toFixed(2) + 'ms'})`, 'color: #16a34a')
-    lastControlClicks.set(control, now)
-  } else if (target) {
-    const tagInfo = `${target.tagName.toLowerCase()}${target.className ? '.' + String(target.className).trim().replace(/\s+/g, '.') : ''}`
-    console.debug(`[PERF:CLICK:NON_CONTROL] Click on <${tagInfo}> at (${event.clientX}, ${event.clientY})`)
-  }
-}
+// Swallows only mechanical duplicate clicks on actionable controls within a
+// short window; legitimate repeat clicks and navigation stay untouched (FE-17).
+const preventRapidControlClick = createControlClickGuard()
 
 function handleContextMenu(event: MouseEvent) {
   event.preventDefault()
@@ -762,7 +736,14 @@ function handleContextMenu(event: MouseEvent) {
 
 async function copyContextSelection() {
   if (!contextMenu.value.selectedText) return
-  await navigator.clipboard.writeText(contextMenu.value.selectedText)
+  try {
+    await navigator.clipboard.writeText(contextMenu.value.selectedText)
+  } catch {
+    // Clipboard access can be denied; surface the failure instead of an
+    // unhandled promise rejection.
+    showToast(t('app.copyFailed'))
+    return
+  }
   hideContextMenu()
 }
 
@@ -788,11 +769,11 @@ async function openMarkdownLink(event: MouseEvent) {
   const link = (event.target as HTMLElement).closest<HTMLAnchorElement>('a.reference-link')
   if (!link || !/^https?:\/\//i.test(link.href)) return
   event.preventDefault()
-  await openUrl(link.href)
-}
-
-async function refreshApiStatus() {
-  apiStatus.value = await desktopApi.getApiStatus()
+  try {
+    await openUrl(link.href)
+  } catch {
+    showToast(t('app.openLinkFailed'))
+  }
 }
 
 function formatDate(value?: string, compact = false) {
@@ -832,25 +813,29 @@ onMounted(async () => {
   document.addEventListener('click', preventRapidControlClick, true)
   document.addEventListener('scroll', hideContextMenu, true)
 
-  // Kick off the first session list immediately so the shell is never empty while
-  // settings / API status catch up in parallel.
-  const sessionsReady = loadSessions()
-  const settingsReady = initializeAppSettings({
-    initialSettings: props.initialSettings,
-    loadSettings: () => desktopApi.getSettings(),
-    applyPreference,
-    applySettings(value) {
-      settings.value = value
-      searchMode.value = value.semantic_search?.default_mode || 'hybrid'
-      commitTheme(value.theme, value.light_theme_id, value.dark_theme_id, false)
-    },
+  // Startup pipeline: persisted settings are applied before the first session
+  // list load so it observes the saved search mode, while the close-behavior
+  // subscription and API status poll stay independent of each other and of a
+  // settings failure (FE-6, FE-7).
+  unlistenCloseRequest = await runAppStartup({
+    settingsReady: initializeAppSettings({
+      initialSettings: props.initialSettings,
+      loadSettings: () => desktopApi.getSettings(),
+      applyPreference,
+      applySettings(value) {
+        settings.value = value
+        searchMode.value = value.semantic_search?.default_mode || 'hybrid'
+        commitTheme(value.theme, value.light_theme_id, value.dark_theme_id, false)
+      },
+    }),
+    subscribeCloseBehavior: () => listen('close-behavior-requested', () => {
+      pendingCloseBehavior.value = null
+      showClosePrompt.value = true
+    }),
+    loadSessions,
+    refreshApiStatus,
+    startStatusPolling,
   })
-  unlistenCloseRequest = await listen('close-behavior-requested', () => {
-    pendingCloseBehavior.value = null
-    showClosePrompt.value = true
-  })
-  await Promise.allSettled([settingsReady, refreshApiStatus(), sessionsReady])
-  statusTimer = window.setInterval(() => { void refreshApiStatus().catch(() => {}) }, 3000)
 })
 watch([expandedThinking, detailMode], () => { void renderMermaidDiagrams() }, { flush: 'post' })
 watch(committedQuery, () => {
@@ -868,10 +853,11 @@ onBeforeUnmount(() => {
   detail.dispose()
   branches.reset()
   theme.dispose()
+  scheduleThemeRerender.dispose()
   window.removeEventListener('keydown', handleContextMenuKey)
   document.removeEventListener('click', preventRapidControlClick, true)
   document.removeEventListener('scroll', hideContextMenu, true)
-  window.clearInterval(statusTimer)
+  disposeApiStatus()
   cloudSync.dispose()
   disposeSettings()
   disposeToasts()

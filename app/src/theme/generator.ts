@@ -69,10 +69,13 @@ export function createThemeColors(
     colors['--color-primary-text'] = colors['--color-primary-dark-100'] || normPrimary
   }
 
-  // Merge extInfo overrides
+  // Merge extInfo additions. Keys generated above (primary scale, font scale,
+  // semantic tokens) are never overridden: the theme editor echoes previously
+  // captured extInfo back verbatim, so letting it carry generated keys would
+  // desync the editor's primaryColor from the effective --color-primary scale.
   if (extInfo) {
     for (const [key, value] of Object.entries(extInfo)) {
-      if (value !== undefined) {
+      if (value !== undefined && !Object.prototype.hasOwnProperty.call(colors, key)) {
         colors[key] = value
       }
     }

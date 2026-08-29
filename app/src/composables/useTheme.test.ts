@@ -138,4 +138,35 @@ describe('useTheme composable', () => {
     expect(settings.value.custom_themes).toHaveLength(0)
     expect(settings.value.dark_theme_id).toBe('black')
   })
+
+  it('reschedules the theme-transition cleanup instead of stacking timers (FE-18)', () => {
+    vi.useFakeTimers()
+    // Force the manual transition path even if startViewTransition is available.
+    const documentAny = document as Omit<Document, 'startViewTransition'> & { startViewTransition?: unknown }
+    const originalStartViewTransition = documentAny.startViewTransition
+    documentAny.startViewTransition = undefined
+    try {
+      const settings = ref(createTestSettings())
+      const theme = useTheme(settings, vi.fn())
+      const removeSpy = vi.spyOn(document.documentElement.classList, 'remove')
+
+      theme.previewTheme('light', 'blue', 'black')
+      theme.previewTheme('dark', 'blue', 'dark_blue')
+      expect(document.documentElement.classList.contains('theme-transition')).toBe(true)
+
+      // The second switch rescheduled the cleanup; the first timer was cleared.
+      vi.advanceTimersByTime(359)
+      expect(document.documentElement.classList.contains('theme-transition')).toBe(true)
+      vi.advanceTimersByTime(1)
+      expect(removeSpy).toHaveBeenCalledTimes(1)
+      expect(document.documentElement.classList.contains('theme-transition')).toBe(false)
+    } finally {
+      if (originalStartViewTransition) {
+        documentAny.startViewTransition = originalStartViewTransition
+      } else {
+        delete documentAny.startViewTransition
+      }
+      vi.useRealTimers()
+    }
+  })
 })

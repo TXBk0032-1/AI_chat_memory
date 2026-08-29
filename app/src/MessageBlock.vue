@@ -19,7 +19,9 @@ const props = defineProps<{
   roleLabel: string
 }>()
 
-const emit = defineEmits<{ toggleThinking: [messageId: string]; contentRendered: [] }>()
+const emit = defineEmits<{ toggleThinking: [messageId: string]; contentRendered: [root: HTMLElement] }>()
+
+const rootElement = ref<HTMLElement | null>(null)
 
 const fullContentMessageId = ref<string | null>(null)
 const oversizedContent = computed(() => isOversizedMessage(props.message.content))
@@ -73,19 +75,31 @@ function handleBlockClick(event: MouseEvent) {
   const codeElement = wrapper?.querySelector('pre code')
   if (!codeElement) return
   const text = codeElement.textContent || ''
-  void navigator.clipboard.writeText(text).then(() => {
+  const copyText = button.querySelector('.copy-text')
+  const resetButton = () => {
+    button.classList.remove('copied', 'copy-failed')
+    if (copyText) copyText.textContent = t('app.copy')
+  }
+  navigator.clipboard.writeText(text).then(() => {
     button.classList.add('copied')
-    const copyText = button.querySelector('.copy-text')
-    if (copyText) copyText.textContent = t('mcp.copied')
-    window.setTimeout(() => {
-      button.classList.remove('copied')
-      if (copyText) copyText.textContent = t('app.copy')
-    }, 2000)
+    if (copyText) copyText.textContent = t('settings.copied')
+    window.setTimeout(resetButton, 2000)
+  }, () => {
+    // Clipboard access can be denied (window unfocused, permission refused);
+    // surface the failure on the button instead of an unhandled rejection.
+    button.classList.add('copy-failed')
+    if (copyText) copyText.textContent = t('app.copyFailed')
+    window.setTimeout(resetButton, 2000)
   })
 }
 
 function notifyRendered() {
-  void nextTick(() => emit('contentRendered'))
+  void nextTick(() => {
+    // Scope the notification to this block so the parent renders Mermaid
+    // diagrams inside this message only, instead of scanning the whole
+    // document on every mount while the virtual list scrolls.
+    if (rootElement.value) emit('contentRendered', rootElement.value)
+  })
 }
 
 onMounted(notifyRendered)
@@ -96,7 +110,7 @@ watch([contentHtml, thinkingHtml], notifyRendered)
 </script>
 
 <template>
-  <article :data-message-id="message.id" :class="['message-block', message.role]" @click="handleBlockClick">
+  <article ref="rootElement" :data-message-id="message.id" :class="['message-block', message.role]" @click="handleBlockClick">
     <div class="message-author"><span>{{ roleLabel }}</span><time>{{ formattedDate }}</time></div>
     <section v-if="thinking" :class="['thinking', { open: expanded }]">
       <button class="thinking-toggle" :aria-expanded="expanded" @click="$emit('toggleThinking', message.id)">{{ t('message.showThinking') }}</button>

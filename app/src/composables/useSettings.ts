@@ -107,8 +107,15 @@ export function useSettings(
 
   async function copySecret() {
     if (!settings.value.secret) return
-    await navigator.clipboard.writeText(settings.value.secret)
-    secretCopied.value = true
+    try {
+      await navigator.clipboard.writeText(settings.value.secret)
+      secretCopied.value = true
+    } catch (reason) {
+      // Clipboard access can be denied; surface the failure instead of an
+      // unhandled promise rejection.
+      error.value = t('app.copyFailed')
+      console.error('[SETTINGS] Failed to copy secret:', reason)
+    }
   }
 
   async function changeDataDirectory() {
@@ -361,7 +368,13 @@ export function useSettings(
     clearMcpConfigCopiedTimer()
     const url = settingsApiStatus.value?.mcp_url
     const secret = settings.value.secret_enabled ? settings.value.secret : undefined
-    await navigator.clipboard.writeText(url ? buildMcpClientConfig(url, secret) : buildMcpClientConfig(undefined, secret))
+    try {
+      await navigator.clipboard.writeText(url ? buildMcpClientConfig(url, secret) : buildMcpClientConfig(undefined, secret))
+    } catch (reason) {
+      error.value = t('app.copyFailed')
+      console.error('[SETTINGS] Failed to copy MCP client configuration:', reason)
+      return
+    }
     mcpConfigCopied.value = true
     mcpConfigCopiedTimer = window.setTimeout(() => {
       mcpConfigCopied.value = false

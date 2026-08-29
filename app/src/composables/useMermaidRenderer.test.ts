@@ -64,4 +64,72 @@ describe('Mermaid rendering', () => {
     expect(exportElement.innerHTML).toBe('<svg>export</svg>')
     expect(appElement.innerHTML).toBe('<svg>app</svg>')
   })
+
+  it('parks in-app renders until an in-flight export restores the app instance (FE-11)', async () => {
+    let releaseExport!: (value: { svg: string }) => void
+    const exportGate = new Promise<{ svg: string }>((resolve) => { releaseExport = resolve })
+    const exportElement = diagram()
+    const appElement = diagram('graph TD\nB-->C')
+    mermaid.render
+      .mockImplementationOnce(() => exportGate)
+      .mockResolvedValueOnce({ svg: '<svg>app</svg>' })
+    const root = { querySelectorAll: vi.fn(() => [exportElement]) } as unknown as HTMLElement
+
+    const renderer = useMermaidRenderer(() => 'dark')
+    const exportPromise = renderer.renderExportMermaidDiagrams(root)
+    vi.stubGlobal('document', { querySelectorAll: vi.fn(() => [appElement]) })
+    let appRendered = false
+    const appPromise = renderer.renderMermaidDiagrams().then(() => { appRendered = true })
+
+    // Drain pending microtasks: the app render must stay parked while the
+    // export render still holds the shared instance.
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(appRendered).toBe(false)
+    expect(appElement.innerHTML).toBe('')
+
+    releaseExport({ svg: '<svg>export</svg>' })
+    await Promise.all([exportPromise, appPromise])
+
+    expect(appRendered).toBe(true)
+    expect(exportElement.innerHTML).toBe('<svg>export</svg>')
+    expect(appElement.innerHTML).toBe('<svg>app</svg>')
+    // The app render re-initialized the shared instance with the app theme,
+    // not the neutral export theme.
+    expect(mermaid.initialize).toHaveBeenLastCalledWith(expect.objectContaining({ theme: 'dark' }))
+  })
+
+  it('restores the app instance when the export render fails (FE-11)', async () => {
+    mermaid.initialize.mockImplementationOnce(() => {
+      throw new Error('export init failed')
+    })
+    const appElement = diagram()
+    mermaid.render.mockResolvedValueOnce({ svg: '<svg>app</svg>' })
+    vi.stubGlobal('document', { querySelectorAll: vi.fn(() => [appElement]) })
+
+    const renderer = useMermaidRenderer(() => 'dark')
+    await expect(renderer.renderExportMermaidDiagrams({ querySelectorAll: vi.fn(() => []) } as unknown as HTMLElement)).rejects.toThrow('export init failed')
+    await renderer.renderMermaidDiagrams()
+
+    expect(appElement.innerHTML).toBe('<svg>app</svg>')
+    expect(mermaid.initialize).toHaveBeenLastCalledWith(expect.objectContaining({ theme: 'dark' }))
+  })
+
+  it('renders only the diagrams inside the provided root (FE-16)', async () => {
+    const scopedElement = diagram()
+    const root = { querySelectorAll: vi.fn(() => [scopedElement]) } as unknown as ParentNode
+    vi.stubGlobal('document', {
+      querySelectorAll: vi.fn(() => {
+        throw new Error('unexpected full document scan')
+      }),
+    })
+    mermaid.render.mockResolvedValueOnce({ svg: '<svg>scoped</svg>' })
+
+    const renderer = useMermaidRenderer(() => 'dark')
+    await renderer.renderMermaidDiagrams(root)
+
+    expect(root.querySelectorAll).toHaveBeenCalledWith('.mermaid-diagram:not([data-rendered])')
+    expect(document.querySelectorAll).not.toHaveBeenCalled()
+    expect(scopedElement.innerHTML).toBe('<svg>scoped</svg>')
+    expect(scopedElement.dataset.rendered).toBe('true')
+  })
 })

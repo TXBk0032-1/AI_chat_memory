@@ -8,6 +8,7 @@ export function useTheme(settings: Ref<SettingsModel>, onApplied: (animate: bool
   let savedPreference: ThemePreference = 'system'
   let savedLightId: string | undefined
   let savedDarkId: string | undefined
+  let themeTransitionTimer: number | undefined
 
   function effectiveTheme(preference = settings.value.theme): 'light' | 'dark' {
     return preference === 'system' ? (systemThemeQuery?.matches ? 'dark' : 'light') : preference
@@ -49,7 +50,13 @@ export function useTheme(settings: Ref<SettingsModel>, onApplied: (animate: bool
       document.documentElement.classList.add('theme-transition')
       void document.documentElement.offsetWidth
       apply()
-      window.setTimeout(() => document.documentElement.classList.remove('theme-transition'), 360)
+      // Track the cleanup timer so rapid consecutive switches reschedule the
+      // removal instead of stacking timers that cut the transition short.
+      if (themeTransitionTimer !== undefined) window.clearTimeout(themeTransitionTimer)
+      themeTransitionTimer = window.setTimeout(() => {
+        themeTransitionTimer = undefined
+        document.documentElement.classList.remove('theme-transition')
+      }, 360)
     } else {
       apply()
     }
@@ -144,6 +151,11 @@ export function useTheme(settings: Ref<SettingsModel>, onApplied: (animate: bool
 
   function dispose() {
     systemThemeQuery?.removeEventListener('change', handleSystemThemeChange)
+    if (themeTransitionTimer !== undefined) {
+      window.clearTimeout(themeTransitionTimer)
+      themeTransitionTimer = undefined
+    }
+    document.documentElement.classList.remove('theme-transition')
   }
 
   return {

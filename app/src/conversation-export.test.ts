@@ -100,6 +100,21 @@ describe('conversation export', () => {
     expect(() => encodeURIComponent(result)).not.toThrow()
   })
 
+  it('detects the timestamp magnitude so millisecond values do not overflow (FE-15)', () => {
+    // Local calendar day helper so the assertion is timezone independent.
+    const localDay = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
+    const moment = new Date(2023, 10, 14, 12, 30, 5)
+    const seconds = String(Math.floor(moment.getTime() / 1000))
+    const milliseconds = String(moment.getTime())
+    expect(exportDate(seconds)).toBe(localDay(new Date(Number(seconds) * 1000)))
+    expect(exportDate(milliseconds)).toBe(localDay(new Date(Number(milliseconds))))
+    expect(exportDate(seconds)).toBe(exportDate(milliseconds))
+    // ISO strings keep their previous behavior.
+    expect(exportDate('2023-11-14T10:00:00.000Z')).toBe(localDay(new Date('2023-11-14T10:00:00.000Z')))
+    // Negative (pre-epoch) seconds still scale by 1000.
+    expect(exportDate('-86400')).toBe(localDay(new Date(-86_400 * 1000)))
+  })
+
   it('detects image exports that exceed the canvas limits', () => {
     expect(isImageExportTooLarge(960, 10_000)).toBe(false)
     expect(isImageExportTooLarge(960, 16_384)).toBe(true)

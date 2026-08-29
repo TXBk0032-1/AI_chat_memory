@@ -48,6 +48,8 @@ const enUS = {
     selectConversation: 'Select a conversation',
     selectConversationHint: 'Message content will appear here',
     copy: 'Copy',
+    copyFailed: 'Copy failed',
+    openLinkFailed: 'Failed to open link',
     selectConversationContent: 'Select all conversation content',
     roleYou: 'You',
     roleAi: 'AI',

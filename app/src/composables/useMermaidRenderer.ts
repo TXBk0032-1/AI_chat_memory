@@ -19,6 +19,9 @@ export function safeDecodeURIComponent(value: string): string {
 }
 
 let exportSequence = 0
+// Set while an export render is in flight so in-app renders can wait for the
+// shared instance to be restored before touching it (FE-11).
+let exportCompletion: Promise<void> | null = null
 
 export function useMermaidRenderer(effectiveTheme: () => 'light' | 'dark') {
   let instance: typeof import('mermaid')['default'] | null = null
@@ -40,10 +43,15 @@ export function useMermaidRenderer(effectiveTheme: () => 'light' | 'dark') {
     instance = null
   }
 
-  async function renderMermaidDiagrams() {
+  async function renderMermaidDiagrams(root: ParentNode = document) {
     const version = ++renderVersion
     await nextTick()
-    const diagrams = [...document.querySelectorAll<HTMLElement>('.mermaid-diagram:not([data-rendered])')]
+    // An export render temporarily reconfigures the shared instance with the
+    // neutral export theme; wait for it to finish and restore the app state
+    // before rendering in-app diagrams.
+    await exportCompletion?.catch(() => {})
+    if (version !== renderVersion) return
+    const diagrams = [...root.querySelectorAll<HTMLElement>('.mermaid-diagram:not([data-rendered])')]
     if (!diagrams.length) return
     const t0 = performance.now()
     const mermaid = await loadMermaid()
@@ -68,28 +76,41 @@ export function useMermaidRenderer(effectiveTheme: () => 'light' | 'dark') {
 
   async function renderExportMermaidDiagrams(root: HTMLElement) {
     const version = ++exportRenderVersion
-    const mermaid = (await import('mermaid')).default
-    mermaid.initialize({ ...mermaidOptions, theme: 'neutral' })
-    const diagrams = [...root.querySelectorAll<HTMLElement>('.mermaid-diagram:not([data-rendered])')]
-    for (const [index, element] of diagrams.entries()) {
-      if (version !== exportRenderVersion) return
-      try {
-        const rawSource = safeDecodeURIComponent(element.dataset.mermaidSource || '')
-        const source = normalizeMermaidSource(rawSource)
-        if (!source) continue
-        const { svg } = await mermaid.render(`export-mermaid-${++exportSequence}-${index}`, source)
+    const completion = runExportRender(root, version)
+    exportCompletion = completion
+    await completion
+  }
+
+  async function runExportRender(root: HTMLElement, version: number) {
+    try {
+      const mermaid = (await import('mermaid')).default
+      mermaid.initialize({ ...mermaidOptions, theme: 'neutral' })
+      const diagrams = [...root.querySelectorAll<HTMLElement>('.mermaid-diagram:not([data-rendered])')]
+      for (const [index, element] of diagrams.entries()) {
         if (version !== exportRenderVersion) return
-        element.innerHTML = svg
-        element.dataset.rendered = 'true'
-      } catch (reason) {
-        if (version !== exportRenderVersion) return
-        element.classList.add('mermaid-error')
-        element.dataset.rendered = 'error'
-        element.title = String(reason)
+        try {
+          const rawSource = safeDecodeURIComponent(element.dataset.mermaidSource || '')
+          const source = normalizeMermaidSource(rawSource)
+          if (!source) continue
+          const { svg } = await mermaid.render(`export-mermaid-${++exportSequence}-${index}`, source)
+          if (version !== exportRenderVersion) return
+          element.innerHTML = svg
+          element.dataset.rendered = 'true'
+        } catch (reason) {
+          if (version !== exportRenderVersion) return
+          element.classList.add('mermaid-error')
+          element.dataset.rendered = 'error'
+          element.title = String(reason)
+        }
       }
-    }
-    if (version === exportRenderVersion) {
-      reset()
+    } finally {
+      if (version === exportRenderVersion) {
+        // Drop the shared instance so the next app render re-initializes it
+        // with the current app theme, on every exit path (success, error or
+        // superseded export). Without this, in-app diagrams rendered while the
+        // export held the neutral theme would stay neutral (FE-11).
+        reset()
+      }
     }
   }
 

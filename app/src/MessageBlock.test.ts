@@ -175,3 +175,68 @@ describe('MessageBlock oversized content', () => {
     }
   })
 })
+
+describe('MessageBlock rendered notifications and code copy (FE-16, FE-13)', () => {
+  function codeMessage(): Message {
+    return messageFixture({ content: '```js\nconsole.log("hi")\n```' })
+  }
+
+  function stubClipboard(writeText: () => Promise<void>) {
+    const clipboard = { writeText: vi.fn(writeText) }
+    const original = Object.getOwnPropertyDescriptor(Navigator.prototype, 'clipboard')
+    Object.defineProperty(globalThis.navigator, 'clipboard', { value: clipboard, configurable: true })
+    return {
+      clipboard,
+      restore() {
+        if (original) Object.defineProperty(Navigator.prototype, 'clipboard', original)
+        else delete (globalThis.navigator as { clipboard?: unknown }).clipboard
+      },
+    }
+  }
+
+  it('emits content-rendered scoped to its own root element (FE-16)', async () => {
+    const harness = mountMessage(codeMessage())
+    try {
+      await nextTick()
+      expect(harness.contentRendered).toHaveBeenCalled()
+      const root = harness.contentRendered.mock.calls[0][0] as HTMLElement
+      expect(root).toBeInstanceOf(HTMLElement)
+      expect(root.dataset.messageId).toBe('message-1')
+      expect(root.classList.contains('message-block')).toBe(true)
+    } finally {
+      harness.unmount()
+    }
+  })
+
+  it('shows success feedback when the code copy succeeds (FE-13)', async () => {
+    const stub = stubClipboard(() => Promise.resolve())
+    const harness = mountMessage(codeMessage())
+    try {
+      requiredElement<HTMLButtonElement>(harness.root, '.code-copy-button').click()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(stub.clipboard.writeText).toHaveBeenCalledWith('console.log("hi")\n')
+      const button = requiredElement<HTMLButtonElement>(harness.root, '.code-copy-button')
+      expect(button.classList.contains('copied')).toBe(true)
+      expect(button.querySelector('.copy-text')?.textContent).toBe('已复制')
+    } finally {
+      stub.restore()
+      harness.unmount()
+    }
+  })
+
+  it('reports a failed code copy instead of an unhandled rejection (FE-13)', async () => {
+    const stub = stubClipboard(() => Promise.reject(new DOMException('denied', 'NotAllowedError')))
+    const harness = mountMessage(codeMessage())
+    try {
+      requiredElement<HTMLButtonElement>(harness.root, '.code-copy-button').click()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      const button = requiredElement<HTMLButtonElement>(harness.root, '.code-copy-button')
+      expect(button.classList.contains('copied')).toBe(false)
+      expect(button.classList.contains('copy-failed')).toBe(true)
+      expect(button.querySelector('.copy-text')?.textContent).toBe('复制失败')
+    } finally {
+      stub.restore()
+      harness.unmount()
+    }
+  })
+})

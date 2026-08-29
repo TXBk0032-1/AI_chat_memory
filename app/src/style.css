@@ -260,6 +260,7 @@ i.deepseek { background: #5273e6; } i.doubao { background: #e36f53; } i.kimi { b
 .code-copy-button.copied { color: var(--color-primary-text, #55c49e); background: var(--color-primary-subtle, #233b34); }
 .code-copy-button.copied .copy-icon { display: none; }
 .code-copy-button.copied .check-icon { display: block; animation: copy-check-pop .24s cubic-bezier(.2, .9, .25, 1); }
+.code-copy-button.copy-failed { color: #e07856; background: #3a2a26; }
 @keyframes copy-check-pop { 0% { transform: scale(.6); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
 .markdown pre { margin: 0; overflow: auto; padding: 13px; border-radius: 4px; color: #e5e9eb; background: #242b30; }
 .code-block-wrapper pre { border-radius: 0; }
@@ -746,6 +747,7 @@ html[data-theme="dark"] .code-block-lang { color: #82929a; }
 html[data-theme="dark"] .code-copy-button { color: #82929a; }
 html[data-theme="dark"] .code-copy-button:hover { color: #edf1f2; background: #263138; }
 html[data-theme="dark"] .code-copy-button.copied { color: var(--color-primary-text, #82d2ba); background: var(--color-primary-subtle, #1c322b); }
+html[data-theme="dark"] .code-copy-button.copy-failed { color: #e8917a; background: #33262a; }
 html[data-theme="dark"] .settings-dialog > footer { border-color: #3b4347; background: #1f2427bd; }
 html[data-theme="dark"] .info-dialog > footer,
 html[data-theme="dark"] .delete-dialog > footer,

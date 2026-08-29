@@ -121,4 +121,47 @@ describe('useSettings', () => {
     clearIntervalSpy.mockRestore()
     unmount()
   })
+
+  it('surfaces a failed secret copy instead of an unhandled rejection (FE-13)', async () => {
+    const clipboard = { writeText: vi.fn().mockRejectedValue(new DOMException('denied', 'NotAllowedError')) }
+    vi.stubGlobal('navigator', { clipboard })
+    const settingsRef = ref(defaultSettings())
+    const { exposed, unmount } = mountComposable(settingsRef)
+    settingsRef.value.secret = 'secret-value'
+
+    await expect(exposed.copySecret()).resolves.toBeUndefined()
+    expect(clipboard.writeText).toHaveBeenCalledWith('secret-value')
+    expect(exposed.secretCopied.value).toBe(false)
+
+    unmount()
+    vi.unstubAllGlobals()
+  })
+
+  it('surfaces a failed MCP client configuration copy (FE-13)', async () => {
+    const clipboard = { writeText: vi.fn().mockRejectedValue(new DOMException('denied', 'NotAllowedError')) }
+    vi.stubGlobal('navigator', { clipboard })
+    const settingsRef = ref(defaultSettings())
+    const { exposed, unmount } = mountComposable(settingsRef)
+
+    await exposed.openSettings()
+    await expect(exposed.copyMcpConfig()).resolves.toBeUndefined()
+    expect(exposed.mcpConfigCopied.value).toBe(false)
+
+    unmount()
+    vi.unstubAllGlobals()
+  })
+
+  it('marks the secret as copied when the clipboard write succeeds (FE-13)', async () => {
+    const clipboard = { writeText: vi.fn().mockResolvedValue(undefined) }
+    vi.stubGlobal('navigator', { clipboard })
+    const settingsRef = ref(defaultSettings())
+    const { exposed, unmount } = mountComposable(settingsRef)
+    settingsRef.value.secret = 'secret-value'
+
+    await exposed.copySecret()
+    expect(exposed.secretCopied.value).toBe(true)
+
+    unmount()
+    vi.unstubAllGlobals()
+  })
 })

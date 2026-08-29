@@ -46,6 +46,8 @@ const zhCN = {
     selectConversation: '选择一条对话',
     selectConversationHint: '消息内容会显示在这里',
     copy: '复制',
+    copyFailed: '复制失败',
+    openLinkFailed: '无法打开链接',
     selectConversationContent: '全选对话内容',
     roleYou: '你',
     roleAi: 'AI',

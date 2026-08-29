@@ -78,6 +78,34 @@ export function expandSearchHits(hits: SearchHit[]): SearchMatch[] {
 
 let cachedPositions: Record<string, ReadingPosition> | null = null
 
+// Evicts the oldest half of the entries (by updatedAt) so a failing quota write
+// can be retried with a smaller payload. Returns null once only a single entry
+// remains, signalling that the write should be abandoned.
+export function evictOldestReadingPositions(positions: Record<string, ReadingPosition>): Record<string, ReadingPosition> | null {
+  const ordered = Object.entries(positions).sort((a, b) => b[1].updatedAt - a[1].updatedAt)
+  const keep = Math.max(1, Math.floor(ordered.length / 2))
+  if (keep >= ordered.length) return null
+  return Object.fromEntries(ordered.slice(0, keep))
+}
+
+function writeReadingPositions(positions: Record<string, ReadingPosition>): Record<string, ReadingPosition> | null {
+  let candidates = positions
+  for (;;) {
+    try {
+      localStorage.setItem(readingPositionKey, JSON.stringify(candidates))
+      return candidates
+    } catch {
+      // Quota pressure: shed the oldest entries and retry. The in-memory cache
+      // is never wiped wholesale on a failed write; when even the smallest
+      // payload does not fit, only this write is abandoned and the newest
+      // positions remain available in memory.
+      const reduced = evictOldestReadingPositions(candidates)
+      if (!reduced) return null
+      candidates = reduced
+    }
+  }
+}
+
 export function loadReadingPosition(sessionId: string): ReadingPosition | null {
   try {
     if (!cachedPositions) {
@@ -98,8 +126,9 @@ export function saveReadingPosition(sessionId: string, position: ReadingPosition
     }
     cachedPositions[sessionId] = position
     const entries = Object.entries(cachedPositions).sort((a, b) => b[1].updatedAt - a[1].updatedAt).slice(0, maxReadingPositions)
-    cachedPositions = Object.fromEntries(entries)
-    localStorage.setItem(readingPositionKey, JSON.stringify(cachedPositions))
+    const trimmed = Object.fromEntries(entries)
+    const persisted = writeReadingPositions(trimmed)
+    if (persisted) cachedPositions = persisted
   } catch {
     // Reading restoration is best-effort and must never block conversation rendering.
   }
