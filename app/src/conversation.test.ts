@@ -50,7 +50,7 @@ describe('conversation loading helpers', () => {
     expect(loadReadingPosition('session-new')?.seq).toBe(10)
   })
 
-  it('evicts the oldest half of the entries and reports exhaustion (FE-14)', () => {
+  it('evicts the oldest half of the entries and reports exhaustion', () => {
     const position = (updatedAt: number): ReadingPosition => ({ seq: updatedAt, offset: 0, updatedAt })
     const entries = {
       'session-a': position(1),
@@ -65,7 +65,7 @@ describe('conversation loading helpers', () => {
     expect(evictOldestReadingPositions({ 'session-a': position(1) })).toBeNull()
   })
 
-  it('retries a quota-failed write after evicting the oldest entries (FE-14)', () => {
+  it('retries a quota-failed write after evicting the oldest entries', () => {
     const persisted = new Map<string, string>()
     const quotaBytes = 240
     vi.stubGlobal('localStorage', {
@@ -92,7 +92,7 @@ describe('conversation loading helpers', () => {
     }
   })
 
-  it('keeps the in-memory cache instead of wiping it when even the smallest write fails (FE-14)', () => {
+  it('keeps the in-memory cache instead of wiping it when even the smallest write fails', () => {
     let writeAttempts = 0
     vi.stubGlobal('localStorage', {
       getItem: () => null,

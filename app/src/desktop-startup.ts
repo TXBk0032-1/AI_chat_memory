@@ -29,14 +29,14 @@ export type AppStartupSteps = {
 export async function runAppStartup(steps: AppStartupSteps): Promise<UnlistenFn | undefined> {
   // The first catalog load must observe the persisted search mode installed by
   // applySettings, so it starts only after the settings promise settles. A
-  // failed settings load must still populate the shell with the defaults (FE-7).
+  // failed settings load must still populate the shell with the defaults.
   const sessionsReady = steps.settingsReady.then(steps.loadSessions, steps.loadSessions)
   let unlisten: UnlistenFn | undefined
   try {
     unlisten = await steps.subscribeCloseBehavior()
   } catch (reason) {
     // A failed event subscription must not block the remaining startup steps
-    // (settings, session list, API status polling) (FE-6).
+    // (settings, session list, API status polling).
     console.error('[STARTUP] Failed to subscribe to close-behavior-requested:', reason)
   }
   await Promise.allSettled([steps.settingsReady, steps.refreshApiStatus(), sessionsReady])

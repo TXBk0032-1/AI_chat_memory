@@ -40,7 +40,7 @@ describe('theme generator', () => {
     expect(colors['--color-btn-close']).toBe('#ff0000')
   })
 
-  it('skips generator-derived keys when merging extInfo (FE-4)', () => {
+  it('skips generator-derived keys when merging extInfo', () => {
     const colors = createThemeColors('rgb(22, 121, 97)', 'rgb(33, 33, 33)', false, false, {
       '--color-primary': '#ff0000',
       '--color-primary-hover': '#00ff00',

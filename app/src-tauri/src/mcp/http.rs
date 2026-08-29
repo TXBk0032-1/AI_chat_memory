@@ -26,8 +26,8 @@ enum McpRejection {
 }
 
 /// MCP 鉴权策略（fail-closed）：端点未启用一律拒绝；带 Origin 的浏览器请求必须命中
-/// 白名单；无论是否带 Origin 都必须携带有效 secret。HTTP-2：无 Origin 的本机进程不能
-/// 因 secret_enabled=false 而免密；HTTP-1：浏览器请求不能依赖 secret_enabled 开关。
+/// 白名单；无论是否带 Origin 都必须携带有效 secret。无 Origin 的本机进程不能
+/// 因 secret_enabled=false 而免密；浏览器请求不能依赖 secret_enabled 开关。
 /// OPTIONS 预检无法携带自定义头，白名单命中后放行。
 fn mcp_rejection_reason(
     settings: &AppSettings,
@@ -272,7 +272,7 @@ mod tests {
 
     #[test]
     fn mcp_rejects_requests_without_origin_and_secret_even_when_secret_is_disabled() {
-        // HTTP-2：secret_enabled=false 不能让无 Origin 的本机进程免密读取聊天记忆。
+        // secret_enabled=false 不能让无 Origin 的本机进程免密读取聊天记忆。
         let settings = mcp_settings(None);
         assert_eq!(
             mcp_rejection_reason(&settings, Method::GET, None, None),
@@ -315,7 +315,7 @@ mod tests {
                 None
             ),
             Some(McpRejection::MissingSecret),
-            "HTTP-1：带 Origin 的浏览器请求无论 secret_enabled 都必须携带密钥"
+            "带 Origin 的浏览器请求无论 secret_enabled 都必须携带密钥"
         );
         assert_eq!(
             mcp_rejection_reason(

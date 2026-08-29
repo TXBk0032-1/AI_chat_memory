@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createThemeRerenderScheduler } from './theme-rerender'
 
-describe('theme rerender scheduler (FE-18)', () => {
+describe('theme rerender scheduler', () => {
   beforeEach(() => {
     document.body.innerHTML = '<div class="mermaid-diagram" data-rendered="true"></div>'
   })

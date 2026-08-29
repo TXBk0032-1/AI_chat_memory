@@ -1,6 +1,6 @@
 // Schedules the Mermaid re-render that follows a theme switch. Rapid theme
 // previews must replace the pending re-render instead of stacking timers,
-// which caused flickering diagrams and premature transition cleanups (FE-18).
+// which caused flickering diagrams and premature transition cleanups.
 export type ThemeRerenderScheduler = {
   schedule(animate: boolean): void
   dispose(): void

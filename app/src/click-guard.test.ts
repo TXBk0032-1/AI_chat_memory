@@ -17,7 +17,7 @@ function buttonHtml(classes = ''): string {
   return document.body.innerHTML
 }
 
-describe('control click guard (FE-17)', () => {
+describe('control click guard', () => {
   afterEach(() => {
     document.body.innerHTML = ''
     vi.restoreAllMocks()

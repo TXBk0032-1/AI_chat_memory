@@ -12,7 +12,7 @@ export function useApiStatus(api: DesktopApi = desktopApi) {
     const generation = ++refreshGeneration
     const status = await api.getApiStatus()
     // A slow IPC response from an older refresh must never overwrite a newer
-    // status; discard anything that is no longer the latest request (FE-9).
+    // status; discard anything that is no longer the latest request.
     if (generation !== refreshGeneration) return
     apiStatus.value = status
   }

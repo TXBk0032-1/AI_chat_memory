@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import appSource from './App.vue?raw'
 import messageBlockSource from './MessageBlock.vue?raw'
 
-describe('clipboard and link failure feedback (FE-13)', () => {
+describe('clipboard and link failure feedback', () => {
   it('catches context menu copy failures and shows a toast', () => {
     const body = appSource.slice(appSource.indexOf('async function copyContextSelection'), appSource.indexOf('function selectConversationContent'))
     expect(body).toContain('try {')

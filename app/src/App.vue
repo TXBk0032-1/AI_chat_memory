@@ -141,7 +141,7 @@ const {
   reset: resetMermaid,
 } = useMermaidRenderer(effectiveTheme)
 // Theme-switch Mermaid re-renders are serialized: a pending re-render is
-// replaced instead of stacking timers on rapid theme previews (FE-18).
+// replaced instead of stacking timers on rapid theme previews.
 const scheduleThemeRerender = createThemeRerenderScheduler(resetMermaid, renderMermaidDiagrams)
 const { toasts, showToast, disposeToasts } = useToastQueue()
 const branches = useBranchNavigation(selected, desktopApi)
@@ -711,7 +711,7 @@ function toggleDetailMenu() {
 }
 
 // Swallows only mechanical duplicate clicks on actionable controls within a
-// short window; legitimate repeat clicks and navigation stay untouched (FE-17).
+// short window; legitimate repeat clicks and navigation stay untouched.
 const preventRapidControlClick = createControlClickGuard()
 
 function handleContextMenu(event: MouseEvent) {
@@ -816,7 +816,7 @@ onMounted(async () => {
   // Startup pipeline: persisted settings are applied before the first session
   // list load so it observes the saved search mode, while the close-behavior
   // subscription and API status poll stay independent of each other and of a
-  // settings failure (FE-6, FE-7).
+  // settings failure.
   unlistenCloseRequest = await runAppStartup({
     settingsReady: initializeAppSettings({
       initialSettings: props.initialSettings,

@@ -429,7 +429,7 @@ mod tests {
 
     #[test]
     fn openai_compatible_with_remote_http_and_api_key_still_constructs() {
-        // CFG-5 only warns; a plaintext remote endpoint must not hard-fail.
+        // A plaintext remote endpoint with an api key only warns; it must not hard-fail.
         let backend = HttpEmbeddingBackend::openai_compatible(
             EmbeddingBackendKind::OpenaiCompatible,
             remote_settings("http://api.example.com/v1", Some("secret")),

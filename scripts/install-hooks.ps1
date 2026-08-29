@@ -6,7 +6,7 @@ $Root = Split-Path -Parent $PSScriptRoot
 $HookDirectory = Join-Path $Root ".githooks"
 
 if ($Remove) {
-    # CI-6: 'git config --unset' exits with code 5 when the key was never set,
+    # 'git config --unset' exits with code 5 when the key was never set,
     # which used to surface as an error under $ErrorActionPreference = "Stop".
     # Only unset when the local configuration actually defines core.hooksPath.
     $currentHooksPath = git -C $Root config --local --get core.hooksPath 2>$null

@@ -32,7 +32,7 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     $OutputDirectory = Join-Path $Root $OutputDirectory
 }
 $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
-# CI-10: rebuild the frontend by default so a stale app\dist can never be
+# Rebuild the frontend by default so a stale app\dist can never be
 # embedded into the dev EXE; reuse requires an explicit -ReuseFrontend.
 $FrontendEntryExists = Test-Path -LiteralPath $FrontendEntry
 if ($ReuseFrontend -and -not $FrontendEntryExists) {

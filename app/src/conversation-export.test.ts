@@ -100,7 +100,7 @@ describe('conversation export', () => {
     expect(() => encodeURIComponent(result)).not.toThrow()
   })
 
-  it('detects the timestamp magnitude so millisecond values do not overflow (FE-15)', () => {
+  it('detects the timestamp magnitude so millisecond values do not overflow', () => {
     // Local calendar day helper so the assertion is timezone independent.
     const localDay = (date: Date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`
     const moment = new Date(2023, 10, 14, 12, 30, 5)

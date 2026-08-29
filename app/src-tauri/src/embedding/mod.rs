@@ -11,8 +11,8 @@ use crate::{
 pub mod bge;
 mod http;
 pub mod local;
-// The deterministic mock backend is a test fixture only: since DBV-19 removed
-// the silent mock fallback, no production path constructs it.
+// The deterministic mock backend is a test fixture only: since the silent
+// mock fallback was removed, no production path constructs it.
 #[cfg(test)]
 mod mock;
 

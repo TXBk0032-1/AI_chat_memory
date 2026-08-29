@@ -1257,7 +1257,7 @@ impl AppService {
         }
         settings.cloud_sync.generation_id = new_generation.clone();
         settings.cloud_sync.encryption_enabled = remote_encryption;
-        // SVC-6: the cloud generation is already committed at this point, so a
+        // The cloud generation is already committed at this point, so a
         // failed local settings write must be retried and, if it keeps failing,
         // surfaced as an explicit mismatch for the next sync to repair instead
         // of silently leaving local settings on the old generation.
@@ -1365,7 +1365,7 @@ impl AppService {
             .delete(&device_path)
             .await
             .map_err(map_cloud_error)?;
-        // SVC-7: the remote device is already gone, so a cursor cleanup failure
+        // The remote device is already gone, so a cursor cleanup failure
         // must be retried and then reported instead of silently leaving a stale
         // sync_remote_cursors row that would skew the next pull window.
         let mut cursor_error = None;
@@ -1395,7 +1395,7 @@ impl AppService {
         let devices = self
             .remote_devices(backend.as_ref(), &settings.cloud_sync, &local)
             .await?;
-        // SVC-7: deleting a single device record is not a cloud sync success —
+        // Deleting a single device record is not a cloud sync success —
         // only refresh the device list and leave state/timestamps/errors as
         // they are instead of calling mark_cloud_success.
         {
@@ -1837,7 +1837,7 @@ impl AppService {
 
     pub async fn move_data_directory(&self, directory: &Path) -> Result<()> {
         self.ensure_writable()?;
-        // SVC-5: the destination probe and the VACUUM snapshot must run inside
+        // The destination probe and the VACUUM snapshot must run inside
         // the same sync_gate critical section. Checking the destination before
         // taking the gate lets two concurrent moves both pass the probe and
         // makes the loser fail inside VACUUM with an opaque SQLite error.

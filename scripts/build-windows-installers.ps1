@@ -261,7 +261,7 @@ try {
     if (-not (Test-Path -LiteralPath $portableSource) -or (Get-Item -LiteralPath $portableSource).Length -le 0) {
         throw "Portable source executable is missing or empty: $portableSource"
     }
-    # CI-11: reject a corrupted or truncated executable before it is packaged
+    # Reject a corrupted or truncated executable before it is packaged
     # (mirrors the PE header validation in build-dev-portable.ps1).
     $portableSourceStream = [IO.File]::OpenRead($portableSource)
     try {

@@ -26,7 +26,7 @@ function stepOverrides(overrides: Partial<Steps>): Steps {
   }
 }
 
-describe('app startup pipeline (FE-6, FE-7)', () => {
+describe('app startup pipeline', () => {
   it('applies the persisted search mode before starting the first session load', async () => {
     const order: string[] = []
     let appliedMode = 'hybrid'

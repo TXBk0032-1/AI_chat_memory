@@ -76,7 +76,7 @@ describe('useSettings', () => {
     mocks.getSemanticStatus.mockResolvedValue({ enabled: false, ready_chunks: 0, pending_chunks: 0 } as never)
   })
 
-  it('opens the settings panel even when getSettings rejects (FE-12)', async () => {
+  it('opens the settings panel even when getSettings rejects', async () => {
     mocks.getSettings.mockRejectedValue(new Error('ipc-down'))
     const settingsRef = ref(defaultSettings())
     const { exposed, unmount } = mountComposable(settingsRef)
@@ -90,7 +90,7 @@ describe('useSettings', () => {
     unmount()
   })
 
-  it('stops the reindex poll timer when cancelSemanticWork rejects (FE-8)', async () => {
+  it('stops the reindex poll timer when cancelSemanticWork rejects', async () => {
     // Drive the composable into a polling state: getSemanticStatus reports an
     // active reindex so openSettings starts the 1s poll timer, then cancelling
     // the work rejects. The timer must still be cleared (no leak).
@@ -122,7 +122,7 @@ describe('useSettings', () => {
     unmount()
   })
 
-  it('surfaces a failed secret copy instead of an unhandled rejection (FE-13)', async () => {
+  it('surfaces a failed secret copy instead of an unhandled rejection', async () => {
     const clipboard = { writeText: vi.fn().mockRejectedValue(new DOMException('denied', 'NotAllowedError')) }
     vi.stubGlobal('navigator', { clipboard })
     const settingsRef = ref(defaultSettings())
@@ -137,7 +137,7 @@ describe('useSettings', () => {
     vi.unstubAllGlobals()
   })
 
-  it('surfaces a failed MCP client configuration copy (FE-13)', async () => {
+  it('surfaces a failed MCP client configuration copy', async () => {
     const clipboard = { writeText: vi.fn().mockRejectedValue(new DOMException('denied', 'NotAllowedError')) }
     vi.stubGlobal('navigator', { clipboard })
     const settingsRef = ref(defaultSettings())
@@ -151,7 +151,7 @@ describe('useSettings', () => {
     vi.unstubAllGlobals()
   })
 
-  it('marks the secret as copied when the clipboard write succeeds (FE-13)', async () => {
+  it('marks the secret as copied when the clipboard write succeeds', async () => {
     const clipboard = { writeText: vi.fn().mockResolvedValue(undefined) }
     vi.stubGlobal('navigator', { clipboard })
     const settingsRef = ref(defaultSettings())

@@ -176,7 +176,7 @@ describe('MessageBlock oversized content', () => {
   })
 })
 
-describe('MessageBlock rendered notifications and code copy (FE-16, FE-13)', () => {
+describe('MessageBlock rendered notifications and code copy', () => {
   function codeMessage(): Message {
     return messageFixture({ content: '```js\nconsole.log("hi")\n```' })
   }
@@ -194,7 +194,7 @@ describe('MessageBlock rendered notifications and code copy (FE-16, FE-13)', () 
     }
   }
 
-  it('emits content-rendered scoped to its own root element (FE-16)', async () => {
+  it('emits content-rendered scoped to its own root element', async () => {
     const harness = mountMessage(codeMessage())
     try {
       await nextTick()
@@ -208,7 +208,7 @@ describe('MessageBlock rendered notifications and code copy (FE-16, FE-13)', () 
     }
   })
 
-  it('shows success feedback when the code copy succeeds (FE-13)', async () => {
+  it('shows success feedback when the code copy succeeds', async () => {
     const stub = stubClipboard(() => Promise.resolve())
     const harness = mountMessage(codeMessage())
     try {
@@ -224,7 +224,7 @@ describe('MessageBlock rendered notifications and code copy (FE-16, FE-13)', () 
     }
   })
 
-  it('reports a failed code copy instead of an unhandled rejection (FE-13)', async () => {
+  it('reports a failed code copy instead of an unhandled rejection', async () => {
     const stub = stubClipboard(() => Promise.reject(new DOMException('denied', 'NotAllowedError')))
     const harness = mountMessage(codeMessage())
     try {

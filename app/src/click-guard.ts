@@ -2,7 +2,7 @@
 // actionable controls. The swallow window is deliberately short: it absorbs
 // mechanical jitter from a single interaction, while quick repeat clicks such
 // as double clicks or rapid paging stay legitimate and are never swallowed
-// (FE-17). Per-click logging was dropped; only an actual swallow is reported.
+// Per-click logging was dropped; only an actual swallow is reported.
 export const controlClickGuardDebounceMs = 150
 
 // Controls inside these containers keep their native click behavior:

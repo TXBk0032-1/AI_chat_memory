@@ -90,7 +90,7 @@ function Initialize-CudaBuildEnvironment {
     }
 }
 
-# CI-5: 'quick' is the CUDA-free fallback stage invoked by the pre-push hook on
+# 'quick' is the CUDA-free fallback stage invoked by the pre-push hook on
 # machines without the CUDA toolkit; every other stage still requires CUDA.
 if ($Stage -ne "quick") {
     Initialize-CudaBuildEnvironment
@@ -235,7 +235,7 @@ if ($Stage -in "test", "release") {
     $rustCmd = "$rustCmd && cargo test --all-features"
 }
 
-# CI-5: lightweight CUDA-free stage used as the pre-push hook fallback. It only
+# Lightweight CUDA-free stage used as the pre-push hook fallback. It only
 # validates the userscript and rebuilds the frontend; everything that needs the
 # CUDA toolkit (cargo build/tests, clippy) stays in the 'test'/'release' stages.
 if ($Stage -eq "quick") {

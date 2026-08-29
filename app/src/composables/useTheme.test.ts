@@ -139,7 +139,7 @@ describe('useTheme composable', () => {
     expect(settings.value.dark_theme_id).toBe('black')
   })
 
-  it('reschedules the theme-transition cleanup instead of stacking timers (FE-18)', () => {
+  it('reschedules the theme-transition cleanup instead of stacking timers', () => {
     vi.useFakeTimers()
     // Force the manual transition path even if startViewTransition is available.
     const documentAny = document as Omit<Document, 'startViewTransition'> & { startViewTransition?: unknown }

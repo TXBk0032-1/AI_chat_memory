@@ -12,7 +12,7 @@ function apiMock(): DesktopApi & { getApiStatus: Mock } {
   return { getApiStatus: vi.fn() } as unknown as DesktopApi & { getApiStatus: Mock }
 }
 
-describe('useApiStatus (FE-9)', () => {
+describe('useApiStatus', () => {
   afterEach(() => {
     vi.useRealTimers()
   })

@@ -20,7 +20,7 @@ export function safeDecodeURIComponent(value: string): string {
 
 let exportSequence = 0
 // Set while an export render is in flight so in-app renders can wait for the
-// shared instance to be restored before touching it (FE-11).
+// shared instance to be restored before touching it.
 let exportCompletion: Promise<void> | null = null
 
 export function useMermaidRenderer(effectiveTheme: () => 'light' | 'dark') {
@@ -108,7 +108,7 @@ export function useMermaidRenderer(effectiveTheme: () => 'light' | 'dark') {
         // Drop the shared instance so the next app render re-initializes it
         // with the current app theme, on every exit path (success, error or
         // superseded export). Without this, in-app diagrams rendered while the
-        // export held the neutral theme would stay neutral (FE-11).
+        // export held the neutral theme would stay neutral.
         reset()
       }
     }

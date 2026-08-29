@@ -1,5 +1,5 @@
 #!/bin/sh
-# CI-5: the full 'ci.ps1 test' pipeline requires the CUDA toolkit (nvcc), so on
+# The full 'ci.ps1 test' pipeline requires the CUDA toolkit (nvcc), so on
 # machines without CUDA it would abort before the push ever happens. Detect the
 # toolkit here and degrade to the lightweight 'ci.ps1 quick' stage instead of
 # blocking legitimate pushes.

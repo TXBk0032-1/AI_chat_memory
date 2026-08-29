@@ -63,7 +63,7 @@ foreach ($installer in $installers) {
     }
 }
 
-# CI-11: the builder must validate the portable executable's PE header ('MZ')
+# The builder must validate the portable executable's PE header ('MZ')
 # before packaging it into the portable ZIP, mirroring build-dev-portable.ps1.
 $builderSource = Get-Content -LiteralPath $Builder -Raw
 foreach ($peCheckFragment in @(

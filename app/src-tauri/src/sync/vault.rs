@@ -1374,7 +1374,7 @@ mod tests {
 
     #[tokio::test]
     async fn owned_generation_freeze_uses_the_caller_provided_lease_window() {
-        // ENG-11：租约窗口必须来自调用方的单一时间源。owned 变体不得内部再取
+        // 租约窗口必须来自调用方的单一时间源。owned 变体不得内部再取
         // current_time_millis()，否则调用方计算的 lease 边界与冻结实际起始时间错位。
         let server = TestS3::start("AKID", None).await;
         let backend = backend(&server);

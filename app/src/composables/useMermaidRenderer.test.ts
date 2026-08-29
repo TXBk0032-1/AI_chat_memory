@@ -65,7 +65,7 @@ describe('Mermaid rendering', () => {
     expect(appElement.innerHTML).toBe('<svg>app</svg>')
   })
 
-  it('parks in-app renders until an in-flight export restores the app instance (FE-11)', async () => {
+  it('parks in-app renders until an in-flight export restores the app instance', async () => {
     let releaseExport!: (value: { svg: string }) => void
     const exportGate = new Promise<{ svg: string }>((resolve) => { releaseExport = resolve })
     const exportElement = diagram()
@@ -98,7 +98,7 @@ describe('Mermaid rendering', () => {
     expect(mermaid.initialize).toHaveBeenLastCalledWith(expect.objectContaining({ theme: 'dark' }))
   })
 
-  it('restores the app instance when the export render fails (FE-11)', async () => {
+  it('restores the app instance when the export render fails', async () => {
     mermaid.initialize.mockImplementationOnce(() => {
       throw new Error('export init failed')
     })
@@ -114,7 +114,7 @@ describe('Mermaid rendering', () => {
     expect(mermaid.initialize).toHaveBeenLastCalledWith(expect.objectContaining({ theme: 'dark' }))
   })
 
-  it('renders only the diagrams inside the provided root (FE-16)', async () => {
+  it('renders only the diagrams inside the provided root', async () => {
     const scopedElement = diagram()
     const root = { querySelectorAll: vi.fn(() => [scopedElement]) } as unknown as ParentNode
     vi.stubGlobal('document', {

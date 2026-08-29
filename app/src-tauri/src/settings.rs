@@ -8,7 +8,7 @@ use crate::{
     sync::credentials::{CredentialStore, SecretKind, SecretValue, SystemCredentialStore},
 };
 
-/// CFG-4: the userscript shared secret lives in the system credential store
+/// The userscript shared secret lives in the system credential store
 /// under this fixed vault key, never in settings.json.
 const USERSCRIPT_SECRET_KEY: &str = "userscript";
 const CREDENTIAL_SERVICE: &str = "ai-chat-memory";
@@ -52,7 +52,7 @@ impl SettingsStore {
             tracing::info!("migrated default local embedding model to bge-small-zh-v1.5");
         }
         value.cloud_sync.normalize();
-        // CFG-4: a legacy settings.json may still carry the plaintext userscript
+        // A legacy settings.json may still carry the plaintext userscript
         // secret. Migrate it once into the credential store and rewrite
         // settings.json without it. If the credential store is unavailable the
         // plaintext is kept so no secret is lost; migration is retried on the
@@ -144,7 +144,7 @@ impl SettingsStore {
         Ok(settings)
     }
 
-    /// CFG-4: the shared secret is persisted only in the credential store.
+    /// The shared secret is persisted only in the credential store.
     /// settings.json keeps just the `secret_enabled` flag; the in-memory value
     /// stays populated so userscript/MCP authorization and the settings UI keep
     /// working.

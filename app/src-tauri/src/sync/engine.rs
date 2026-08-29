@@ -574,7 +574,7 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
             .map_err(|error| remote_read_error(error, "released v1 bundle listing"))?;
         let mut candidates = Vec::new();
         let mut candidate_bytes: usize = 0;
-        // ENG-10: content-addressed object names carry the bundle SHA-256, so a
+        // Content-addressed object names carry the bundle SHA-256, so a
         // second listing entry with an already-verified digest is a duplicate
         // copy of the same content. Skip it before downloading instead of
         // paying a second download+decode for identical bytes.
@@ -1172,7 +1172,7 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
         if pending.is_empty() {
             return Ok(SyncReport::default());
         }
-        // ENG-12：恢复残留发布后必须继续走正常发布流程——recovered_publication 只作
+        // 恢复残留发布后必须继续走正常发布流程——recovered_publication 只作
         // 幂等背景（已推进的 head 会经 already_published 分支转为 acknowledge），
         // 提前返回会让恢复期间积压的新 pending 被跳过到下一次 run。
         let (publication_vault, _recovered_publication) = self.ensure_active_vault().await?;
@@ -1559,7 +1559,7 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
                 head_path,
                 ..
             } => {
-                // ENG-26: the recorded published_mutation_count is what the
+                // The recorded published_mutation_count is what the
                 // interrupted publisher requested, not what the recovered head
                 // actually advances. Snapshot this device head before the
                 // recovery and diff it against the head after the recovery so
@@ -1866,7 +1866,7 @@ fn frozen_target_generation(frozen: &VersionedVaultIdentity) -> Option<&str> {
     }
 }
 
-/// ENG-3: recovering a stuck head publication publishes nothing new — the
+/// Recovering a stuck head publication publishes nothing new — the
 /// replayed head was already accounted for by the attempt that wrote it, and
 /// `publish_pending` re-acknowledges the recovered prefix idempotently. The
 /// recovered count is therefore only logged, never added to `SyncReport`.
@@ -3370,7 +3370,7 @@ mod tests {
 
         let report = engine.run_once(SyncTrigger::Manual).await.unwrap();
 
-        // ENG-10：同名内容只下载解码一次，重复对象在收集阶段按 sha256 跳过，
+        // 同名内容只下载解码一次，重复对象在收集阶段按 sha256 跳过，
         // 而不是下载后才因序列区间不符而报错。
         assert_eq!(report.pulled, 2);
         let titles: Vec<String> = sqlx::query_scalar("SELECT title FROM sessions ORDER BY title")
@@ -4817,7 +4817,7 @@ mod tests {
         );
 
         let retry = restarted_engine.publish_pending().await.unwrap();
-        // ENG-12：恢复不再提前返回。本次运行没有发布新 bundle，只是把崩溃残留的
+        // 恢复不再提前返回。本次运行没有发布新 bundle，只是把崩溃残留的
         // head 推进补完并把该变更幂等确认为 acknowledge，published 如实为 0。
         assert_eq!((retry.published, retry.acknowledged), (0, 1));
         let final_objects = backend.bundle_objects().await;
@@ -4909,7 +4909,7 @@ mod tests {
         );
         let retry = restarted_engine.publish_pending().await.unwrap();
 
-        // ENG-12：恢复不再提前返回——staged 前缀经 head 幂等确认为 acknowledge，
+        // 恢复不再提前返回——staged 前缀经 head 幂等确认为 acknowledge，
         // 重启期间新增的变更在同一轮直接发布，不再被跳过到下一次 run。
         assert_eq!((retry.published, retry.acknowledged), (1, 2));
         let final_objects = backend.bundle_objects().await;
@@ -4976,7 +4976,7 @@ mod tests {
         );
         let recovered = restarted_engine.publish_pending().await.unwrap();
 
-        // ENG-12：恢复后同一轮继续发布——被合并出 outbox 的 staged 变更经 head 幂等
+        // 恢复后同一轮继续发布——被合并出 outbox 的 staged 变更经 head 幂等
         // 确认为 acknowledge，合并后的新变更立即发布，staged bundle 原位复用不重封。
         assert_eq!((recovered.published, recovered.acknowledged), (1, 1));
         assert_eq!(backend.bundle_objects().await.len(), 2);
@@ -5493,7 +5493,7 @@ mod tests {
             .await
             .unwrap();
 
-        // ENG-3：恢复计数是历史请求值，恢复本身不发布，不得叠加进 published。
+        // 恢复计数是历史请求值，恢复本身不发布，不得叠加进 published。
         let report = engine.run_once(SyncTrigger::Manual).await.unwrap();
         assert_eq!(
             (report.published, report.acknowledged),
@@ -5569,7 +5569,7 @@ mod tests {
 
         let (_vault, recovered) = engine.ensure_active_vault().await.unwrap();
 
-        // ENG-26：恢复计数必须来自恢复前后 head.end_seq 差值，而非请求时的
+        // 恢复计数必须来自恢复前后 head.end_seq 差值，而非请求时的
         // published_mutation_count。
         assert_eq!(
             recovered,

@@ -3780,7 +3780,7 @@ async fn move_data_directory_rejects_writes_until_restart() {
 
 #[tokio::test]
 async fn move_data_directory_rechecks_the_destination_inside_the_sync_gate() {
-    // SVC-5：目标存在性检查必须与 VACUUM 同处 sync_gate 临界区内。并发竞争者
+    // 目标存在性检查必须与 VACUUM 同处 sync_gate 临界区内。并发竞争者
     // 在等锁期间创建了目标文件时，加锁后的复检必须给出明确的配置错误，
     // 而不是让 VACUUM INTO 以晦涩的 SQLite 错误失败。
     let (service, data_dir) = service_with_local_session_fixture().await;
@@ -3816,7 +3816,7 @@ async fn move_data_directory_rechecks_the_destination_inside_the_sync_gate() {
 
 #[tokio::test]
 async fn rewrite_cloud_archive_surfaces_and_marks_a_failed_local_generation_commit() {
-    // SVC-6：云端已提交新代次后本地 settings 写入失败，必须重试并在彻底失败时
+    // 云端已提交新代次后本地 settings 写入失败，必须重试并在彻底失败时
     // 显式报告错配，让下一次同步以远端代次自愈，而不是静默留下代次错配窗口。
     let (service, data_dir) = service_with_local_session_fixture().await;
     let server = TestS3::start("AKID", None).await;
@@ -3918,7 +3918,7 @@ async fn rewrite_cloud_archive_surfaces_and_marks_a_failed_local_generation_comm
 
 #[tokio::test]
 async fn remove_cloud_device_record_refreshes_devices_without_faking_sync_success() {
-    // SVC-7：删除单个远端设备不是一次完整的云同步成功——不得刷新
+    // 删除单个远端设备不是一次完整的云同步成功——不得刷新
     // last_success_at/清空错误状态；且必须枚举删除设备前缀下的全部对象。
     let service = service_with_local_session().await;
     let server = TestS3::start("AKID", None).await;
@@ -4054,7 +4054,7 @@ async fn remove_cloud_device_record_refreshes_devices_without_faking_sync_succes
 
 #[tokio::test]
 async fn remove_cloud_device_record_reports_cursor_cleanup_failures() {
-    // SVC-7：游标清理失败必须显式报错（远端已删、本地游标残留会导致下次
+    // 游标清理失败必须显式报错（远端已删、本地游标残留会导致下次
     // 同步以陈旧游标计算拉取起点），而不是静默成功。
     let service = service_with_local_session().await;
     let server = TestS3::start("AKID", None).await;
