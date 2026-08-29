@@ -317,8 +317,7 @@ impl SemanticEngine {
             .await
             .unwrap_or(0);
         let local_model_path = manager.local_model_dir();
-        let local_model_ready = crate::embedding::local::model_files_present(&local_model_path)
-            || crate::embedding::bge::model_files_present(&local_model_path);
+        let local_model_ready = crate::embedding::local_model_files_present(&local_model_path);
         let status = crate::embedding::semantic_status_from_health(
             manager.settings().enabled,
             pending,
@@ -609,7 +608,7 @@ impl SemanticEngine {
 
     async fn drain_pending_inner(&self) -> Result<()> {
         let generation = self.current_generation();
-        loop {
+        'fetch: loop {
             if self.current_generation() != generation {
                 break;
             }
@@ -631,142 +630,147 @@ impl SemanticEngine {
             if candidates.is_empty() {
                 break;
             }
-            let pending = if is_local {
+            // Local backends pack one length band per call; planning all packs
+            // for the candidate window up front lets a single wake embed every
+            // pending chunk instead of re-fetching and re-estimating the whole
+            // window once per band.
+            let batches: Vec<Vec<index::PendingChunk>> = if is_local {
                 let estimates = candidates
                     .iter()
                     .map(|item| crate::embedding::local::estimate_token_count(&item.text))
                     .collect::<Vec<_>>();
-                let chosen = crate::embedding::local::plan_local_index_batch(&estimates);
-                let est_tokens: usize = chosen.iter().map(|&i| estimates[i]).sum();
-                let est_max = chosen.iter().map(|&i| estimates[i]).max().unwrap_or(0);
-                let est_pad = if chosen.is_empty() || est_max == 0 {
-                    0.0
-                } else {
-                    1.0 - (est_tokens as f64 / (chosen.len() as f64 * est_max as f64))
-                };
+                let packs = crate::embedding::local::plan_local_index_batches(&estimates);
+                let planned: usize = packs.iter().map(Vec::len).sum();
+                let est_tokens: usize = packs.iter().flatten().map(|&idx| estimates[idx]).sum();
                 tracing::info!(
                     candidates = candidates.len(),
-                    chosen = chosen.len(),
+                    packs = packs.len(),
+                    planned,
                     est_tokens,
-                    est_max_len = est_max,
-                    est_pad_ratio = est_pad,
                     token_budget = crate::embedding::local::LOCAL_INDEX_TOKEN_BUDGET,
-                    "local index batch planned"
+                    "local index window planned"
                 );
-                chosen
+                packs
                     .into_iter()
-                    .map(|idx| candidates[idx].clone())
-                    .collect::<Vec<_>>()
+                    .map(|pack| {
+                        pack.into_iter()
+                            .map(|idx| candidates[idx].clone())
+                            .collect::<Vec<_>>()
+                    })
+                    .collect()
             } else {
-                candidates
+                vec![candidates]
             };
-            if pending.is_empty() {
-                break;
-            }
-            let texts = pending
-                .iter()
-                .map(|item| item.text.clone())
-                .collect::<Vec<_>>();
-            let started = std::time::Instant::now();
-            let embed_started = std::time::Instant::now();
-            let vectors = match backend.embed_documents(&texts).await {
-                Ok(vectors) => {
-                    *self.last_error.write().await = None;
-                    vectors
+            for pending in batches {
+                if pending.is_empty() {
+                    continue;
                 }
-                Err(error) => {
-                    let message = error.to_string();
-                    *self.last_error.write().await = Some(message.clone());
-                    if message.contains("取消") || message.to_ascii_lowercase().contains("cancel")
-                    {
-                        tracing::info!(%error, pending = pending.len(), "semantic embedding cancelled");
-                        self.publish_reindex_progress(
-                            ReindexProgress {
-                                stage: "cancelled".into(),
-                                total_sessions: 0,
-                                processed_sessions: 0,
-                                total_chunks: 0,
-                                ready_chunks: 0,
-                                pending_chunks: pending.len() as i64,
-                                fraction: 0.0,
-                                message: "索引编码已取消".into(),
-                            },
-                            None,
-                        )
-                        .await;
-                        break;
+                let texts = pending
+                    .iter()
+                    .map(|item| item.text.clone())
+                    .collect::<Vec<_>>();
+                let started = std::time::Instant::now();
+                let embed_started = std::time::Instant::now();
+                let vectors = match backend.embed_documents(&texts).await {
+                    Ok(vectors) => {
+                        *self.last_error.write().await = None;
+                        vectors
                     }
-                    // Keep chunks pending so a later successful model load can resume.
-                    tracing::warn!(%error, pending = pending.len(), "semantic embedding failed; will retry later");
-                    // Avoid a tight spin while CUDA recovers from bad batches.
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                    break;
+                    Err(error) => {
+                        let message = error.to_string();
+                        *self.last_error.write().await = Some(message.clone());
+                        if message.contains("取消")
+                            || message.to_ascii_lowercase().contains("cancel")
+                        {
+                            tracing::info!(%error, pending = pending.len(), "semantic embedding cancelled");
+                            self.publish_reindex_progress(
+                                ReindexProgress {
+                                    stage: "cancelled".into(),
+                                    total_sessions: 0,
+                                    processed_sessions: 0,
+                                    total_chunks: 0,
+                                    ready_chunks: 0,
+                                    pending_chunks: pending.len() as i64,
+                                    fraction: 0.0,
+                                    message: "索引编码已取消".into(),
+                                },
+                                None,
+                            )
+                            .await;
+                            break 'fetch;
+                        }
+                        // Keep chunks pending so a later successful model load can resume.
+                        tracing::warn!(%error, pending = pending.len(), "semantic embedding failed; will retry later");
+                        // Avoid a tight spin while CUDA recovers from bad batches.
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        break 'fetch;
+                    }
+                };
+                let embed_ms = embed_started.elapsed().as_millis();
+                // HTTP backends may discover dimensions while serving this request, so
+                // compare the post-inference identity with the current manager.
+                let write_identity = backend.identity();
+                if !self
+                    .batch_matches_current(generation, &write_identity)
+                    .await
+                {
+                    tracing::info!(
+                        generation,
+                        backend = %write_identity.backend_id,
+                        model = %write_identity.model_id,
+                        "discarding stale embedding batch after backend switch"
+                    );
+                    break 'fetch;
                 }
-            };
-            let embed_ms = embed_started.elapsed().as_millis();
-            // HTTP backends may discover dimensions while serving this request, so
-            // compare the post-inference identity with the current manager.
-            let write_identity = backend.identity();
-            if !self
-                .batch_matches_current(generation, &write_identity)
-                .await
-            {
-                tracing::info!(
-                    generation,
-                    backend = %write_identity.backend_id,
-                    model = %write_identity.model_id,
-                    "discarding stale embedding batch after backend switch"
-                );
-                break;
-            }
-            // HTTP backends may discover their actual dimensions from the first response.
-            // Recreate vec0 before writing rather than padding/truncating to a stale guess.
-            if write_identity.dimensions != identity.dimensions {
-                crate::database::connection::ensure_embedding_vec_table(
-                    &self.pool,
-                    Some(write_identity.dimensions),
-                )
-                .await?;
-                tracing::info!(
-                    previous = identity.dimensions,
-                    actual = write_identity.dimensions,
-                    model = %write_identity.model_id,
-                    "embedding endpoint dimensions discovered"
-                );
-            }
-            let ready_items = pending
-                .iter()
-                .zip(vectors)
-                .map(|(item, vector)| {
-                    (
-                        item.id,
-                        item.session_id.as_str(),
-                        item.message_id.as_str(),
-                        item.platform.as_str(),
-                        vector,
+                // HTTP backends may discover their actual dimensions from the first response.
+                // Recreate vec0 before writing rather than padding/truncating to a stale guess.
+                if write_identity.dimensions != identity.dimensions {
+                    crate::database::connection::ensure_embedding_vec_table(
+                        &self.pool,
+                        Some(write_identity.dimensions),
                     )
-                })
-                .collect::<Vec<_>>();
-            let write_started = std::time::Instant::now();
-            index::mark_chunks_ready(&self.pool, &write_identity, &ready_items).await?;
-            let write_ms = write_started.elapsed().as_millis();
-            let elapsed_ms = started.elapsed().as_millis();
-            let chunks_per_sec = if elapsed_ms == 0 {
-                pending.len() as f64
-            } else {
-                (pending.len() as f64) * 1000.0 / (elapsed_ms as f64)
-            };
-            tracing::info!(
-                batch_size = pending.len(),
-                device = backend.runtime_device().as_deref().unwrap_or("unknown"),
-                dtype = backend.runtime_dtype().as_deref().unwrap_or("unknown"),
-                embed_ms,
-                write_ms,
-                elapsed_ms,
-                chunks_per_sec,
-                "semantic embedding batch completed"
-            );
-            self.note_embedding_progress().await;
+                    .await?;
+                    tracing::info!(
+                        previous = identity.dimensions,
+                        actual = write_identity.dimensions,
+                        model = %write_identity.model_id,
+                        "embedding endpoint dimensions discovered"
+                    );
+                }
+                let ready_items = pending
+                    .iter()
+                    .zip(vectors)
+                    .map(|(item, vector)| {
+                        (
+                            item.id,
+                            item.session_id.as_str(),
+                            item.message_id.as_str(),
+                            item.platform.as_str(),
+                            vector,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let write_started = std::time::Instant::now();
+                index::mark_chunks_ready(&self.pool, &write_identity, &ready_items).await?;
+                let write_ms = write_started.elapsed().as_millis();
+                let elapsed_ms = started.elapsed().as_millis();
+                let chunks_per_sec = if elapsed_ms == 0 {
+                    pending.len() as f64
+                } else {
+                    (pending.len() as f64) * 1000.0 / (elapsed_ms as f64)
+                };
+                tracing::info!(
+                    batch_size = pending.len(),
+                    device = backend.runtime_device().as_deref().unwrap_or("unknown"),
+                    dtype = backend.runtime_dtype().as_deref().unwrap_or("unknown"),
+                    embed_ms,
+                    write_ms,
+                    elapsed_ms,
+                    chunks_per_sec,
+                    "semantic embedding batch completed"
+                );
+                self.note_embedding_progress().await;
+            }
         }
         Ok(())
     }
@@ -923,6 +927,143 @@ mod tests {
             !engine
                 .batch_matches_current(generation, &old_identity)
                 .await
+        );
+    }
+
+    /// Local-kind backend so the multi-pack local path is exercised.
+    struct LocalKindBackend {
+        embed_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl EmbeddingBackend for LocalKindBackend {
+        fn identity(&self) -> BackendIdentity {
+            BackendIdentity {
+                backend: EmbeddingBackendKind::Local,
+                backend_id: "local".into(),
+                model_id: "test".into(),
+                dimensions: 8,
+            }
+        }
+
+        async fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            self.embed_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![vec![0.0; 8]; texts.len()])
+        }
+
+        async fn embed_queries(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            Ok(vec![vec![0.0; 8]; texts.len()])
+        }
+
+        async fn healthcheck(&self) -> Result<EmbeddingHealth> {
+            Ok(EmbeddingHealth {
+                ok: true,
+                backend: EmbeddingBackendKind::Local,
+                model_id: "test".into(),
+                dimensions: Some(8),
+                message: "ok".into(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn drain_pending_processes_every_pending_chunk_in_one_wake() {
+        crate::database::connection::register_sqlite_vec();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE embedding_chunks (
+                id INTEGER PRIMARY KEY,
+                message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                backend_id TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                error TEXT,
+                dim INTEGER,
+                updated_at TEXT NOT NULL,
+                text TEXT NOT NULL
+            );
+             CREATE VIRTUAL TABLE embedding_vec USING vec0(
+                chunk_id INTEGER PRIMARY KEY,
+                embedding float[8] distance_metric=cosine,
+                +session_id TEXT,
+                +message_id TEXT,
+                +platform TEXT
+             );",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // Mixed length bands force several packs per candidate window.
+        for chunk_id in 1..=15_i64 {
+            sqlx::query(
+                "INSERT INTO embedding_chunks
+                 (id, message_id, session_id, platform, backend_id, model_id, status, updated_at, text)
+                 VALUES (?, ?, 's1', 'test', 'local', 'test', 'pending', 'now', ?)",
+            )
+            .bind(chunk_id)
+            .bind(format!("msg-{chunk_id}"))
+            .bind(format!("short text {chunk_id}"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        for chunk_id in 16..=30_i64 {
+            sqlx::query(
+                "INSERT INTO embedding_chunks
+                 (id, message_id, session_id, platform, backend_id, model_id, status, updated_at, text)
+                 VALUES (?, ?, 's1', 'test', 'local', 'test', 'pending', 'now', ?)",
+            )
+            .bind(chunk_id)
+            .bind(format!("msg-{chunk_id}"))
+            .bind("long".repeat(4_000))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let settings = SemanticSearchSettings {
+            enabled: true,
+            backend: EmbeddingBackendKind::Local,
+            ..SemanticSearchSettings::default()
+        };
+        let embed_calls = Arc::new(AtomicUsize::new(0));
+        let manager = EmbeddingManager::from_backend_for_test(
+            std::env::temp_dir(),
+            settings,
+            Arc::new(LocalKindBackend {
+                embed_calls: embed_calls.clone(),
+            }),
+        );
+        let engine = SemanticEngine::new(pool.clone(), std::env::temp_dir(), manager);
+
+        engine.drain_pending().await.unwrap();
+
+        let identity = engine.embeddings.read().await.identity();
+        let ready = index::count_chunks(&pool, &identity, "ready")
+            .await
+            .unwrap();
+        let pending = index::count_chunks(&pool, &identity, "pending")
+            .await
+            .unwrap();
+        assert_eq!(
+            ready, 30,
+            "every pending chunk must be vectorized in one wake"
+        );
+        assert_eq!(
+            pending, 0,
+            "no candidate may be silently left for another wake"
+        );
+        // Mixed bands require more than one consecutive embed call.
+        assert!(
+            embed_calls.load(Ordering::SeqCst) >= 2,
+            "expected multiple packs, got {}",
+            embed_calls.load(Ordering::SeqCst)
         );
     }
 }

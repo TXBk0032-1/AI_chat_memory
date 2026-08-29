@@ -411,12 +411,16 @@ pub async fn semantic_session_scores(
     }
     let clamped_top_k = top_k.clamp(1, 4096);
     let candidate_k = (clamped_top_k * 8).min(4096);
-    let mut vector = embedding.to_vec();
+    let vector = embedding.to_vec();
     let dim = identity.dimensions.max(1);
-    if vector.len() < dim {
-        vector.resize(dim, 0.0);
-    } else if vector.len() > dim {
-        vector.truncate(dim);
+    // A dimension mismatch means the query and the index were built by
+    // different backends; zero-padding or truncating would silently distort
+    // every similarity score, so refuse instead.
+    if vector.len() != dim {
+        return Err(AppError::InvalidData(format!(
+            "query embedding dimension {} does not match index dimension {dim}; rebuild the semantic index",
+            vector.len()
+        )));
     }
     let bytes = f32_slice_as_bytes(&vector);
     let timestamp = timestamp::expression("s.updated_at");
@@ -481,12 +485,14 @@ pub async fn semantic_session_hits(
     embedding: &[f32],
     limit: i64,
 ) -> Result<Vec<SessionSearchHit>> {
-    let mut vector = embedding.to_vec();
+    let vector = embedding.to_vec();
     let dim = identity.dimensions.max(1);
-    if vector.len() < dim {
-        vector.resize(dim, 0.0);
-    } else if vector.len() > dim {
-        vector.truncate(dim);
+    // Same rule as semantic_session_scores: never pad or truncate silently.
+    if vector.len() != dim {
+        return Err(AppError::InvalidData(format!(
+            "query embedding dimension {} does not match index dimension {dim}; rebuild the semantic index",
+            vector.len()
+        )));
     }
     let bytes = f32_slice_as_bytes(&vector);
     let rows = sqlx::query(
@@ -558,20 +564,41 @@ pub fn reciprocal_rank_fusion(
     merged
 }
 
+/// SQLite host parameter safety bound; also keeps IN lists compact.
+const SUMMARIES_IN_BATCH: usize = 500;
+
 pub async fn summaries_by_ids(pool: &SqlitePool, ids: &[String]) -> Result<Vec<SessionSummary>> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let mut map = HashMap::new();
+    // Preserve first-occurrence order and deduplicate like the callers expect.
+    let mut unique: Vec<&str> = Vec::with_capacity(ids.len());
+    let mut seen = HashSet::new();
     for id in ids {
-        if let Some(summary) = sqlx::query(
-            "SELECT id, platform, platform_session_id, title, created_at, updated_at, imported_at FROM sessions WHERE id = ?",
-        )
-        .bind(id)
-        .fetch_optional(pool)
-        .await?
-        {
-            map.insert(id.clone(), database::sessions::summary_from_row(summary));
+        if seen.insert(id.as_str()) {
+            unique.push(id.as_str());
+        }
+    }
+    let mut map: HashMap<String, SessionSummary> = HashMap::with_capacity(unique.len());
+    for batch in unique.chunks(SUMMARIES_IN_BATCH) {
+        let mut sql = String::from(
+            "SELECT id, platform, platform_session_id, title, created_at, updated_at, imported_at FROM sessions WHERE id IN (",
+        );
+        for index in 0..batch.len() {
+            if index > 0 {
+                sql.push(',');
+            }
+            sql.push('?');
+        }
+        sql.push(')');
+        let mut query = sqlx::query(&sql);
+        for id in batch {
+            query = query.bind(id);
+        }
+        let rows = query.fetch_all(pool).await?;
+        for row in rows {
+            let summary = database::sessions::summary_from_row(row);
+            map.insert(summary.id.clone(), summary);
         }
     }
     Ok(ids.iter().filter_map(|id| map.remove(id)).collect())
@@ -993,6 +1020,103 @@ mod tests {
             .unwrap();
             assert!(scores.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn semantic_scores_reject_dimension_mismatch_instead_of_padding() {
+        let pool = semantic_scores_pool().await;
+        sqlx::raw_sql("INSERT INTO sessions VALUES ('s1', 'chatgpt', '200');")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Too short and too long queries must both error out (InvalidData)
+        // instead of being zero-padded or truncated into silent distortion.
+        for bad_embedding in [
+            vec![1.0_f32, 0.0, 0.0, 0.0],
+            vec![
+                1.0_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            ],
+        ] {
+            let error = semantic_session_scores(
+                &pool,
+                &SearchQuery::default(),
+                &semantic_scores_identity(),
+                &bad_embedding,
+                3,
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                matches!(&error, AppError::InvalidData(message) if message.contains("dimension")),
+                "expected InvalidData dimension error, got {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn semantic_session_hits_reject_dimension_mismatch_instead_of_truncating() {
+        let pool = semantic_scores_pool().await;
+
+        let error = semantic_session_hits(
+            &pool,
+            "s1",
+            &semantic_scores_identity(),
+            &[1.0_f32, 0.0, 0.0],
+            1,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(&error, AppError::InvalidData(message) if message.contains("dimension")),
+            "expected InvalidData dimension error, got {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn summaries_by_ids_fetches_in_batches_preserving_input_order() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE sessions (
+                id TEXT PRIMARY KEY, platform TEXT NOT NULL, platform_session_id TEXT NOT NULL,
+                title TEXT, created_at TEXT, updated_at TEXT, imported_at TEXT
+            )",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        for id in ["a", "b", "c", "d"] {
+            sqlx::query("INSERT INTO sessions (id, platform, platform_session_id, title) VALUES (?, 'chatgpt', ?, ?)")
+                .bind(id)
+                .bind(id)
+                .bind(format!("title-{id}"))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        // Shuffled input with duplicates and a missing id: output must follow
+        // the input order, keep the first occurrence, and skip missing rows.
+        let summaries = summaries_by_ids(
+            &pool,
+            &["d".into(), "b".into(), "d".into(), "x".into(), "a".into()],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            summaries.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            ["d", "b", "a"]
+        );
+        assert_eq!(summaries[0].title, "title-d");
+        // More ids than one IN batch still resolves every row.
+        let many: Vec<String> = (0..1200).map(|index| format!("id-{index}")).collect();
+        assert!(summaries_by_ids(&pool, &many).await.unwrap().is_empty());
     }
 
     #[tokio::test]
