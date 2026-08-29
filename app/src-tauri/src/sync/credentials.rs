@@ -37,6 +37,7 @@ pub enum SecretKind {
     S3SessionToken,
     SyncPassphrase,
     CloudCredentialBundle,
+    UserscriptSecret,
 }
 
 impl SecretKind {
@@ -48,6 +49,7 @@ impl SecretKind {
             Self::S3SessionToken => "s3-session-token",
             Self::SyncPassphrase => "sync-passphrase",
             Self::CloudCredentialBundle => "cloud-credential-bundle-v1",
+            Self::UserscriptSecret => "userscript-secret",
         }
     }
 }
