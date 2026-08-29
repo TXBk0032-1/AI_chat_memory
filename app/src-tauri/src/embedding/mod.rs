@@ -11,11 +11,15 @@ use crate::{
 pub mod bge;
 mod http;
 pub mod local;
+// The deterministic mock backend is a test fixture only: since DBV-19 removed
+// the silent mock fallback, no production path constructs it.
+#[cfg(test)]
 mod mock;
 
 pub use bge::LocalBgeBackend;
 pub use http::HttpEmbeddingBackend;
 pub use local::LocalHarrierBackend;
+#[cfg(test)]
 pub use mock::MockEmbeddingBackend;
 
 #[derive(Debug, Clone)]
@@ -124,10 +128,7 @@ impl EmbeddingManager {
     pub fn status_snapshot(&self) -> EmbeddingHealth {
         let identity = self.identity();
         let available = match self.settings.backend {
-            EmbeddingBackendKind::Local => {
-                let model_dir = self.local_model_dir();
-                bge::model_files_present(&model_dir) || local::model_files_present(&model_dir)
-            }
+            EmbeddingBackendKind::Local => local_model_files_present(&self.local_model_dir()),
             _ => true,
         };
         EmbeddingHealth {
@@ -155,6 +156,12 @@ impl EmbeddingManager {
     }
 }
 
+/// Shared readiness check for local model files, used by status_snapshot and
+/// runtime status so both supported local model families are treated the same.
+pub fn local_model_files_present(model_dir: &Path) -> bool {
+    bge::model_files_present(model_dir) || local::model_files_present(model_dir)
+}
+
 pub async fn build_backend(
     data_dir: &Path,
     settings: &SemanticSearchSettings,
@@ -179,24 +186,20 @@ pub async fn build_backend(
                     .await?,
                 ))
             } else {
-                match LocalHarrierBackend::open(
-                    settings.local.model.clone(),
-                    model_dir,
-                    &settings.local,
-                    cancel_flag,
-                )
-                .await
-                {
-                    Ok(backend) => Ok(Arc::new(backend)),
-                    Err(error) => {
-                        tracing::warn!(%error, "local embedding backend unavailable; using deterministic mock until model is ready");
-                        Ok(Arc::new(MockEmbeddingBackend::new(
-                            EmbeddingBackendKind::Local,
-                            settings.local.model.clone(),
-                            640,
-                        )))
-                    }
-                }
+                // No silent mock fallback: a backend that fails to open must
+                // propagate the error so the index is never built on
+                // deterministic fake vectors. (Missing model files are not an
+                // open failure — the harrier backend loads lazily on first
+                // use and reports standby through status_snapshot.)
+                Ok(Arc::new(
+                    LocalHarrierBackend::open(
+                        settings.local.model.clone(),
+                        model_dir,
+                        &settings.local,
+                        cancel_flag,
+                    )
+                    .await?,
+                ))
             }
         }
         EmbeddingBackendKind::Ollama => Ok(Arc::new(HttpEmbeddingBackend::ollama(
@@ -246,4 +249,93 @@ pub fn ensure_dimensions(vectors: &[Vec<f32>], expected: usize) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{LocalEmbeddingSettings, SemanticSearchSettings};
+    use std::sync::atomic::AtomicBool;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "ai-chat-memory-embedding-{name}-{}",
+            std::process::id()
+        ))
+    }
+
+    fn local_settings(model_path: &Path) -> SemanticSearchSettings {
+        SemanticSearchSettings {
+            backend: EmbeddingBackendKind::Local,
+            local: LocalEmbeddingSettings {
+                model: "test/harrier-fixture".into(),
+                model_path: Some(model_path.display().to_string()),
+                ..LocalEmbeddingSettings::default()
+            },
+            ..SemanticSearchSettings::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn build_backend_propagates_local_open_failure_instead_of_mock_fallback() {
+        let dir = temp_dir("open-failure");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A file where the model directory should be forces create_dir_all
+        // inside LocalHarrierBackend::open to fail.
+        let blocker = dir.join("blocker");
+        std::fs::write(&blocker, b"x").unwrap();
+        let settings = local_settings(&blocker);
+
+        let result = build_backend(&dir, &settings, Arc::new(AtomicBool::new(false))).await;
+
+        // The previous behavior silently fell back to a mock 640-dim backend;
+        // the failure must now propagate so no fake vectors enter the index.
+        assert!(
+            matches!(result, Err(AppError::Configuration(_))),
+            "open failure must propagate instead of falling back to a mock backend"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn status_snapshot_distinguishes_missing_files_from_standby() {
+        let dir = temp_dir("standby");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let settings = local_settings(&dir);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let backend = LocalHarrierBackend::open(
+            settings.local.model.clone(),
+            dir.clone(),
+            &settings.local,
+            cancel,
+        )
+        .await
+        .unwrap();
+        let manager =
+            EmbeddingManager::from_backend_for_test(dir.clone(), settings, Arc::new(backend));
+
+        // Files missing: not available at all.
+        let missing = manager.status_snapshot();
+        assert!(!missing.ok, "missing model files must not report ok");
+        assert!(missing.message.contains("模型文件未就绪"));
+
+        // Files present but weights not loaded: standby, not ready.
+        for file in ["config.json", "tokenizer.json", "model.safetensors"] {
+            std::fs::write(dir.join(file), b"placeholder").unwrap();
+        }
+        let standby = manager.status_snapshot();
+        assert!(standby.ok, "files present must report available");
+        assert!(
+            standby.message.contains("按需加载"),
+            "standby must be distinguishable from ready: {}",
+            standby.message
+        );
+        assert!(
+            !manager.is_ready(),
+            "a standby backend must never be reported as ready"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

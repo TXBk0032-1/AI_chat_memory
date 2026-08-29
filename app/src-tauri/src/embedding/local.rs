@@ -50,6 +50,10 @@ struct LoadedModel {
     device: Device,
     device_label: String,
     dtype_label: String,
+    /// Maximum sequence length the checkpoint supports (max_position_embeddings).
+    /// Inputs are truncated to this bound on top of MAX_SEQUENCE_LEN so rotary
+    /// embeddings and attention never receive positions the model lacks.
+    max_position_embeddings: usize,
 }
 
 impl LocalHarrierBackend {
@@ -280,8 +284,11 @@ impl EmbeddingBackend for LocalHarrierBackend {
         })
     }
 
+    // Aligned with LocalBgeBackend::is_ready: "ready" means the model files
+    // are present AND the weights are actually loaded, so a standby backend
+    // (files present, lazy load pending) is never reported as ready.
     fn is_ready(&self) -> bool {
-        self.is_loaded()
+        model_files_present(&self.model_dir) && self.is_loaded()
     }
 
     fn runtime_device(&self) -> Option<String> {
@@ -611,6 +618,7 @@ fn load_model(
                     device: candidate_device,
                     device_label: candidate_device_label.clone(),
                     dtype_label: candidate_dtype_label.clone(),
+                    max_position_embeddings: config.max_position_embeddings.max(1),
                 };
                 match warmup_model(&mut loaded) {
                     Ok(()) => {
@@ -895,6 +903,46 @@ pub fn plan_local_index_batch(estimated_tokens: &[usize]) -> Vec<usize> {
     chosen
 }
 
+/// Plans consecutive packs that together cover the whole candidate window.
+/// A single `plan_local_index_batch` call only picks one length band, which
+/// left the remaining candidates pending until later fetches re-scanned and
+/// re-estimated the whole window per batch. Splitting the window into a pack
+/// per band up front lets one worker wake embed every candidate with no silent
+/// leftovers. Returns index vectors into `estimated_tokens`.
+pub fn plan_local_index_batches(estimated_tokens: &[usize]) -> Vec<Vec<usize>> {
+    let mut remaining: Vec<usize> = (0..estimated_tokens.len()).collect();
+    let mut packs: Vec<Vec<usize>> = Vec::new();
+    while !remaining.is_empty() {
+        let estimates: Vec<usize> = remaining
+            .iter()
+            .map(|&index| estimated_tokens[index])
+            .collect();
+        let chosen = plan_local_index_batch(&estimates);
+        if chosen.is_empty() {
+            // Defensive: plan_local_index_batch always selects at least one
+            // item for non-empty input; never spin on an empty plan.
+            break;
+        }
+        let mut pack: Vec<usize> = chosen.iter().map(|&position| remaining[position]).collect();
+        pack.sort_unstable();
+        let selected: std::collections::HashSet<usize> = pack.iter().copied().collect();
+        remaining.retain(|index| !selected.contains(index));
+        packs.push(pack);
+    }
+    packs
+}
+
+/// Effective per-input token cap: the fixed runtime budget bounded by the
+/// checkpoint's own max_position_embeddings, so long inputs never exceed the
+/// positions the rotary embeddings were built for.
+fn sequence_limit(max_position_embeddings: usize) -> usize {
+    match max_position_embeddings {
+        // Config value missing/unset: fall back to the runtime budget only.
+        0 => MAX_SEQUENCE_LEN,
+        bounded => MAX_SEQUENCE_LEN.min(bounded),
+    }
+}
+
 fn embed_batch(
     loaded: &mut LoadedModel,
     texts: &[String],
@@ -907,6 +955,7 @@ fn embed_batch(
     let mut lengths = Vec::with_capacity(texts.len());
     let mut max_len = 1usize;
     let mut total_tokens = 0usize;
+    let limit = sequence_limit(loaded.max_position_embeddings);
     for text in texts {
         let prepared = if is_query {
             format!("{DEFAULT_QUERY_INSTRUCTION}{text}")
@@ -923,8 +972,13 @@ fn embed_batch(
                 "tokenizer produced empty input".into(),
             ));
         }
-        if ids.len() > MAX_SEQUENCE_LEN {
-            ids.truncate(MAX_SEQUENCE_LEN);
+        if ids.len() > limit {
+            tracing::debug!(
+                tokens = ids.len(),
+                limit,
+                "truncating over-long input for local embedding"
+            );
+            ids.truncate(limit);
         }
         max_len = max_len.max(ids.len());
         total_tokens += ids.len();
@@ -1530,10 +1584,26 @@ mod tests {
 }
 
 #[cfg(test)]
+mod sequence_limit_tests {
+    use super::sequence_limit;
+
+    #[test]
+    fn sequence_limit_bounds_long_inputs_by_model_max_position() {
+        // Default large positions keep the fixed runtime budget.
+        assert_eq!(sequence_limit(32_768), super::MAX_SEQUENCE_LEN);
+        // A checkpoint with a smaller max position caps the sequence further.
+        assert_eq!(sequence_limit(1024), 1024);
+        assert_eq!(sequence_limit(2048), 2048);
+        // Degenerate config values fall back to the runtime budget, never 0.
+        assert_eq!(sequence_limit(0), super::MAX_SEQUENCE_LEN);
+    }
+}
+
+#[cfg(test)]
 mod packing_tests {
     use super::{
         LOCAL_INDEX_MAX_BATCH_ITEMS, LOCAL_INDEX_TOKEN_BUDGET, estimate_token_count,
-        plan_local_index_batch,
+        plan_local_index_batch, plan_local_index_batches,
     };
 
     #[test]
@@ -1615,6 +1685,37 @@ mod packing_tests {
             chosen.len()
         );
         assert!(chosen.iter().all(|&i| estimates[i] < 100));
+    }
+
+    #[test]
+    fn plan_local_index_batches_covers_every_candidate_without_leftovers() {
+        // Mixed bands: one wake must plan packs covering ALL candidates
+        // instead of leaving cross-band candidates pending for later fetches.
+        let mut estimates = vec![35usize; 30];
+        estimates.extend(std::iter::repeat_n(240usize, 10));
+        estimates.extend(std::iter::repeat_n(600usize, 20));
+        let packs = plan_local_index_batches(&estimates);
+        assert!(
+            packs.len() > 1,
+            "expected several packs, got {}",
+            packs.len()
+        );
+        let mut covered: Vec<usize> = packs.iter().flatten().copied().collect();
+        covered.sort_unstable();
+        covered.dedup();
+        assert_eq!(
+            covered.len(),
+            estimates.len(),
+            "candidates left pending: {packs:?}"
+        );
+        assert_eq!(covered, (0..estimates.len()).collect::<Vec<_>>());
+        for pack in &packs {
+            assert!(
+                pack.len() <= LOCAL_INDEX_MAX_BATCH_ITEMS,
+                "pack exceeds hard item cap: {}",
+                pack.len()
+            );
+        }
     }
 
     #[test]

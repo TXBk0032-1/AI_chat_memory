@@ -36,6 +36,12 @@ impl HttpEmbeddingBackend {
                 ));
             }
         };
+        if sends_credential_over_plaintext_http(&settings) {
+            tracing::warn!(
+                base_url = %settings.base_url,
+                "embedding api_key is sent as a Bearer token over plaintext http to a non-local endpoint; use https to protect the credential"
+            );
+        }
         Self::new(kind, settings, backend_id)
     }
 
@@ -232,22 +238,65 @@ impl HttpEmbeddingBackend {
             .json()
             .await
             .map_err(|error| AppError::Configuration(error.to_string()))?;
-        let mut items = payload.data;
-        if items.iter().all(|item| item.index.is_some()) {
-            items.sort_by_key(|item| item.index.unwrap_or(0));
-        }
-        let vectors = items
-            .into_iter()
-            .map(|item| item.embedding)
-            .collect::<Vec<_>>();
-        if vectors.len() != texts.len() {
-            return Err(AppError::Configuration(
-                "openai-compatible embeddings returned unexpected batch size".into(),
-            ));
-        }
+        let vectors = align_openai_embedding_vectors(payload.data, texts.len())?;
         self.lock_or_infer_dimensions(&vectors)?;
         Ok(vectors)
     }
+}
+
+/// True when a configured api_key would travel over plaintext http to a
+/// non-loopback endpoint. Local http endpoints (127.0.0.1/localhost/[::1]) are
+/// common for self-hosted runners and stay silent; remote ones only produce a
+/// warning, never a hard failure.
+fn sends_credential_over_plaintext_http(settings: &RemoteEmbeddingSettings) -> bool {
+    let has_api_key = settings
+        .api_key
+        .as_ref()
+        .is_some_and(|value| !value.trim().is_empty());
+    if !has_api_key {
+        return false;
+    }
+    let Ok(url) = reqwest::Url::parse(settings.base_url.trim()) else {
+        return false;
+    };
+    if url.scheme() != "http" {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    !(host.eq_ignore_ascii_case("localhost")
+        || host.starts_with("127.")
+        || host == "::1"
+        || host == "::ffff:127.0.0.1")
+}
+
+/// Aligns `data` items from an OpenAI-compatible embeddings response with the
+/// request order. When every item carries an index the vectors are sorted into
+/// request order; otherwise the server's returned order is trusted as-is after
+/// a warning, and a count mismatch is always an error instead of a silent
+/// misalignment.
+fn align_openai_embedding_vectors(
+    items: Vec<OpenAiEmbeddingItem>,
+    expected: usize,
+) -> Result<Vec<Vec<f32>>> {
+    if items.len() != expected {
+        return Err(AppError::Configuration(format!(
+            "openai-compatible embeddings returned {} vectors for {expected} inputs",
+            items.len()
+        )));
+    }
+    if items.iter().all(|item| item.index.is_some()) {
+        let mut items = items;
+        items.sort_by_key(|item| item.index.unwrap_or(0));
+        return Ok(items.into_iter().map(|item| item.embedding).collect());
+    }
+    tracing::warn!(
+        expected,
+        "openai-compatible embedding response missing index fields; trusting server order"
+    );
+    Ok(items.into_iter().map(|item| item.embedding).collect())
 }
 
 #[async_trait]
@@ -345,5 +394,87 @@ mod tests {
             .lock_or_infer_dimensions(&[vec![0.0; 384]])
             .unwrap_err();
         assert!(error.to_string().contains("expected 512, got 384"));
+    }
+
+    fn remote_settings(base_url: &str, api_key: Option<&str>) -> RemoteEmbeddingSettings {
+        RemoteEmbeddingSettings {
+            base_url: base_url.into(),
+            api_key: api_key.map(str::to_owned),
+            model: "test-model".into(),
+            dimensions: None,
+        }
+    }
+
+    #[test]
+    fn plaintext_http_credential_warning_targets_only_remote_endpoints() {
+        let cases: &[(&str, Option<&str>, bool)] = &[
+            ("http://api.example.com/v1", Some("secret"), true),
+            ("http://192.168.1.10:8080/v1", Some("secret"), true),
+            ("http://api.example.com/v1", Some("  "), false),
+            ("http://api.example.com/v1", None, false),
+            ("https://api.example.com/v1", Some("secret"), false),
+            ("http://127.0.0.1:8080/v1", Some("secret"), false),
+            ("http://localhost:1234/v1", Some("secret"), false),
+            ("http://[::1]:8080/v1", Some("secret"), false),
+            ("not a url", Some("secret"), false),
+        ];
+        for (base_url, api_key, expected) in cases {
+            assert_eq!(
+                sends_credential_over_plaintext_http(&remote_settings(base_url, *api_key)),
+                *expected,
+                "base_url={base_url} api_key={api_key:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn openai_compatible_with_remote_http_and_api_key_still_constructs() {
+        // CFG-5 only warns; a plaintext remote endpoint must not hard-fail.
+        let backend = HttpEmbeddingBackend::openai_compatible(
+            EmbeddingBackendKind::OpenaiCompatible,
+            remote_settings("http://api.example.com/v1", Some("secret")),
+        );
+        assert!(backend.is_ok());
+    }
+
+    fn item(index: Option<usize>, embedding: Vec<f32>) -> OpenAiEmbeddingItem {
+        OpenAiEmbeddingItem { index, embedding }
+    }
+
+    #[test]
+    fn aligns_indexed_response_items_into_request_order() {
+        let items = vec![
+            item(Some(2), vec![3.0, 3.0]),
+            item(Some(0), vec![1.0, 1.0]),
+            item(Some(1), vec![2.0, 2.0]),
+        ];
+        let vectors = align_openai_embedding_vectors(items, 3).unwrap();
+        assert_eq!(vectors[0], vec![1.0, 1.0]);
+        assert_eq!(vectors[1], vec![2.0, 2.0]);
+        assert_eq!(vectors[2], vec![3.0, 3.0]);
+    }
+
+    #[test]
+    fn missing_index_keeps_server_order_and_mismatch_is_an_error() {
+        // Partial index coverage: trust the returned order instead of a
+        // partial sort that could scramble the batch.
+        let items = vec![
+            item(Some(0), vec![1.0]),
+            item(None, vec![2.0]),
+            item(None, vec![3.0]),
+        ];
+        let vectors = align_openai_embedding_vectors(items, 3).unwrap();
+        assert_eq!(vectors[0], vec![1.0]);
+        assert_eq!(vectors[1], vec![2.0]);
+        assert_eq!(vectors[2], vec![3.0]);
+
+        // Count mismatches must error rather than silently misalign.
+        let items = vec![item(Some(0), vec![1.0]), item(Some(1), vec![2.0])];
+        let error = align_openai_embedding_vectors(items, 3).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("returned 2 vectors for 3 inputs")
+        );
     }
 }
