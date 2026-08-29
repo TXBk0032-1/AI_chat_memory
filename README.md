@@ -93,7 +93,7 @@ userscript 请求必须满足：
 
 release 产物输出到 `artifacts/`。使用 `-Clean` 可清理 Rust/前端缓存后执行完全构建。
 
-可选启用 pre-push hook：
+启用 pre-push hook（建议每个贡献者在首次克隆后执行一次，使 push 前自动跑 `ci.ps1 test` 守门；未启用时 `.githooks/pre-push` 不会被 git 调用）：
 
 ```powershell
 .\scripts\install-hooks.ps1
