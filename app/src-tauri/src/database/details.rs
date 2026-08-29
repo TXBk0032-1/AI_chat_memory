@@ -80,18 +80,23 @@ pub async fn search_session_hits(
     for row in rows {
         let message_id: String = row.try_get("id")?;
         let seq: i64 = row.try_get("seq")?;
+        // Each field is lowercased exactly once and the counting runs on that
+        // cached copy; missing/empty fields are skipped so very large thinking
+        // payloads are never re-lowercased per comparison.
         for (field, value) in [
             (
                 SearchHitField::Content,
-                row.try_get::<String, _>("content")?,
+                row.try_get::<Option<String>, _>("content")?,
             ),
             (
                 SearchHitField::Thinking,
-                row.try_get::<Option<String>, _>("thinking")?
-                    .unwrap_or_default(),
+                row.try_get::<Option<String>, _>("thinking")?,
             ),
         ] {
-            let count = occurrence_count(&value, &needle);
+            let Some(value) = value.filter(|value| !value.is_empty()) else {
+                continue;
+            };
+            let count = occurrence_count(&value.to_lowercase(), &needle);
             if count > 0 {
                 hits.push(SessionSearchHit {
                     message_id: message_id.clone(),
@@ -175,8 +180,11 @@ fn message_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Message> {
     })
 }
 
-fn occurrence_count(value: &str, lowercase_needle: &str) -> usize {
-    value.to_lowercase().match_indices(lowercase_needle).count()
+/// Counts non-overlapping occurrences in an already-lowercased haystack
+/// without allocating again. The caller caches `value.to_lowercase()` once per
+/// field and lowercases the needle once per query.
+fn occurrence_count(lowercase_value: &str, lowercase_needle: &str) -> usize {
+    lowercase_value.match_indices(lowercase_needle).count()
 }
 
 fn json_string(value: &serde_json::Value, key: &str) -> String {

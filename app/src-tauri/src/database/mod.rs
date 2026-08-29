@@ -8,7 +8,7 @@ pub mod timestamp;
 pub use connection::{connect, copy_database};
 pub use details::{get_session_branches, get_session_messages, open_session, search_session_hits};
 pub use imports::import_sessions;
-pub use maintenance::{delete_session, sync_status};
+pub use maintenance::{delete_embedding_vectors_in, delete_session, sync_status};
 pub use sessions::{search, search_and_count};
 
 #[cfg(test)]
@@ -584,5 +584,169 @@ mod tests {
         assert_eq!(table_count(&pool, "messages").await, 0);
         assert_eq!(table_count(&pool, "embedding_chunks").await, 0);
         assert_eq!(table_count(&pool, "embedding_vec").await, 0);
+    }
+
+    #[tokio::test]
+    async fn search_session_hits_counts_mixed_case_occurrences_and_skips_missing_fields() {
+        let pool = create_detail_pool().await;
+        sqlx::query("INSERT INTO sessions (id, platform, platform_session_id) VALUES ('case', 'deepseek', 'case')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let thinking_metadata = json!({"thinking": "a NEEDLE here"});
+        sqlx::query("INSERT INTO messages (id, session_id, role, content, metadata, seq) VALUES ('with-thinking', 'case', 'assistant', 'Needle NEEDLE needle', ?, 1)")
+            .bind(thinking_metadata.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+        // NULL thinking and NULL content must not produce hits or errors.
+        sqlx::query("INSERT INTO messages (id, session_id, role, content, metadata, seq) VALUES ('bare', 'case', 'user', 'nothing relevant', NULL, 2)")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let hits = search_session_hits(&pool, "case", "NeEdLe").await.unwrap();
+
+        assert_eq!(hits.len(), 2);
+        let content = hits
+            .iter()
+            .find(|hit| hit.field == SearchHitField::Content)
+            .unwrap();
+        assert_eq!(content.message_id, "with-thinking");
+        assert_eq!(content.count, 3, "content lowercased once and counted");
+        let thinking = hits
+            .iter()
+            .find(|hit| hit.field == SearchHitField::Thinking)
+            .unwrap();
+        assert_eq!(thinking.message_id, "with-thinking");
+        assert_eq!(thinking.count, 1);
+    }
+
+    #[tokio::test]
+    async fn sync_status_returns_normalized_epoch_string() {
+        let pool = create_detail_pool().await;
+        sqlx::query("INSERT INTO sessions (id, platform, platform_session_id, updated_at) VALUES ('iso-newest', 'deepseek', 'iso', '2026-06-08T01:35:06.105+08:00')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO sessions (id, platform, platform_session_id, updated_at) VALUES ('older-epoch', 'deepseek', 'older', '1749317706.105')")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let latest = sync_status(&pool, "deepseek").await.unwrap().unwrap();
+
+        // The value must be the normalized epoch-seconds text used for
+        // ordering, not the raw stored string.
+        let parsed: f64 = latest.parse().unwrap_or_else(|error| {
+            panic!("sync_status must return a parseable epoch string, got {latest}: {error}")
+        });
+        assert!((parsed - 1_780_853_706.105).abs() < 0.01, "got {latest}");
+        assert!(
+            sync_status(&pool, "missing-platform")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_session_removes_all_session_vectors_via_batched_delete() {
+        let pool = create_sync_pool().await;
+        let session = session_fixture("session-vec-batch", "Batched vectors");
+        import_sessions(&pool, std::slice::from_ref(&session), false)
+            .await
+            .unwrap();
+        let session_id: String = sqlx::query_scalar(
+            "SELECT id FROM sessions WHERE platform_session_id = 'session-vec-batch'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        for chunk_id in 201..=220_i64 {
+            sqlx::query(
+                "INSERT INTO embedding_chunks
+                 (id, message_id, session_id, platform, chunk_index, role, text, content_hash,
+                  backend_id, model_id, dim, status, updated_at)
+                 VALUES (?, ?, ?, 'custom', ?, 'user', 'hello', 'h',
+                         'local', 'model-a', 512, 'ready', 'now')",
+            )
+            .bind(chunk_id)
+            .bind(format!("m{chunk_id}"))
+            .bind(&session_id)
+            .bind(chunk_id - 201)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO embedding_vec (chunk_id, embedding, session_id, message_id, platform) VALUES (?, ?, ?, 'm1', 'custom')",
+            )
+            .bind(chunk_id)
+            .bind(vec![0u8; 512 * 4])
+            .bind(&session_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        assert_eq!(table_count(&pool, "embedding_vec").await, 20);
+
+        delete_session(&pool, &session_id, false).await.unwrap();
+
+        assert_eq!(table_count(&pool, "embedding_vec").await, 0);
+        assert_eq!(table_count(&pool, "embedding_chunks").await, 0);
+    }
+
+    #[tokio::test]
+    async fn reimport_deletes_stale_session_vectors_and_chunks() {
+        let pool = create_sync_pool().await;
+        let first = normalize_session(
+            "custom",
+            &json!({"id":"vec-reimport","title":"one","messages":[{"role":"user","content":"old"}]}),
+        )
+        .unwrap();
+        import_sessions(&pool, &[first], false).await.unwrap();
+        let session_id: String = sqlx::query_scalar("SELECT id FROM sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        for chunk_id in 301..=304_i64 {
+            sqlx::query(
+                "INSERT INTO embedding_chunks
+                 (id, message_id, session_id, platform, chunk_index, role, text, content_hash,
+                  backend_id, model_id, dim, status, updated_at)
+                 VALUES (?, ?, ?, 'custom', ?, 'user', 't', 'h',
+                         'local', 'model-a', 512, 'ready', 'now')",
+            )
+            .bind(chunk_id)
+            .bind(format!("m{chunk_id}"))
+            .bind(&session_id)
+            .bind(chunk_id - 301)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO embedding_vec (chunk_id, embedding, session_id, message_id, platform) VALUES (?, ?, ?, 'm', 'custom')",
+            )
+            .bind(chunk_id)
+            .bind(vec![0u8; 512 * 4])
+            .bind(&session_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        assert_eq!(table_count(&pool, "embedding_vec").await, 4);
+
+        let second = normalize_session(
+            "custom",
+            &json!({"id":"vec-reimport","title":"two","messages":[{"role":"user","content":"new"}]}),
+        )
+        .unwrap();
+        import_sessions(&pool, &[second], false).await.unwrap();
+
+        // The re-import cleared the previous chunks and their vectors in one
+        // batched delete; no stale vector rows survive.
+        assert_eq!(table_count(&pool, "embedding_chunks").await, 0);
+        assert_eq!(table_count(&pool, "embedding_vec").await, 0);
+        assert_eq!(table_count(&pool, "messages").await, 1);
     }
 }

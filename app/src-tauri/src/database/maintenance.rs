@@ -52,12 +52,7 @@ pub async fn delete_session(pool: &SqlitePool, id: &str, record_sync: bool) -> R
                 .bind(id)
                 .fetch_all(&mut *tx)
                 .await?;
-        for chunk_id in chunk_ids {
-            let _ = sqlx::query("DELETE FROM embedding_vec WHERE chunk_id = ?")
-                .bind(chunk_id)
-                .execute(&mut *tx)
-                .await;
-        }
+        delete_embedding_vectors_in(&mut tx, &chunk_ids).await?;
         sqlx::query("DELETE FROM embedding_chunks WHERE session_id = ?")
             .bind(id)
             .execute(&mut *tx)
@@ -79,11 +74,38 @@ pub async fn delete_session(pool: &SqlitePool, id: &str, record_sync: bool) -> R
 
 pub async fn sync_status(pool: &SqlitePool, platform: &str) -> Result<Option<String>> {
     let expr = crate::database::timestamp::expression("updated_at");
+    // Return the same normalized epoch-seconds value that drives the ordering
+    // so clients always receive a stable format, regardless of whether the
+    // stored updated_at is an ISO string, millisecond or second epoch.
     let query = format!(
-        "SELECT updated_at FROM sessions WHERE platform = ? AND updated_at IS NOT NULL AND trim(updated_at) != '' ORDER BY ({expr}) DESC LIMIT 1"
+        "SELECT CAST(({expr}) AS TEXT) FROM sessions WHERE platform = ? AND updated_at IS NOT NULL AND trim(updated_at) != '' ORDER BY ({expr}) DESC LIMIT 1"
     );
-    Ok(sqlx::query_scalar(&query)
+    let value = sqlx::query_scalar::<_, Option<String>>(&query)
         .bind(platform)
         .fetch_optional(pool)
-        .await?)
+        .await?
+        .flatten();
+    Ok(value)
+}
+
+/// Deletes the embedding vectors for `chunk_ids` with batched
+/// `DELETE ... WHERE chunk_id IN (...)` statements instead of one statement per
+/// chunk. Errors propagate so the surrounding transaction can roll back.
+pub async fn delete_embedding_vectors_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    chunk_ids: &[i64],
+) -> Result<()> {
+    const BATCH_SIZE: usize = 64;
+    for batch in chunk_ids.chunks(BATCH_SIZE) {
+        let placeholders = std::iter::repeat_n("?", batch.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!("DELETE FROM embedding_vec WHERE chunk_id IN ({placeholders})");
+        let mut query = sqlx::query(&sql);
+        for chunk_id in batch {
+            query = query.bind(chunk_id);
+        }
+        query.execute(&mut **tx).await?;
+    }
+    Ok(())
 }

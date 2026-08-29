@@ -537,12 +537,7 @@ async fn delete_by_key_in(
                 .bind(&id)
                 .fetch_all(&mut **tx)
                 .await?;
-        for chunk_id in chunk_ids {
-            let _ = sqlx::query("DELETE FROM embedding_vec WHERE chunk_id = ?")
-                .bind(chunk_id)
-                .execute(&mut **tx)
-                .await;
-        }
+        crate::database::delete_embedding_vectors_in(&mut *tx, &chunk_ids).await?;
         sqlx::query("DELETE FROM embedding_chunks WHERE session_id = ?")
             .bind(&id)
             .execute(&mut **tx)
