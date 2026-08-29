@@ -7,6 +7,14 @@ param(
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+
+# pwsh 7 拉起的 powershell.exe 5.1 子进程会继承 pwsh 的 PSModulePath，导致 5.1
+# 自动加载不到系统自带模块（如 Microsoft.PowerShell.Utility 的 Get-FileHash）。
+# 在派生任何子进程前补回 5.1 的系统模块目录；宿主本身是 5.1 时该目录已在其中，无副作用。
+$windowsPowerShellModules = Join-Path $env:SystemRoot "System32\WindowsPowerShell\v1.0\Modules"
+if (($env:PSModulePath -split ";") -notcontains $windowsPowerShellModules) {
+    $env:PSModulePath = "$windowsPowerShellModules;$env:PSModulePath"
+}
 $Root = Split-Path -Parent $PSScriptRoot
 $App = Join-Path $Root "app"
 $Rust = Join-Path $App "src-tauri"
