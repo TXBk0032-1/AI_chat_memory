@@ -4,14 +4,18 @@
 use crate::error::AppError;
 use crate::mcp::params::{
     clamp_limit, clamp_offset, normalize_optional_search_date, normalize_required_query,
+    normalize_required_session_id,
 };
 use crate::models::{SearchMode, SearchQuery};
 use crate::service::AppService;
-use rmcp::handler::server::{router::tool::ToolRouter, wrapper::Parameters};
+use rmcp::handler::server::{
+    router::prompt::PromptRouter, router::tool::ToolRouter, wrapper::Parameters,
+};
 use rmcp::model::*;
 use rmcp::service::RequestContext;
 use rmcp::{
-    ErrorData as McpError, RoleServer, ServerHandler, schemars, tool, tool_handler, tool_router,
+    ErrorData as McpError, RoleServer, ServerHandler, prompt, prompt_handler, prompt_router,
+    schemars, tool, tool_handler, tool_router,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -25,6 +29,7 @@ const JSON_MIME: &str = "application/json";
 pub struct ChatMemoryMcp {
     pub service: AppService,
     tool_router: ToolRouter<Self>,
+    prompt_router: PromptRouter<Self>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -84,12 +89,28 @@ struct SearchInSessionArgs {
     mode: Option<String>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct SummarizeSessionArgs {
+    /// 会话 ID（可通过 search_sessions 工具或 sessions://recent 资源获取）
+    session_id: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+struct FindMemoriesArgs {
+    /// 主题词或要回忆的问题（必填）
+    topic: String,
+    /// 平台过滤，如 deepseek / doubao / kimi
+    #[serde(default)]
+    platform: Option<String>,
+}
+
 #[tool_router]
 impl ChatMemoryMcp {
     pub fn new(service: AppService) -> Self {
         Self {
             service,
             tool_router: Self::tool_router(),
+            prompt_router: Self::prompt_router(),
         }
     }
 
@@ -188,11 +209,96 @@ impl ChatMemoryMcp {
     }
 }
 
+#[prompt_router]
+impl ChatMemoryMcp {
+    #[prompt(
+        name = "summarize-session",
+        description = "生成总结指定会话的提示词：预取会话元数据与首窗消息，产出一段可直接发给模型的「总结此会话」用户消息。"
+    )]
+    async fn summarize_session(
+        &self,
+        Parameters(args): Parameters<SummarizeSessionArgs>,
+    ) -> Result<GetPromptResult, McpError> {
+        let session_id = normalize_required_session_id(&args.session_id)
+            .map_err(|msg| McpError::invalid_params(msg, None))?;
+        let open = self
+            .service
+            .open_session(&session_id, None)
+            .await
+            .map_err(|err| resource_mcp_error(&err))?;
+
+        let mut text = format!(
+            "请总结以下 AI 聊天会话。平台：{}，标题：{}。请按主题归纳双方要点、结论与待办事项，保留关键细节，用中文输出。\n\n",
+            open.summary.platform, open.summary.title
+        );
+        if open.message_count > open.messages.len() {
+            let next_seq = open
+                .messages
+                .last()
+                .map(|m| m.seq + 1)
+                .unwrap_or(open.start_seq);
+            text.push_str(&format!(
+                "以下为该会话首窗消息（第 {} 条起，共 {} 条）。如需更多上下文，可使用 get_messages 工具从 start_seq={} 继续读取。\n\n",
+                open.start_seq,
+                open.message_count,
+                next_seq
+            ));
+        } else {
+            text.push_str("以下为该会话全部消息。\n\n");
+        }
+        text.push_str("--- 会话记录 ---\n");
+        for message in &open.messages {
+            text.push_str(&format!("[{}] {}\n", message.role, message.content.trim()));
+        }
+
+        Ok(
+            GetPromptResult::new(vec![PromptMessage::new_text(Role::User, text)])
+                .with_description(format!("总结会话「{}」", open.summary.title)),
+        )
+    }
+
+    #[prompt(
+        name = "find-memories",
+        description = "生成跨会话记忆检索的提示词：输入主题词，产出一段指导模型调用 search_sessions 等工具跨会话检索并归纳相关聊天记录的用户消息。"
+    )]
+    async fn find_memories(
+        &self,
+        Parameters(args): Parameters<FindMemoriesArgs>,
+    ) -> Result<GetPromptResult, McpError> {
+        let topic = normalize_required_query(&args.topic)
+            .map_err(|msg| McpError::invalid_params(msg, None))?;
+        let mut text = format!(
+            "请在本地 AI 聊天记忆库中检索与「{topic}」相关的聊天记录，并跨会话归纳。步骤：\n\
+             1. 使用 search_sessions 工具搜索关键词「{topic}」，必要时调整 limit/offset 分批获取；\n"
+        );
+        if let Some(platform) = args
+            .platform
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            text.push_str(&format!("   - 仅限定平台「{platform}」；\n"));
+        }
+        text.push_str(
+            "2. 用 open_session 打开相关会话，读取首窗消息确认相关性；\n\
+             3. 归纳各会话中与该主题相关的观点、结论、时间线与分歧，并标注来源会话标题；\n\
+             4. 最后给出跨会话的综合结论与尚不确定的部分。请用中文输出。",
+        );
+
+        Ok(
+            GetPromptResult::new(vec![PromptMessage::new_text(Role::User, text)])
+                .with_description(format!("跨会话检索「{topic}」")),
+        )
+    }
+}
+
+#[prompt_handler]
 #[tool_handler]
 impl ServerHandler for ChatMemoryMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(
             ServerCapabilities::builder()
+                .enable_prompts()
                 .enable_resources()
                 .enable_tools()
                 .build(),
@@ -202,7 +308,7 @@ impl ServerHandler for ChatMemoryMcp {
             env!("CARGO_PKG_VERSION"),
         ))
         .with_instructions(
-            "只读本地 AI 聊天记忆库。需桌面应用在线。端点 http://127.0.0.1:19821/mcp。可用 Tools 搜索/打开/读消息；Resources：sessions://recent、session://{id}、session://{id}/messages。"
+            "只读本地 AI 聊天记忆库。需桌面应用在线。端点 http://127.0.0.1:19821/mcp。可用 Tools 搜索/打开/读消息；Resources：sessions://recent、session://{id}、session://{id}/messages；Prompts：summarize-session（总结指定会话）、find-memories（跨会话检索记忆）。"
                 .to_string(),
         )
     }
@@ -436,8 +542,302 @@ fn normalize_search_dates(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::SearchMode;
+    use crate::database;
+    use crate::models::EmbeddingBackendKind;
+    use crate::service::AppService;
+    use crate::settings::SettingsStore;
     use chrono::{Local, TimeZone, Timelike};
+    use rmcp::ServiceExt;
+    use std::sync::Arc;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    /// MCP 协议测试夹具：独立临时库 + Ollama 语义后端（构造期零网络/零 CUDA）。
+    async fn test_app_service() -> (AppService, std::path::PathBuf) {
+        let data_dir =
+            std::env::temp_dir().join(format!("ai-chat-memory-mcp-test-{}", uuid::Uuid::new_v4()));
+        let pool = database::connect(&data_dir.join("chat_memory.db"))
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO sessions (id, platform, platform_session_id, title, raw_data)
+             VALUES ('seed-session', 'deepseek', 'seed-1', 'Rust 异步编程讨论', '{}')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO messages (id, session_id, role, content, metadata, seq)
+             VALUES ('seed-m1', 'seed-session', 'user', '如何理解 Rust 的 async/await？', '{}', 0)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO messages (id, session_id, role, content, metadata, seq)
+             VALUES ('seed-m2', 'seed-session', 'assistant', 'async/await 是零开销抽象。', '{}', 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // keyword 检索走 session_fts（仅 import 路径维护），夹具需手动补 FTS 行。
+        sqlx::query("INSERT INTO session_fts_ids(session_id) VALUES ('seed-session')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let fts_rowid: i64 =
+            sqlx::query_scalar("SELECT fts_rowid FROM session_fts_ids WHERE session_id = ?")
+                .bind("seed-session")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        sqlx::query(
+            "INSERT INTO session_fts(rowid, session_id, title, content) VALUES (?, ?, ?, ?)",
+        )
+        .bind(fts_rowid)
+        .bind("seed-session")
+        .bind("Rust 异步编程讨论")
+        .bind("如何理解 Rust 的 async/await？\nasync/await 是零开销抽象。")
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let settings = Arc::new(
+            SettingsStore::load(data_dir.join("settings.json"))
+                .await
+                .unwrap(),
+        );
+        let mut settings_value = settings.get().await;
+        settings_value.semantic_search.backend = EmbeddingBackendKind::Ollama;
+        settings.update(settings_value.clone()).await.unwrap();
+        let service = AppService::new(pool, settings, data_dir.clone())
+            .await
+            .unwrap();
+        (service, data_dir)
+    }
+
+    fn prompt_text(result: &GetPromptResult) -> &str {
+        match &result.messages[0].content {
+            ContentBlock::Text(text) => text.text.as_str(),
+            other => panic!("expected text content, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn prompt_router_lists_two_prompts() {
+        let names: Vec<String> = ChatMemoryMcp::prompt_router()
+            .list_all()
+            .into_iter()
+            .map(|prompt| prompt.name.to_string())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["find-memories".to_string(), "summarize-session".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn summarize_session_prompt_prefetches_first_window() {
+        let (service, _data_dir) = test_app_service().await;
+        let handler = ChatMemoryMcp::new(service);
+        let result = handler
+            .summarize_session(Parameters(SummarizeSessionArgs {
+                session_id: "seed-session".into(),
+            }))
+            .await
+            .unwrap();
+        let text = prompt_text(&result);
+        assert!(text.contains("deepseek"), "{text}");
+        assert!(text.contains("Rust 异步编程讨论"), "{text}");
+        assert!(
+            text.contains("[user] 如何理解 Rust 的 async/await？"),
+            "{text}"
+        );
+        assert!(
+            text.contains("[assistant] async/await 是零开销抽象。"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn summarize_session_prompt_rejects_empty_and_unknown_session() {
+        let (service, _data_dir) = test_app_service().await;
+        let handler = ChatMemoryMcp::new(service);
+
+        let err = handler
+            .summarize_session(Parameters(SummarizeSessionArgs {
+                session_id: "   ".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+        assert!(err.message.contains("会话 ID 不能为空"), "{}", err.message);
+
+        let err = handler
+            .summarize_session(Parameters(SummarizeSessionArgs {
+                session_id: "missing".into(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::RESOURCE_NOT_FOUND);
+        assert!(err.message.contains("未找到"), "{}", err.message);
+    }
+
+    #[tokio::test]
+    async fn find_memories_prompt_builds_retrieval_instructions() {
+        let (service, _data_dir) = test_app_service().await;
+        let handler = ChatMemoryMcp::new(service);
+
+        let result = handler
+            .find_memories(Parameters(FindMemoriesArgs {
+                topic: "  量化交易  ".into(),
+                platform: Some("deepseek".into()),
+            }))
+            .await
+            .unwrap();
+        let text = prompt_text(&result);
+        assert!(text.contains("量化交易"), "{text}");
+        assert!(text.contains("deepseek"), "{text}");
+        assert!(text.contains("search_sessions"), "{text}");
+
+        let err = handler
+            .find_memories(Parameters(FindMemoriesArgs {
+                topic: "   ".into(),
+                platform: None,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::INVALID_PARAMS);
+        assert!(err.message.contains("查询词不能为空"), "{}", err.message);
+    }
+
+    /// 协议级回归：stdio 与 duplex 共用 async_rw 传输（换行分隔 JSON-RPC），
+    /// 此测试等价验证 stdio 传输下的 initialize → prompts → tools 全链路。
+    #[tokio::test]
+    async fn mcp_protocol_flow_over_memory_duplex() {
+        let (service, _data_dir) = test_app_service().await;
+        let (client_side, server_side) = tokio::io::duplex(64 * 1024);
+        let (read_half, mut write_half) = tokio::io::split(client_side);
+
+        // rmcp serve() 返回前会同步等待并处理客户端 initialize 握手，
+        // 因此必须先把 initialize 写入 duplex 缓冲，再启动服务端。
+        async fn write_message(
+            writer: &mut tokio::io::WriteHalf<tokio::io::DuplexStream>,
+            value: &serde_json::Value,
+        ) {
+            writer
+                .write_all(format!("{value}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+        async fn read_message(
+            reader: &mut BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>,
+        ) -> serde_json::Value {
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await.unwrap();
+            serde_json::from_slice(&line).unwrap()
+        }
+
+        write_message(
+            &mut write_half,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "mcp-test", "version": "0.0.0"}
+                }
+            }),
+        )
+        .await;
+
+        let running = ChatMemoryMcp::new(service)
+            .serve(server_side)
+            .await
+            .unwrap();
+        let mut reader = BufReader::new(read_half);
+
+        let response = read_message(&mut reader).await;
+        assert_eq!(response["id"], 1);
+        assert_eq!(response["result"]["serverInfo"]["name"], "ai-chat-memory");
+        assert!(response["result"]["capabilities"]["prompts"].is_object());
+        assert!(response["result"]["capabilities"]["tools"].is_object());
+        assert!(response["result"]["capabilities"]["resources"].is_object());
+
+        write_message(
+            &mut write_half,
+            &json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        )
+        .await;
+
+        write_message(
+            &mut write_half,
+            &json!({"jsonrpc": "2.0", "id": 2, "method": "prompts/list"}),
+        )
+        .await;
+        let response = read_message(&mut reader).await;
+        assert_eq!(response["id"], 2);
+        let names: Vec<&str> = response["result"]["prompts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|prompt| prompt["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"summarize-session"), "{names:?}");
+        assert!(names.contains(&"find-memories"), "{names:?}");
+
+        write_message(
+            &mut write_half,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "prompts/get",
+                "params": {
+                    "name": "summarize-session",
+                    "arguments": {"session_id": "seed-session"}
+                }
+            }),
+        )
+        .await;
+        let response = read_message(&mut reader).await;
+        assert_eq!(response["id"], 3);
+        let text = response["result"]["messages"][0]["content"]["text"]
+            .as_str()
+            .unwrap();
+        assert!(text.contains("Rust 异步编程讨论"), "{text}");
+
+        write_message(
+            &mut write_half,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "prompts/get",
+                "params": {"name": "no-such-prompt", "arguments": {}}
+            }),
+        )
+        .await;
+        let response = read_message(&mut reader).await;
+        assert_eq!(response["id"], 4);
+        assert_eq!(response["error"]["code"], ErrorCode::INVALID_PARAMS.0);
+
+        write_message(
+            &mut write_half,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/call",
+                "params": {"name": "search_sessions", "arguments": {"q": "Rust"}}
+            }),
+        )
+        .await;
+        let response = read_message(&mut reader).await;
+        assert_eq!(response["id"], 5);
+        let tool_text = response["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(tool_text.contains("seed-session"), "{tool_text}");
+
+        let _ = running.cancel().await;
+    }
 
     #[test]
     fn parse_resource_uri_recent_default_and_limit() {

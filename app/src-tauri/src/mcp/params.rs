@@ -23,6 +23,17 @@ pub fn normalize_required_query(q: &str) -> Result<String, String> {
     }
 }
 
+/// Trim and require a non-empty session id for tools/prompts.
+#[allow(dead_code)] // wired by later MCP tool/prompt handlers
+pub fn normalize_required_session_id(value: &str) -> Result<String, String> {
+    let t = value.trim();
+    if t.is_empty() {
+        Err("会话 ID 不能为空".into())
+    } else {
+        Ok(t.to_string())
+    }
+}
+
 /// Normalize a MCP date filter to Unix seconds using the local timezone.
 pub fn normalize_optional_search_date(
     value: Option<&str>,
@@ -135,6 +146,12 @@ mod tests {
         assert!(normalize_required_query("  ").is_err());
         assert_eq!(normalize_required_query("foo").unwrap(), "foo");
         assert_eq!(normalize_required_query("  bar  ").unwrap(), "bar");
+    }
+
+    #[test]
+    fn rejects_empty_session_id() {
+        assert!(normalize_required_session_id("  ").is_err());
+        assert_eq!(normalize_required_session_id("  abc-1  ").unwrap(), "abc-1");
     }
 
     #[test]
