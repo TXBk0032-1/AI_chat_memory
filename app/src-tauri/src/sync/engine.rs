@@ -308,14 +308,10 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
     pub async fn run_once(&self, _trigger: SyncTrigger) -> Result<SyncReport> {
         let _guard = self.single_flight.lock().await;
         let (vault, recovered) = self.ensure_active_vault().await?;
+        log_recovered_publication(self.device_id.as_str(), recovered.as_ref());
         let mut report = self
             .pull_remote(PullPolicy::TolerantSync, vault.compatibility)
             .await?;
-        if let Some((owner_device_id, count)) = recovered
-            && owner_device_id == self.device_id
-        {
-            report.published += count;
-        }
         loop {
             let published = self.publish_pending().await?;
             report.published += published.published;
@@ -333,14 +329,10 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
     ) -> Result<SyncReport> {
         let _guard = self.single_flight.lock().await;
         let (vault, recovered) = self.ensure_active_vault().await?;
+        log_recovered_publication(self.device_id.as_str(), recovered.as_ref());
         let mut report = self
             .pull_remote(PullPolicy::TolerantSync, vault.compatibility)
             .await?;
-        if let Some((owner_device_id, count)) = recovered
-            && owner_device_id == self.device_id
-        {
-            report.published += count;
-        }
         self.store
             .replay_local_baseline_for_generation(&self.vault_id, &self.generation_id)
             .await?;
@@ -582,6 +574,11 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
             .map_err(|error| remote_read_error(error, "released v1 bundle listing"))?;
         let mut candidates = Vec::new();
         let mut candidate_bytes: usize = 0;
+        // ENG-10: content-addressed object names carry the bundle SHA-256, so a
+        // second listing entry with an already-verified digest is a duplicate
+        // copy of the same content. Skip it before downloading instead of
+        // paying a second download+decode for identical bytes.
+        let mut verified_digests = std::collections::HashSet::new();
         for entry in entries {
             if entry.is_collection || !entry.name.ends_with(".acmb") {
                 continue;
@@ -593,6 +590,9 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
             }
             let (start_seq, end_seq, sha256) = parse_bundle_object_name(&entry.name)?;
             if start_seq > legacy_head.end_seq || end_seq > legacy_head.end_seq {
+                continue;
+            }
+            if !verified_digests.insert(sha256.clone()) {
                 continue;
             }
             let path = bundles_path
@@ -1556,11 +1556,22 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
             VaultState::Active => current,
             VaultState::Publishing {
                 owner_device_id,
-                published_mutation_count,
+                head_path,
                 ..
             } => {
-                recovered_publication = Some((owner_device_id.clone(), *published_mutation_count));
-                recover_head_publish(self.backend.as_ref(), &current).await?
+                // ENG-26: the recorded published_mutation_count is what the
+                // interrupted publisher requested, not what the recovered head
+                // actually advances. Snapshot this device head before the
+                // recovery and diff it against the head after the recovery so
+                // the reported count is the real end_seq advance.
+                let previous_end_seq = self.read_head_end_seq(head_path).await?;
+                let recovered = recover_head_publish(self.backend.as_ref(), &current).await?;
+                let recovered_end_seq = self.read_head_end_seq(head_path).await?;
+                let count = recovered_end_seq
+                    .unwrap_or(0)
+                    .saturating_sub(previous_end_seq.unwrap_or(0));
+                recovered_publication = Some((owner_device_id.clone(), count as usize));
+                recovered
             }
             VaultState::Frozen { .. } => {
                 return Err(AppError::InvalidData(
@@ -1578,6 +1589,22 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
             ));
         }
         Ok((current, recovered_publication))
+    }
+
+    /// Reads the `end_seq` of a device head document, returning `None` when the
+    /// head does not exist yet. Used to measure how far a head-publication
+    /// recovery actually advances the remote chain.
+    async fn read_head_end_seq(&self, head_path: &str) -> Result<Option<i64>> {
+        let path = RemotePath::parse(head_path)
+            .map_err(|error| AppError::InvalidData(error.to_string()))?;
+        match self.backend.get(&path).await {
+            Ok(object) => {
+                let head: HeadDocument = serde_json::from_slice(&object.bytes)?;
+                Ok(Some(head.end_seq))
+            }
+            Err(error) if error.kind() == "not_found" => Ok(None),
+            Err(error) => Err(cloud_error(error)),
+        }
     }
 
     #[cfg(test)]
@@ -1836,6 +1863,21 @@ fn frozen_target_generation(frozen: &VersionedVaultIdentity) -> Option<&str> {
             ..
         } => Some(target_generation_id),
         _ => None,
+    }
+}
+
+/// ENG-3: recovering a stuck head publication publishes nothing new — the
+/// replayed head was already accounted for by the attempt that wrote it, and
+/// `publish_pending` re-acknowledges the recovered prefix idempotently. The
+/// recovered count is therefore only logged, never added to `SyncReport`.
+fn log_recovered_publication(local_device_id: &str, recovered: Option<&(String, usize)>) {
+    if let Some((owner_device_id, count)) = recovered {
+        tracing::debug!(
+            owner_device_id = %owner_device_id,
+            local_device_id = %local_device_id,
+            recovered_end_seq_advance = count,
+            "recovered a stuck head publication"
+        );
     }
 }
 
@@ -2166,6 +2208,56 @@ mod tests {
                     "injected head write failure",
                 ));
             }
+            self.inner.put_if_absent(path, bytes).await
+        }
+
+        async fn delete(&self, path: &RemotePath) -> CloudResult<()> {
+            self.inner.delete(path).await
+        }
+
+        async fn test_capabilities(&self) -> CloudResult<()> {
+            self.inner.test_capabilities().await
+        }
+    }
+
+    /// Counts `get` calls for bundle objects so tests can observe exactly how
+    /// many remote bundles were downloaded and decoded.
+    struct CountingBundleGetBackend {
+        inner: Arc<S3Backend>,
+        bundle_gets: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl CloudBackend for CountingBundleGetBackend {
+        async fn list_depth_one(&self, path: &RemotePath) -> CloudResult<Vec<RemoteEntry>> {
+            self.inner.list_depth_one(path).await
+        }
+
+        async fn create_collection(&self, path: &RemotePath) -> CloudResult<()> {
+            self.inner.create_collection(path).await
+        }
+
+        async fn get(&self, path: &RemotePath) -> CloudResult<RemoteObject> {
+            if path.display().contains("/bundles/") {
+                self.bundle_gets.fetch_add(1, Ordering::SeqCst);
+            }
+            self.inner.get(path).await
+        }
+
+        async fn put_immutable(&self, path: &RemotePath, bytes: &[u8]) -> CloudResult<()> {
+            self.inner.put_immutable(path, bytes).await
+        }
+
+        async fn put_if_match(
+            &self,
+            path: &RemotePath,
+            bytes: &[u8],
+            etag: &str,
+        ) -> CloudResult<()> {
+            self.inner.put_if_match(path, bytes, etag).await
+        }
+
+        async fn put_if_absent(&self, path: &RemotePath, bytes: &[u8]) -> CloudResult<()> {
             self.inner.put_if_absent(path, bytes).await
         }
 
@@ -3230,6 +3322,67 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(continued_title, "released-after-upgrade");
+    }
+
+    #[tokio::test]
+    async fn released_v1_reconstruction_skips_duplicate_bundle_objects_by_sha256() {
+        let server = TestS3::start("AKID", None).await;
+        let backend = Arc::new(CountingBundleGetBackend {
+            inner: s3_backend(&server),
+            bundle_gets: AtomicUsize::new(0),
+        });
+        initialize_released_v1_test_vault(backend.as_ref()).await;
+        let first = publish_released_v1_bundle(
+            backend.as_ref(),
+            &released_v1_contents(1, 1, "released-one"),
+        )
+        .await;
+        publish_released_v1_bundle(
+            backend.as_ref(),
+            &released_v1_contents(2, 2, "released-two"),
+        )
+        .await;
+        // 恶意副本：与 1-1 同内容（同 sha256）的对象挂在另一个序列区间名下。
+        let duplicate_path = RemotePath::parse(&format!(
+            "v1/generations/generation-1/devices/device-old/bundles/2-2-{}.acmb",
+            first.sha256
+        ))
+        .unwrap();
+        let duplicate_bytes = backend
+            .get(&RemotePath::parse(&first.path).unwrap())
+            .await
+            .unwrap();
+        backend
+            .put_immutable(&duplicate_path, &duplicate_bytes.bytes)
+            .await
+            .unwrap();
+
+        let (store, pool) = test_store("device-upgraded").await;
+        let engine = SyncEngine::new(
+            store,
+            backend.clone(),
+            "default",
+            "generation-1",
+            "device-upgraded",
+        );
+        // 只统计 engine 在重建阶段发起的 bundle 下载，不包含测试自身读取副本字节。
+        backend.bundle_gets.store(0, Ordering::SeqCst);
+
+        let report = engine.run_once(SyncTrigger::Manual).await.unwrap();
+
+        // ENG-10：同名内容只下载解码一次，重复对象在收集阶段按 sha256 跳过，
+        // 而不是下载后才因序列区间不符而报错。
+        assert_eq!(report.pulled, 2);
+        let titles: Vec<String> = sqlx::query_scalar("SELECT title FROM sessions ORDER BY title")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(titles, vec!["released-one", "released-two"]);
+        assert_eq!(
+            backend.bundle_gets.load(Ordering::SeqCst),
+            3,
+            "head boundary download + two unique candidates; the duplicate copy must be skipped before download"
+        );
     }
 
     #[test]
@@ -5286,6 +5439,142 @@ mod tests {
         assert!(
             store.pending_mutations(10).await.unwrap().is_empty(),
             "pending work must not be skipped until the next run"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_once_does_not_inflate_published_with_recovered_publication_counts() {
+        let server = TestS3::start("AKID", None).await;
+        let backend = s3_backend(&server);
+        let (store, _pool) = test_store("device-a").await;
+        store
+            .queue_local_upsert(snapshot(0, "already-published"), 1_000)
+            .await
+            .unwrap();
+        initialize_test_vault(
+            backend.as_ref(),
+            "vault",
+            "generation",
+            VaultProtection::plain(),
+        )
+        .await;
+        let engine = SyncEngine::new(
+            store.clone(),
+            backend.clone(),
+            "vault",
+            "generation",
+            "device-a",
+        );
+        engine.run_once(SyncTrigger::Manual).await.unwrap();
+
+        // 模拟崩溃残留：vault 卡在 Publishing，历史 published_mutation_count=5
+        // 是请求时的值，与本次 run 实际发布的条数无关。
+        let identity = load_versioned_identity(backend.as_ref()).await.unwrap();
+        let head = backend.get(&engine.head_path().unwrap()).await.unwrap();
+        begin_head_publish(
+            backend.as_ref(),
+            &identity,
+            HeadPublishRequest {
+                operation_id: "publish-stuck".into(),
+                owner_device_id: "device-a".into(),
+                started_at_ms: current_time_millis(),
+                lease_expires_at_ms: current_time_millis()
+                    .saturating_add(DEFAULT_MAINTENANCE_LEASE_MS),
+                head_path: engine.head_path().unwrap().display(),
+                expected_head_etag: None,
+                replacement_head_json: String::from_utf8(head.bytes).unwrap(),
+                published_mutation_count: 5,
+            },
+        )
+        .await
+        .unwrap();
+        store
+            .queue_local_upsert(snapshot(1, "fresh-mutation"), 2_000)
+            .await
+            .unwrap();
+
+        // ENG-3：恢复计数是历史请求值，恢复本身不发布，不得叠加进 published。
+        let report = engine.run_once(SyncTrigger::Manual).await.unwrap();
+        assert_eq!(
+            (report.published, report.acknowledged),
+            (1, 1),
+            "published must only count the fresh mutation, not the stale recovered count"
+        );
+        assert!(store.pending_mutations(10).await.unwrap().is_empty());
+        let head: HeadDocument = serde_json::from_slice(
+            &backend
+                .get(&engine.head_path().unwrap())
+                .await
+                .unwrap()
+                .bytes,
+        )
+        .unwrap();
+        assert_eq!(head.end_seq, 2);
+    }
+
+    #[tokio::test]
+    async fn ensure_active_vault_reports_the_recovered_head_advance_not_the_requested_count() {
+        let server = TestS3::start("AKID", None).await;
+        let backend = s3_backend(&server);
+        let (store, _pool) = test_store("device-a").await;
+        store
+            .queue_local_upsert(snapshot(0, "published-before-crash"), 1_000)
+            .await
+            .unwrap();
+        initialize_test_vault(
+            backend.as_ref(),
+            "vault",
+            "generation",
+            VaultProtection::plain(),
+        )
+        .await;
+        let engine = SyncEngine::new(
+            store.clone(),
+            backend.clone(),
+            "vault",
+            "generation",
+            "device-a",
+        );
+        engine.run_once(SyncTrigger::Manual).await.unwrap();
+
+        // 模拟一个滞留的 Publishing 状态：replacement head 声称推进到 end_seq=3，
+        // 而请求时的 published_mutation_count=5 与实际推进量（3-1=2）不符。
+        let identity = load_versioned_identity(backend.as_ref()).await.unwrap();
+        let existing_object = backend.get(&engine.head_path().unwrap()).await.unwrap();
+        let existing_head: HeadDocument = serde_json::from_slice(&existing_object.bytes).unwrap();
+        let replacement = HeadDocument {
+            generation_id: existing_head.generation_id.clone(),
+            device_id: existing_head.device_id.clone(),
+            end_seq: 3,
+            path: existing_head.path.clone(),
+            sha256: existing_head.sha256.clone(),
+        };
+        begin_head_publish(
+            backend.as_ref(),
+            &identity,
+            HeadPublishRequest {
+                operation_id: "publish-stuck-advance".into(),
+                owner_device_id: "device-a".into(),
+                started_at_ms: current_time_millis(),
+                lease_expires_at_ms: current_time_millis()
+                    .saturating_add(DEFAULT_MAINTENANCE_LEASE_MS),
+                head_path: engine.head_path().unwrap().display(),
+                expected_head_etag: existing_object.etag,
+                replacement_head_json: serde_json::to_string(&replacement).unwrap(),
+                published_mutation_count: 5,
+            },
+        )
+        .await
+        .unwrap();
+
+        let (_vault, recovered) = engine.ensure_active_vault().await.unwrap();
+
+        // ENG-26：恢复计数必须来自恢复前后 head.end_seq 差值，而非请求时的
+        // published_mutation_count。
+        assert_eq!(
+            recovered,
+            Some(("device-a".into(), 2)),
+            "recovered count must be the real end_seq advance (3 - 1), not the requested count"
         );
     }
 

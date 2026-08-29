@@ -1012,9 +1012,10 @@ mod tests {
     use super::{
         GenerationMaintenanceStage, VaultDocument, VaultIdentity, VaultProtection, VaultState,
         VaultUpdateOutcome, activate_frozen_generation, activate_frozen_generation_outcome,
-        begin_generation_freeze, decode_document, load_or_create_identity, load_or_create_vault,
-        load_versioned_identity, mark_frozen_generation_ready, recover_frozen_generation,
-        recover_frozen_generation_at, replace_identity,
+        begin_generation_freeze, begin_generation_freeze_owned, decode_document,
+        load_or_create_identity, load_or_create_vault, load_versioned_identity,
+        mark_frozen_generation_ready, recover_frozen_generation, recover_frozen_generation_at,
+        replace_identity,
     };
     use crate::{
         error::AppError,
@@ -1369,6 +1370,53 @@ mod tests {
         let after = backend.get(&path).await.unwrap();
         assert_eq!(after.bytes, before.bytes);
         assert_eq!(after.etag, before.etag);
+    }
+
+    #[tokio::test]
+    async fn owned_generation_freeze_uses_the_caller_provided_lease_window() {
+        // ENG-11：租约窗口必须来自调用方的单一时间源。owned 变体不得内部再取
+        // current_time_millis()，否则调用方计算的 lease 边界与冻结实际起始时间错位。
+        let server = TestS3::start("AKID", None).await;
+        let backend = backend(&server);
+        let active = VaultDocument::active(proposed("lease"), VaultProtection::plain());
+        load_or_create_vault(&backend, active.clone())
+            .await
+            .unwrap();
+
+        begin_generation_freeze_owned(
+            &backend,
+            &active,
+            "generation-next",
+            VaultProtection::plain(),
+            "rotation-lease",
+            "device-lease",
+            1_000,
+            2_000,
+        )
+        .await
+        .unwrap();
+
+        let frozen = load_versioned_identity(&backend).await.unwrap();
+        match frozen.state {
+            VaultState::Frozen {
+                operation_id,
+                owner_device_id,
+                started_at_ms,
+                lease_expires_at_ms,
+                target_generation_id,
+                ..
+            } => {
+                assert_eq!(operation_id, "rotation-lease");
+                assert_eq!(owner_device_id, "device-lease");
+                assert_eq!(target_generation_id, "generation-next");
+                assert_eq!(
+                    (started_at_ms, lease_expires_at_ms),
+                    (1_000, 2_000),
+                    "the freeze must record the caller-provided lease window verbatim"
+                );
+            }
+            other => panic!("expected a frozen vault state, got {other:?}"),
+        }
     }
 
     #[tokio::test]
