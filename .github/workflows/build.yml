@@ -31,7 +31,7 @@ jobs:
           components: clippy, rustfmt
 
       - name: Setup CUDA Toolkit
-        uses: Jimver/cuda-toolkit@v0.2.35
+        uses: Jimver/cuda-toolkit@v0.2.36
         with:
           cuda: "13.3.0"
           method: network
