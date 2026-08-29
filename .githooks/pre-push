@@ -1,2 +1,26 @@
 #!/bin/sh
-exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/ci.ps1 test
+# CI-5: the full 'ci.ps1 test' pipeline requires the CUDA toolkit (nvcc), so on
+# machines without CUDA it would abort before the push ever happens. Detect the
+# toolkit here and degrade to the lightweight 'ci.ps1 quick' stage instead of
+# blocking legitimate pushes.
+
+have_cuda() {
+    if [ -n "$CUDA_PATH" ] && [ -f "$CUDA_PATH/bin/nvcc.exe" ]; then
+        return 0
+    fi
+    if command -v nvcc >/dev/null 2>&1; then
+        return 0
+    fi
+    if command -v where >/dev/null 2>&1 && where nvcc >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1
+}
+
+if have_cuda; then
+    exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/ci.ps1 test
+fi
+
+echo "pre-push: CUDA toolkit (nvcc) not found (checked CUDA_PATH and PATH); skipping the CUDA-dependent 'ci.ps1 test' pipeline." >&2
+echo "pre-push: degrading to the lightweight 'ci.ps1 quick' validation (userscript check/tests + frontend build)." >&2
+exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/ci.ps1 quick

@@ -6,11 +6,11 @@ Builds one uncompressed debug EXE with the shortest incremental path.
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-dev-portable.ps1
 
 .EXAMPLE
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-dev-portable.ps1 -RebuildFrontend
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-dev-portable.ps1 -ReuseFrontend
 #>
 [CmdletBinding()]
 param(
-    [switch]$RebuildFrontend,
+    [switch]$ReuseFrontend,
     [switch]$PlanOnly,
     [string]$OutputDirectory
 )
@@ -32,14 +32,21 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     $OutputDirectory = Join-Path $Root $OutputDirectory
 }
 $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
-$FrontendAction = if ($RebuildFrontend -or -not (Test-Path -LiteralPath $FrontendEntry)) {
-    "build"
-} else {
-    "reuse"
+# CI-10: rebuild the frontend by default so a stale app\dist can never be
+# embedded into the dev EXE; reuse requires an explicit -ReuseFrontend.
+$FrontendEntryExists = Test-Path -LiteralPath $FrontendEntry
+if ($ReuseFrontend -and -not $FrontendEntryExists) {
+    Write-Host "==> -ReuseFrontend was requested but the frontend dist is missing: $FrontendEntry; building it instead" -ForegroundColor Yellow
 }
+$FrontendAction = if ($ReuseFrontend -and $FrontendEntryExists) {
+    "reuse"
+} else {
+    "build"
+}
+$FrontendPreference = if ($ReuseFrontend) { "reuse" } else { "build" }
 
 $Plan = [ordered]@{
-    frontend_preference = "reuse"
+    frontend_preference = $FrontendPreference
     frontend_action = $FrontendAction
     frontend_runtime = "embedded"
     cargo_profile = "debug"

@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("check", "test", "release")]
+    [ValidateSet("check", "test", "release", "quick")]
     [string]$Stage = "check",
     [switch]$Clean
 )
@@ -90,7 +90,11 @@ function Initialize-CudaBuildEnvironment {
     }
 }
 
-Initialize-CudaBuildEnvironment
+# CI-5: 'quick' is the CUDA-free fallback stage invoked by the pre-push hook on
+# machines without the CUDA toolkit; every other stage still requires CUDA.
+if ($Stage -ne "quick") {
+    Initialize-CudaBuildEnvironment
+}
 
 function Invoke-Step {
     param([string]$Name, [scriptblock]$Action)
@@ -102,15 +106,19 @@ function Invoke-Step {
     Write-Host ("OK  {0} ({1:n1}s)" -f $Name, $watch.Elapsed.TotalSeconds) -ForegroundColor Green
 }
 
-foreach ($command in "git", "node", "npm", "rustc", "cargo") {
+$requiredCommands = if ($Stage -eq "quick") { "git", "node", "npm" } else { "git", "node", "npm", "rustc", "cargo" }
+foreach ($command in $requiredCommands) {
     if (-not (Get-Command $command -ErrorAction SilentlyContinue)) {
         throw "Required command not found: $command"
     }
 }
 
-$rustVersion = (& rustc --version 2>&1) -join " "
-if ($rustVersion -notmatch '^rustc 1\.97\.') {
-    throw "Expected Rust 1.97.x, found: $rustVersion"
+$rustVersion = $null
+if ($Stage -ne "quick") {
+    $rustVersion = (& rustc --version 2>&1) -join " "
+    if ($rustVersion -notmatch '^rustc 1\.97\.') {
+        throw "Expected Rust 1.97.x, found: $rustVersion"
+    }
 }
 
 if ($Clean) {
@@ -225,6 +233,25 @@ $rustCmd = "node --check `"$userscriptPath`" && node --test `"$userscriptTestPat
 if ($Stage -in "test", "release") {
     $frontendCmd = "npm run build && npm test"
     $rustCmd = "$rustCmd && cargo test --all-features"
+}
+
+# CI-5: lightweight CUDA-free stage used as the pre-push hook fallback. It only
+# validates the userscript and rebuilds the frontend; everything that needs the
+# CUDA toolkit (cargo build/tests, clippy) stays in the 'test'/'release' stages.
+if ($Stage -eq "quick") {
+    Write-Host "==> Quick stage: lightweight validation without the CUDA toolkit" -ForegroundColor Cyan
+    Invoke-Step "Check userscript syntax" {
+        node --check $userscriptPath
+    }
+    Invoke-Step "Run userscript tests" {
+        node --test $userscriptTestPath
+    }
+    Invoke-Step "Build frontend" {
+        Push-Location $App
+        try { npm run build } finally { Pop-Location }
+    }
+    Write-Host "`nLocal CI stage 'quick' passed (CUDA-dependent checks were skipped; run 'ci.ps1 test' on a CUDA machine for the full pipeline)." -ForegroundColor Green
+    exit 0
 }
 
 Invoke-ParallelSteps @(

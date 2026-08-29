@@ -22,18 +22,19 @@ if (-not (Test-Path -LiteralPath $Builder)) {
 }
 
 $defaultPlan = & $Builder -PlanOnly | ConvertFrom-Json
-Assert-Equal "reuse" $defaultPlan.frontend_preference "default frontend preference"
-if ($defaultPlan.frontend_action -notin "reuse", "build") {
-    throw "Unexpected default frontend action: $($defaultPlan.frontend_action)"
-}
+Assert-Equal "build" $defaultPlan.frontend_preference "default frontend preference"
+Assert-Equal "build" $defaultPlan.frontend_action "default frontend action"
 Assert-Equal "debug" $defaultPlan.cargo_profile "Cargo profile"
 Assert-Equal "embedded" $defaultPlan.frontend_runtime "frontend runtime"
 Assert-Equal "AI-Chat-Memory_0.1.0_x64_dev.exe" $defaultPlan.output_name "output name"
 Assert-Equal "1" $defaultPlan.output_file_count "output file count"
 
-$rebuildPlan = & $Builder -PlanOnly -RebuildFrontend | ConvertFrom-Json
-Assert-Equal "build" $rebuildPlan.frontend_action "forced frontend action"
-Assert-Equal "embedded" $rebuildPlan.frontend_runtime "rebuilt frontend runtime"
+$reusePlan = & $Builder -PlanOnly -ReuseFrontend | ConvertFrom-Json
+Assert-Equal "reuse" $reusePlan.frontend_preference "explicit reuse frontend preference"
+$frontendEntry = Join-Path $Root "app\dist\index.html"
+$reuseExpectedAction = if (Test-Path -LiteralPath $frontendEntry) { "reuse" } else { "build" }
+Assert-Equal $reuseExpectedAction $reusePlan.frontend_action "explicit reuse frontend action"
+Assert-Equal "embedded" $reusePlan.frontend_runtime "reused frontend runtime"
 
 $source = Get-Content -LiteralPath $Builder -Raw
 $embeddedRuntimeFragments = @(

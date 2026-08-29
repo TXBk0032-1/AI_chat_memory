@@ -63,6 +63,19 @@ foreach ($installer in $installers) {
     }
 }
 
+# CI-11: the builder must validate the portable executable's PE header ('MZ')
+# before packaging it into the portable ZIP, mirroring build-dev-portable.ps1.
+$builderSource = Get-Content -LiteralPath $Builder -Raw
+foreach ($peCheckFragment in @(
+    "ReadByte() -ne [byte][char]'M'",
+    "ReadByte() -ne [byte][char]'Z'",
+    "Portable source executable is not a Windows PE executable"
+)) {
+    if (-not $builderSource.Contains($peCheckFragment)) {
+        throw "Installer builder does not validate the portable executable PE header before packaging: missing '$peCheckFragment'"
+    }
+}
+
 $config = Get-Content -LiteralPath $TauriConfig -Raw | ConvertFrom-Json
 Assert-Equal "SimpChinese,English" ($config.bundle.windows.nsis.languages -join ",") "Tauri NSIS languages"
 Assert-Equal "True" ([string]$config.bundle.windows.nsis.displayLanguageSelector) "Tauri language selector"

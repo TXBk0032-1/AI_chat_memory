@@ -261,6 +261,16 @@ try {
     if (-not (Test-Path -LiteralPath $portableSource) -or (Get-Item -LiteralPath $portableSource).Length -le 0) {
         throw "Portable source executable is missing or empty: $portableSource"
     }
+    # CI-11: reject a corrupted or truncated executable before it is packaged
+    # (mirrors the PE header validation in build-dev-portable.ps1).
+    $portableSourceStream = [IO.File]::OpenRead($portableSource)
+    try {
+        if ($portableSourceStream.ReadByte() -ne [byte][char]'M' -or $portableSourceStream.ReadByte() -ne [byte][char]'Z') {
+            throw "Portable source executable is not a Windows PE executable: $portableSource"
+        }
+    } finally {
+        $portableSourceStream.Dispose()
+    }
     $portableEntryPath = Join-Path $stagingDirectory $portable.entry_name
     $portableArchivePath = Join-Path $stagingDirectory $portable.name
     Copy-Item -LiteralPath $portableSource -Destination $portableEntryPath -Force
