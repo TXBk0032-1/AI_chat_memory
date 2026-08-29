@@ -14,6 +14,9 @@ function loadTestApi(overrides = {}) {
         TextEncoder,
         __AI_CHAT_MEMORY_TEST_MODE__: true,
         console: { log() {}, warn() {}, error() {} },
+        // 油猴运行时具备标准浏览器定时器；userscript 节流写依赖 setTimeout/clearTimeout，此处提供等价物。
+        setTimeout: (fn, ms, ...args) => setTimeout(fn, ms, ...args),
+        clearTimeout: id => clearTimeout(id),
         fetch: async () => new Response('{}', { headers: { 'content-type': 'application/json' } }),
         location: { hostname: 'example.invalid', pathname: '/' },
         GM_getValue: (key, fallback) => values.has(key) ? values.get(key) : fallback,
@@ -200,6 +203,8 @@ test('moves unassigned page exchanges into a session once the current path ident
         response: { body: { data: { biz_data: { chat_messages: [] } } } }
     }, '/a/chat/s/session-1');
 
+    // record() 的磁盘写已改为节流，读持久化态前需 flush 落盘挂起的写。
+    await store.flush();
     const persisted = plain(values.get(api.RuntimeConfig.captureStorageKey));
     assert.equal(persisted.unassigned.length, 0);
     assert.deepEqual(persisted.sessions['session-1'].completion_exchanges.map(item => item.id), ['unassigned-completion']);
@@ -522,3 +527,241 @@ test('SyncPanel exposes predictable status and syncing transitions with injected
     assert.equal(syncMode, true);
     panel.destroy();
 });
+
+test('quota recovery deletes the largest sessions by byte size until under threshold, keeping at least one', () => {
+    const { api } = loadTestApi();
+    let storedValue = null;
+    // 模拟 GM_setValue 的配额语义：序列化后超过 persistenceQuotaBytes 即抛 QuotaExceededError。
+    const quota = 600;
+    const setValue = (key, value) => {
+        if (key !== api.RuntimeConfig.captureStorageKey) return;
+        const serialized = JSON.stringify(value);
+        if (serialized.length > quota) {
+            throw Object.assign(new Error('quota exceeded'), { name: 'QuotaExceededError' });
+        }
+        storedValue = JSON.parse(serialized);
+    };
+    const store = new api.CaptureStore({
+        getValue: (key, fallback) => key === api.RuntimeConfig.captureStorageKey ? storedValue : fallback,
+        setValue,
+        config: { persistenceQuotaBytes: quota, maxSessionBytes: 32 * 1024 * 1024 }
+    });
+    // 直接在内存态构造三个体积差异明显的会话，避免经过 record() 的节流路径。
+    const state = store._load();
+    state.sessions.big = { updated_at: '2026-01-01', latest_native_history: { response: { body: { data: { biz_data: { chat_messages: [{ fragments: [{ content: 'B'.repeat(420) }] }] } } } } }, completion_exchanges: [], file_exchanges: [], other_exchanges: [], latest_compatibility_history: null };
+    state.sessions.mid = { updated_at: '2026-01-01', latest_native_history: { response: { body: { data: { biz_data: { chat_messages: [{ fragments: [{ content: 'M'.repeat(260) }] }] } } } } }, completion_exchanges: [], file_exchanges: [], other_exchanges: [], latest_compatibility_history: null };
+    state.sessions.tiny = { updated_at: '2026-01-01', latest_native_history: { response: { body: { data: { biz_data: { chat_messages: [{ fragments: [{ content: 'T'.repeat(40) }] }] } } } } }, completion_exchanges: [], file_exchanges: [], other_exchanges: [], latest_compatibility_history: null };
+
+    // 整体体积超过 quota → 首次 setValue 抛错 → _writeNow 进入配额恢复分支。
+    assert.ok(JSON.stringify(state).length > quota, 'precondition: state exceeds quota');
+    store._writeNow(state);
+
+    assert.ok(storedValue, 'quota recovery should have persisted a trimmed state');
+    const ids = Object.keys(storedValue.sessions);
+    assert.ok(ids.length >= 1, 'should keep at least one session');
+    assert.equal(storedValue.sessions.big, undefined, 'largest session should be pruned first');
+    assert.ok(storedValue.sessions.tiny, 'smallest session should survive');
+    assert.ok(JSON.stringify(storedValue).length <= quota, 'persisted state should be under quota');
+});
+
+test('quota recovery keeps at least one session even when every session alone exceeds the threshold', () => {
+    const { api } = loadTestApi();
+    let storedValue = null;
+    const quota = 200;
+    const setValue = (key, value) => {
+        if (key !== api.RuntimeConfig.captureStorageKey) return;
+        const serialized = JSON.stringify(value);
+        if (serialized.length > quota) {
+            throw Object.assign(new Error('quota exceeded'), { name: 'QuotaExceededError' });
+        }
+        storedValue = JSON.parse(serialized);
+    };
+    const store = new api.CaptureStore({
+        getValue: (key, fallback) => key === api.RuntimeConfig.captureStorageKey ? storedValue : fallback,
+        setValue,
+        config: { persistenceQuotaBytes: quota, maxSessionBytes: 32 * 1024 * 1024 }
+    });
+    const state = store._load();
+    // 两个会话各自都超过 quota；恢复循环删最大的后，剩 1 个仍超，但 ≥1 约束停止删除。
+    state.sessions.huge = { updated_at: '2026-01-01', latest_native_history: { response: { body: { data: { biz_data: { chat_messages: [{ fragments: [{ content: 'H'.repeat(500) }] }] } } } } }, completion_exchanges: [], file_exchanges: [], other_exchanges: [], latest_compatibility_history: null };
+    state.sessions.big = { updated_at: '2026-01-01', latest_native_history: { response: { body: { data: { biz_data: { chat_messages: [{ fragments: [{ content: 'G'.repeat(300) }] }] } } } } }, completion_exchanges: [], file_exchanges: [], other_exchanges: [], latest_compatibility_history: null };
+    // 该场景下第二次 setValue 仍会抛错（剩余单会话仍超限），_writeNow 会重新抛出——验证不会清空。
+    assert.throws(() => store._writeNow(state), { name: 'QuotaExceededError' }, 'should surface error when even one session exceeds quota');
+    // 即使最终写失败，内存态仍保留至少 1 个会话（未被清空）。
+    const memoryIds = Object.keys(store._load().sessions);
+    assert.ok(memoryIds.length >= 1, 'should never drop below one session in memory');
+});
+
+test('attachDeepSeekCapture survives a failing flush and still attaches in-memory capture', async () => {
+    const warnings = [];
+    const { api } = loadTestApi({
+        console: { log() {}, error() {}, warn: (...args) => warnings.push(args.map(a => String(a)).join(' ')) }
+    });
+    const conversation = { data: { biz_data: { chat_messages: [] } } };
+    const captureStore = {
+        flush: async () => { throw new Error('persist quota hit'); },
+        exportSession: sessionId => ({ schema_version: 1, session: { id: sessionId } })
+    };
+    const result = await api.attachDeepSeekCapture(conversation, 'session-1', captureStore, [{ cite_index: 0 }]);
+    assert.equal(result, conversation, 'should return the same conversation');
+    assert.equal(result._web_capture.session.id, 'session-1', 'in-memory capture should still be attached');
+    assert.ok(warnings.some(w => /flush failed/.test(w)), 'should warn about flush failure');
+});
+
+test('record() coalesces multiple captures into one debounced write, and flush forces immediate write', async () => {
+    const { api, values } = loadTestApi();
+    let writes = 0;
+    const store = new api.CaptureStore({
+        getValue: (key, fallback) => values.has(key) ? values.get(key) : fallback,
+        setValue: (key, value) => { if (key === api.RuntimeConfig.captureStorageKey) writes++; values.set(key, value); },
+        config: { persistDebounceMs: 50 }
+    });
+    // 连续 5 次 record，每次都只调度节流写，���应每条都落盘。
+    for (let i = 0; i < 5; i++) {
+        await store.record({ id: `c-${i}`, kind: 'completion', sessionId: 'session-1', response: { body: { i } } });
+    }
+    // 内存态应即时可见（_cachedState 已同步更新）。
+    const memoryExchanges = plain(store.exportSession('session-1').session.completion_exchanges.map(item => item.id));
+    assert.deepEqual(memoryExchanges, ['c-0', 'c-1', 'c-2', 'c-3', 'c-4'], 'memory state should be synchronous');
+    // flush 前磁盘态尚未落盘（节流窗口未到）。
+    assert.ok(writes === 0, `should not have persisted before flush, got ${writes}`);
+    await store.flush();
+    // flush 后立即落盘一次，包含全部 5 条。
+    assert.equal(writes, 1, 'flush should coalesce 5 records into a single write');
+    const persisted = plain(values.get(api.RuntimeConfig.captureStorageKey));
+    assert.deepEqual(persisted.sessions['session-1'].completion_exchanges.map(item => item.id), ['c-0', 'c-1', 'c-2', 'c-3', 'c-4']);
+});
+
+test('schema mismatch preserves legacy data under a _legacy_ key with a visible warning', () => {
+    const warnings = [];
+    const { api, values } = loadTestApi({
+        console: { log() {}, error() {}, warn: (...args) => warnings.push(args.map(a => String(a)).join(' ')) }
+    });
+    const legacy = { schema_version: 0, sessions: { old: { updated_at: '2020-01-01' } }, unassigned: [] };
+    values.set(api.RuntimeConfig.captureStorageKey, legacy);
+    const store = new api.CaptureStore({
+        getValue: (key, fallback) => values.has(key) ? values.get(key) : fallback,
+        setValue: (key, value) => values.set(key, value)
+    });
+    const state = store._load();
+    assert.equal(state.schema_version, api.RuntimeConfig.captureSchemaVersion, 'should reset to empty state with current schema');
+    assert.deepEqual(plain(state.sessions), {}, 'should reset sessions to empty');
+    const legacyKeys = [...values.keys()].filter(k => k.startsWith(api.RuntimeConfig.captureStorageKey + '_legacy_'));
+    assert.equal(legacyKeys.length, 1, 'should write exactly one _legacy_ backup key');
+    assert.deepEqual(plain(values.get(legacyKeys[0])), legacy, 'legacy backup should preserve original data');
+    assert.ok(warnings.some(w => /_legacy_/.test(w) && /GM_getValue/.test(w)), 'should warn naming the legacy key and how to recover it');
+});
+
+test('pollServer collapses concurrent checks into one in-flight request', async () => {
+    const { api } = loadTestApi();
+    const ids = ['acm-panel', 'acm-close', 'acm-status-line', 'acm-bar', 'acm-sync-btn', 'acm-full-btn', 'acm-srv'];
+    const elements = new Map(ids.map(id => [id, { id, style: {}, dataset: {}, disabled: false }]));
+    const root = { innerHTML: '', querySelector: selector => elements.get(selector.slice(1)), remove() {} };
+    const document = { createElement: () => root, body: { appendChild() {} } };
+    let checks = 0;
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    const panel = new api.SyncPanel({
+        document,
+        autoMount: false,
+        onCheckServer: async () => {
+            checks++;
+            await gate;
+            return { state: 'connected', url: 'http://bridge' };
+        }
+    });
+    const first = panel.pollServer();
+    const second = panel.pollServer();
+    assert.equal(checks, 1, 'second concurrent poll should be rejected before issuing a request');
+    assert.equal(await second, null, 'concurrent poll should return null without a connection');
+    release();
+    const connection = await first;
+    assert.equal(connection.state, 'connected');
+    assert.equal(checks, 1, 'no extra health check should have been issued');
+    // 首次完成后守卫应复位，允许下一次轮询真正执行。
+    const third = panel.pollServer();
+    release();
+    await third;
+    assert.equal(checks, 2, 'guard should reset after the in-flight check completes');
+});
+
+test('fetchAllSessions stops paging when the cursor stops advancing', async () => {
+    const { api } = loadTestApi();
+    const values = new Map([['ds_token', 'DS'], ['ds_token_captured_at', Date.now()]]);
+    const credentials = new api.CredentialStore({
+        getValue: (key, fallback) => values.has(key) ? values.get(key) : fallback,
+        setValue: (key, value) => values.set(key, value),
+        deleteValue: key => values.delete(key)
+    });
+    let pageRequests = 0;
+    // 所有会话 updated_at 相同且 has_more=true：下一页永远返回同一列表，游标停滞。
+    const stalledPage = () => {
+        pageRequests++;
+        return { data: { biz_data: { chat_sessions: [{ id: `s-${pageRequests}-a`, updated_at: 100 }, { id: `s-${pageRequests}-b`, updated_at: 100 }], has_more: true } } };
+    };
+    const adapter = new api.DeepSeekAdapter({
+        credentials,
+        autoWaitForToken: false,
+        location: { pathname: '/a/chat/s/deep' },
+        request: async () => stalledPage()
+    });
+    const sessions = await adapter.fetchAllSessions();
+    assert.ok(pageRequests <= 2, `should stop after first+stalled page, got ${pageRequests} requests`);
+    assert.equal(sessions.length, 4, 'both pages of sessions should still be collected');
+});
+
+test('fetchDetailsAndPush retries a session that fails once then succeeds, and a twice-failed session lands in failed', async () => {
+    const { api } = loadTestApi();
+    const attempts = {};
+    const adapter = {
+        platform: 'deepseek', needsToken: false,
+        fetchConversation: async id => {
+            attempts[id] = (attempts[id] || 0) + 1;
+            if (id === 'flaky' && attempts[id] === 1) throw new Error('transient');
+            if (id === 'doomed') throw new Error('permanent');
+            return { id, messages: [] };
+        }
+    };
+    const response = value => ({ ok: true, status: 200, json: async () => value, text: async () => JSON.stringify(value) });
+    const bridge = { request: async () => response({ imported: 1, skipped: 0 }) };
+    const coordinator = new api.SyncCoordinator({
+        adapter, bridgeClient: bridge,
+        ui: { setStatus() {}, setProgress() {}, setSyncing() {} },
+        detailConcurrency: 1, detailDelayMs: 0
+    });
+    const result = await coordinator.fetchDetailsAndPush([{ id: 'flaky' }, { id: 'doomed' }, { id: 'ok' }]);
+    assert.deepEqual(plain(result.sessions.map(s => s.id)), ['flaky', 'ok'], 'flaky should recover via retry, ok should pass first try');
+    assert.deepEqual(plain(result.failed.map(f => f.id)), ['doomed'], 'only the twice-failed session should be in failed');
+    assert.equal(attempts.flaky, 2, 'flaky should have been attempted twice (1 fail + 1 retry)');
+    assert.equal(attempts.doomed, 2, 'doomed should have been attempted twice (both fail)');
+    assert.equal(attempts.ok, 1, 'ok should have been attempted once');
+});
+
+test('session list and detail fetches forward the abort signal to the transport', async () => {
+    const { api } = loadTestApi();
+    const values = new Map([['ds_token', 'DS'], ['ds_token_captured_at', Date.now()]]);
+    const credentials = new api.CredentialStore({
+        getValue: (key, fallback) => values.has(key) ? values.get(key) : fallback,
+        setValue: (key, value) => values.set(key, value),
+        deleteValue: key => values.delete(key)
+    });
+    const signals = [];
+    const adapter = new api.DeepSeekAdapter({
+        credentials,
+        autoWaitForToken: false,
+        location: { pathname: '/a/chat/s/deep' },
+        request: async (url, options) => {
+            signals.push(options?.signal ?? null);
+            return { data: { biz_data: { chat_sessions: [{ id: 's1', updated_at: 1 }], has_more: false } } };
+        }
+    });
+    const controller = new AbortController();
+    await adapter.fetchAllSessions({ signal: controller.signal });
+    assert.ok(signals.length >= 1, 'list paging should reach the transport');
+    assert.ok(signals.every(signal => signal === controller.signal), 'list paging must forward the abort signal to every page request');
+    signals.length = 0;
+    await adapter.fetchConversation('s1', { signal: controller.signal });
+    assert.equal(signals.length, 1, 'detail fetch should reach the transport');
+    assert.equal(signals[0], controller.signal, 'detail fetch must forward the abort signal');
+});
+

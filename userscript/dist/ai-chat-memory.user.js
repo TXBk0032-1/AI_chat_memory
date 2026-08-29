@@ -30,6 +30,11 @@
         tokenTtlMs: 24 * 60 * 60 * 1000,
         maxResponseBytes: 16 * 1024 * 1024,
         maxSessionBytes: 32 * 1024 * 1024,
+        // 持久化配额阈值：GM_setValue 单次写入的安全上限（与每会话预算 maxSessionBytes 解耦）。
+        // 当整体序列化体积超过此值时，按会话字节大小裁剪，确保配额恢复可收敛。
+        persistenceQuotaBytes: 5 * 1024 * 1024,
+        // record() 节流：将多次捕获合并为一次磁盘写，避免每个网络请求都全量序列化阻塞主线程。
+        persistDebounceMs: 500,
         maxCompletionExchanges: 128,
         maxFileExchanges: 128,
         maxOtherExchanges: 64,
@@ -277,6 +282,12 @@
             this.config = { ...RuntimeConfig, ...(options.config || {}) };
             this.pendingWrite = Promise.resolve();
             this._cachedState = null;
+            // 节流写：内存态即时更新，磁盘写合并为至多每 persistDebounceMs 一次。
+            this._persistTimer = null;
+            this._persistPending = false;
+            this._scheduleDelay = Number(options.persistDebounceMs ?? this.config.persistDebounceMs);
+            this._setTimeout = options.setTimeout || ((fn, ms) => setTimeout(fn, ms));
+            this._clearTimeout = options.clearTimeout || ((id) => clearTimeout(id));
         }
 
         _emptyState() {
@@ -296,11 +307,16 @@
                 return this._cachedState;
             }
             if (stored.schema_version !== this.config.captureSchemaVersion) {
+                const legacyKey = this.config.captureStorageKey + '_legacy_' + Date.now();
                 try {
-                    this.setValue(this.config.captureStorageKey + '_backup_' + Date.now(), stored);
+                    this.setValue(legacyKey, stored);
                 } catch (e) {
-                    console.warn('CaptureStore: failed to backup legacy schema state', e);
+                    console.warn('CaptureStore: failed to back up legacy schema state', e);
                 }
+                console.warn(
+                    `CaptureStore: 检测到不兼容的捕获数据 (schema_version=${stored.schema_version}，当前=${this.config.captureSchemaVersion})，已重置为空以避免损坏。` +
+                    ` 旧数据已保留在 GM 存储键 "${legacyKey}"，如需导出请先在浏览器控制台执行 GM_getValue("${legacyKey}") 取回。`
+                );
                 this._cachedState = this._emptyState();
                 return this._cachedState;
             }
@@ -308,31 +324,68 @@
             return this._cachedState;
         }
 
-        _persistState(state) {
+        _writeNow(state) {
             try {
                 this.setValue(this.config.captureStorageKey, state);
             } catch (err) {
                 console.warn('CaptureStore: setValue failed, attempting quota recovery prune', err);
                 if (state.sessions && typeof state.sessions === 'object') {
+                    // 配额恢复：按会话字节大小降序删除最大的会话，直到整体序列化体积低于持久化配额阈值。
+                    // 与每会话预算 maxSessionBytes 解耦——此处管的是 GM_setValue 单次写入总量。
+                    // 始终保留至少 1 个会话，避免清空导致无法收敛的极端场景误删全部。
                     const sessionIds = Object.keys(state.sessions);
-                    if (sessionIds.length > 2) {
-                        sessionIds.sort((a, b) => {
-                            const tA = state.sessions[a]?.updated_at || '';
-                            const tB = state.sessions[b]?.updated_at || '';
-                            return tA.localeCompare(tB);
-                        });
-                        const toRemove = sessionIds.slice(0, Math.ceil(sessionIds.length / 2));
-                        for (const id of toRemove) delete state.sessions[id];
-                        try {
-                            this.setValue(this.config.captureStorageKey, state);
-                            return;
-                        } catch (retryErr) {
-                            console.error('CaptureStore: setValue retry after prune failed', retryErr);
-                            throw retryErr;
-                        }
+                    const sized = sessionIds
+                        .map(id => ({ id, bytes: JsonTools.byteLength(state.sessions[id]) }))
+                        .sort((a, b) => b.bytes - a.bytes);
+                    const quota = this.config.persistenceQuotaBytes;
+                    let totalBytes = JsonTools.byteLength(state);
+                    for (const entry of sized) {
+                        if (totalBytes < quota) break;
+                        if (sessionIds.length - 1 < 1) break; // 至少保留 1 个会话
+                        delete state.sessions[entry.id];
+                        sessionIds.length -= 1;
+                        // 字节数只能近似递减（键/结构开销），用整体重算保证收敛判定准确。
+                        totalBytes = JsonTools.byteLength(state);
+                    }
+                    try {
+                        this.setValue(this.config.captureStorageKey, state);
+                        return;
+                    } catch (retryErr) {
+                        console.error('CaptureStore: setValue retry after prune failed', retryErr);
+                        throw retryErr;
                     }
                 }
                 throw err;
+            }
+        }
+
+        // 节流落盘：合并多次 record() 为一次磁盘写，至多每 persistDebounceMs 一次。
+        // _cachedState 已在 record() 中同步更新，故延迟写仅影响持久化时机，不影响内存可见性。
+        _schedulePersist() {
+            if (this._persistTimer !== null) return; // 已有挂起的写，复用即可（会写入最新 state）。
+            this._persistPending = true;
+            const delay = this._scheduleDelay > 0 ? this._scheduleDelay : 0;
+            this._persistTimer = this._setTimeout(() => {
+                this._persistTimer = null;
+                this._persistPending = false;
+                try {
+                    this._writeNow(this._load());
+                } catch (e) {
+                    console.warn('CaptureStore: debounced persist failed', e);
+                }
+            }, delay);
+        }
+
+        _flushPendingPersist() {
+            if (this._persistTimer !== null) {
+                this._clearTimeout(this._persistTimer);
+                this._persistTimer = null;
+                this._persistPending = false;
+                try {
+                    this._writeNow(this._load());
+                } catch (e) {
+                    console.warn('CaptureStore: flush pending persist failed', e);
+                }
             }
         }
 
@@ -478,15 +531,19 @@
                     this._storeInSession(session, copy, capturedAt);
                     this._enforceSessionBudget(session);
                 }
-                this._persistState(state);
+                // 内存态已同步更新（state 即 _cachedState），仅磁盘写做节流，
+                // 避免每个网络请求都触发全量序列化阻塞主线程。
+                this._schedulePersist();
                 return copy;
             };
             this.pendingWrite = this.pendingWrite.then(operation, operation);
             return this.pendingWrite;
         }
 
-        flush() {
-            return this.pendingWrite;
+        async flush() {
+            // 先等待 record() 操作链排空（内存态已最新），再强制落盘挂起的节流写。
+            await this.pendingWrite;
+            this._flushPendingPersist();
         }
 
         exportSession(sessionId) {
@@ -502,7 +559,13 @@
     }
 
     async function attachDeepSeekCapture(conversation, sessionId, captureStore, references) {
-        await captureStore.flush();
+        // flush 失败只意味着捕获未落盘，但会话数据本身已可在 _cachedState 内存中读取，
+        // 不应让整条会话因此落入 failed。捕获丢、会话不丢，符合优先级。
+        try {
+            await captureStore.flush();
+        } catch (e) {
+            console.warn('captureStore flush failed, continuing with in-memory capture', e);
+        }
         conversation._references = references;
         conversation._web_capture = captureStore.exportSession(sessionId);
         return conversation;
@@ -1183,23 +1246,27 @@
             };
         }
 
-        async fetchAllSessions() {
-            const token = await this.getToken({ wait: true });
+        async fetchAllSessions(options = {}) {
+            const signal = options?.signal ?? null;
+            const token = await this.getToken({ wait: true, signal });
             if (!token) throw new Error('Token 未就绪');
             const allSessions = [];
             const MAX_PAGES = 500;
             let pageCount = 0;
 
-            let json = await this.fetchSessionPage();
+            let json = await this.fetchSessionPage(null, signal);
             let { sessions, hasMore } = this._extractSessionsPage(json);
             allSessions.push(...sessions);
             console.log(`📋 首页 ${sessions.length} 条, hasMore=${hasMore}`);
 
+            // 游标必须单调前进：服务端 updated_at 并列时同一游标会永远翻回同一批数据。
+            let previousCursor = null;
             while (hasMore && sessions.length > 0 && pageCount < MAX_PAGES) {
                 pageCount++;
                 const cursor = sessions[sessions.length - 1]?.updated_at;
-                if (!cursor) break;
-                json = await this.fetchSessionPage(cursor);
+                if (!cursor || cursor === previousCursor) break;
+                previousCursor = cursor;
+                json = await this.fetchSessionPage(cursor, signal);
                 const next = this._extractSessionsPage(json);
                 if (!next.sessions || !next.sessions.length) break;
                 allSessions.push(...next.sessions);
@@ -1212,14 +1279,14 @@
             return allSessions;
         }
 
-        async fetchSessionPage(cursor = null) {
+        async fetchSessionPage(cursor = null, signal = null) {
             const query = 'https://chat.deepseek.com/api/v0/chat_session/fetch_page?lte_cursor.pinned=false'
                 + (cursor ? `&lte_cursor.updated_at=${encodeURIComponent(cursor)}` : '');
-            return this._xhr(query);
+            return this._xhr(query, 0, signal);
         }
 
-        async fetchConversation(id) {
-            const conversation = await this._xhr(`https://chat.deepseek.com/api/v0/chat/history_messages?chat_session_id=${encodeURIComponent(id)}`);
+        async fetchConversation(id, options = {}) {
+            const conversation = await this._xhr(`https://chat.deepseek.com/api/v0/chat/history_messages?chat_session_id=${encodeURIComponent(id)}`, 0, options?.signal ?? null);
             if (!this.captureStore) {
                 conversation._references = this._referencesForSession(id);
                 return conversation;
@@ -1276,9 +1343,10 @@
         needsToken = false;
         apiParams = 'version_code=20800&language=zh&device_platform=web&aid=497858&real_aid=497858&pkg_type=release_version&device_id=0&pc_version=3.5.9&samantha_web=1&use-olympus-account=1';
 
-        async fetchAllSessions() {
+        async fetchAllSessions({ signal } = {}) {
             const url = `https://www.doubao.com/im/chain/recent_conv?${this.apiParams}`;
             const options = {
+                signal,
                 method: 'POST',
                 headers: { 'content-type': 'application/json; encoding=utf-8' },
                 body: JSON.stringify({
@@ -1293,9 +1361,10 @@
             return json?.downlink_body?.pull_recent_conv_chain_downlink_body?.cells || [];
         }
 
-        async fetchConversation(id) {
+        async fetchConversation(id, { signal } = {}) {
             const url = `https://www.doubao.com/im/chain/single?${this.apiParams}`;
             const options = {
+                signal,
                 method: 'POST',
                 headers: { 'content-type': 'application/json; encoding=utf-8' },
                 body: JSON.stringify({
@@ -1361,8 +1430,8 @@
             return this.credentials.getToken(this.tokenKey);
         }
 
-        async _fetch(url, body) {
-            const token = await this.getToken({ wait: true });
+        async _fetch(url, body, signal = null) {
+            const token = await this.getToken({ wait: true, signal });
             if (this.needsToken && !token) throw new Error('Kimi Token 未就绪');
             const options = {
                 method: 'POST',
@@ -1372,7 +1441,8 @@
                     'x-msh-platform': 'web'
                 },
                 credentials: 'include',
-                body: JSON.stringify(body)
+                body: JSON.stringify(body),
+                signal
             };
             if (this.request) {
                 const value = await this.request(url, options);
@@ -1384,7 +1454,7 @@
             return res.json();
         }
 
-        async fetchAllSessions() {
+        async fetchAllSessions({ signal } = {}) {
             const token = await this.getToken();
             if (!token) throw new Error('Kimi Token 未就绪');
             const all = [];
@@ -1395,7 +1465,7 @@
                 pageCount++;
                 const body = { project_id: '', page_size: 200, query: '' };
                 if (pageToken) body.page_token = pageToken;
-                const json = await this._fetch('https://www.kimi.com/apiv2/kimi.chat.v1.ChatService/ListChats', body);
+                const json = await this._fetch('https://www.kimi.com/apiv2/kimi.chat.v1.ChatService/ListChats', body, signal);
                 const chats = json.chats || [];
                 all.push(...chats);
                 const nextToken = json.nextPageToken || '';
@@ -1406,8 +1476,8 @@
             return all;
         }
 
-        async fetchConversation(id) {
-            const json = await this._fetch('https://www.kimi.com/apiv2/kimi.gateway.chat.v1.ChatService/ListMessages', { chat_id: id, page_size: 1000 });
+        async fetchConversation(id, { signal } = {}) {
+            const json = await this._fetch('https://www.kimi.com/apiv2/kimi.gateway.chat.v1.ChatService/ListMessages', { chat_id: id, page_size: 1000 }, signal);
             return json;
         }
 
@@ -1534,6 +1604,7 @@
                             method: 'GET',
                             url: zipUrl,
                             responseType: 'blob',
+                            timeout: 60000,
                             onload: (res) => {
                                 if (res.status >= 200 && res.status < 300) resolve(res.response);
                                 else reject(new Error(`GM_xmlhttpRequest failed ${res.status}`));
@@ -1611,12 +1682,25 @@
                     const id = this._sessionId(session);
                     const number = ++counter;
                     this._progress(number, sessions.length, `获取详情 ${number}/${sessions.length}`);
-                    try {
-                        const conversation = await this.adapter.fetchConversation(id);
+                    // 失败会话仅入 failed[] 则下次增量按 last_updated_at 永远漏选，故首次失败后立即重试一次。
+                    // 仍失败的才落入 failed，避免瞬时抖动造成永久漏同步。
+                    let conversation = null;
+                    let lastErr = null;
+                    for (let attempt = 0; attempt < 2 && !this._isStopped(); attempt++) {
+                        try {
+                            conversation = await this.adapter.fetchConversation(id, { signal: this.abortController?.signal });
+                            lastErr = null;
+                            break;
+                        } catch (err) {
+                            lastErr = err;
+                            if (attempt === 0) console.warn(`会话 ${id} 获取失败，重试一次:`, err);
+                        }
+                    }
+                    if (lastErr) {
+                        console.warn(`会话 ${id} 重试后仍失败:`, lastErr);
+                        failed.push({ id, session, error: String(lastErr?.message || lastErr) });
+                    } else {
                         results.push({ ...session, _conversation: conversation });
-                    } catch (err) {
-                        console.warn(`会话 ${id} 获取失败:`, err);
-                        failed.push({ id, session, error: String(err?.message || err) });
                     }
                     if (this.detailDelayMs) await this.sleep(this.detailDelayMs, this.abortController?.signal);
                 }
@@ -1671,7 +1755,7 @@
                 let sessions;
                 if (fullSync) {
                     this._status('全量拉取会话列表...');
-                    sessions = await this.adapter.fetchAllSessions();
+                    sessions = await this.adapter.fetchAllSessions({ signal: this.abortController?.signal });
                     this._status(`全量获取 ${sessions.length} 个会话`);
                 } else {
                     this._status('查询同步状态...');
@@ -1778,9 +1862,16 @@
 
         async pollServer() {
             if (!this.onCheckServer) return null;
-            const connection = await this.onCheckServer();
-            this.setServerStatus(connection);
-            return connection;
+            // 慢/挂起的健康检查不能叠加轮询：同一时刻只允许一个在途检查。
+            if (this._pollInFlight) return null;
+            this._pollInFlight = true;
+            try {
+                const connection = await this.onCheckServer();
+                this.setServerStatus(connection);
+                return connection;
+            } finally {
+                this._pollInFlight = false;
+            }
         }
 
         setServerStatus(connection = {}) {
