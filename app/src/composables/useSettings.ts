@@ -46,7 +46,14 @@ export function useSettings(
   }
 
   async function openSettings() {
-    settings.value = await api.getSettings()
+    // Load settings defensively: a getSettings IPC failure must surface an
+    // error but still open the dialog, so the user can retry rather than be
+    // left with a non-functional settings button.
+    try {
+      settings.value = await api.getSettings()
+    } catch (reason) {
+      error.value = String(reason)
+    }
     theme.begin()
     locale.begin()
     originText.value = settings.value.allowed_origins.join('\n')
@@ -334,11 +341,13 @@ export function useSettings(
           message: t('progress.indexCancelled'),
         }
       }
-      stopReindexPolling()
       await refreshSemanticStatus()
     } catch (reason) {
       error.value = String(reason)
     } finally {
+      // Stop the reindex poll timer unconditionally: clearing in finally
+      // guarantees the poll stops whether the cancel succeeds or fails.
+      stopReindexPolling()
       semanticBusy.value = false
       unlistenDownload?.()
       unlistenDownload = undefined

@@ -35,6 +35,13 @@ export function useSessionCatalog(
     const requestGeneration = ++generation
     loading.value = true
     error.value = ''
+    // On reset, capture the full previously loaded catalog before it is
+    // replaced by the freshly fetched first page. A session selected
+    // on a later loaded page is still present in the cached catalog; passing
+    // only the new first page as the visible set would make App.vue wrongly
+    // clear that selection and kick the user back to the list. The full prior
+    // set is a safe superset of "still-visible" sessions for a refresh.
+    const priorVisibleIds = reset ? new Set(sessions.value.map((session) => session.id)) : null
     if (reset) {
       page.value = 0
       committedQuery.value = query.value.trim()
@@ -58,7 +65,15 @@ export function useSessionCatalog(
       total.value = result.total
       semanticStatus.value = result.semantic_status
       searchElapsed.value = committedQuery.value ? performance.now() - started : null
-      if (reset) onSelectionInvalidated(new Set(result.sessions.map((session) => session.id)))
+      if (reset) {
+        // Merge the new first page with the previously loaded catalog so a
+        // selection on a later loaded page survives the refresh.
+        const visibleIds = new Set(result.sessions.map((session) => session.id))
+        if (priorVisibleIds) {
+          for (const id of priorVisibleIds) visibleIds.add(id)
+        }
+        onSelectionInvalidated(visibleIds)
+      }
       console.log(`%c[PERF:CATALOG] loadSessions completed: count=${result.sessions.length}, total=${result.total}, elapsed=${(performance.now() - started).toFixed(2)}ms`, 'color: #059669')
     } catch (reason) {
       if (requestGeneration === generation) {

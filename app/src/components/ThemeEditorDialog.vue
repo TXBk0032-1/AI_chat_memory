@@ -76,6 +76,23 @@ const showAdvanced = ref(false)
 const errorMessage = ref('')
 const fileInputRef = ref<HTMLInputElement | null>(null)
 
+/**
+ * Loads a background color value for the editor while preserving any alpha
+ * channel. `toHex6` truncates #RRGGBBAA / rgba() to opaque #RRGGBB, so a
+ * theme that ships a translucent app/main background would lose its alpha the
+ * instant the editor opened it. Keep the original string when it carries an
+ * alpha component; otherwise coerce to 6-digit hex for a tidy input value.
+ */
+function colorForInput(value: string | undefined, fallback: string): string {
+  const raw = value || fallback
+  if (!raw) return ''
+  if (!isValidColor(raw)) return raw
+  const trimmed = raw.trim()
+  const hexAlpha = /^#([0-9a-fA-F]{4}|[0-9a-fA-F]{8})$/.test(trimmed)
+  const rgbaAlpha = /rgba?\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*[\d.]+\s*\)/.test(trimmed)
+  return hexAlpha || rgbaAlpha ? raw : toHex6(raw)
+}
+
 function resetFormFromTheme(target: ThemeDefinition | null, isCreatingNew = false) {
   errorMessage.value = ''
   extraExtInfo.value = {}
@@ -86,8 +103,8 @@ function resetFormFromTheme(target: ThemeDefinition | null, isCreatingNew = fals
     isDark.value = defaultTheme.isDark
     isDarkFont.value = Boolean(defaultTheme.isDarkFont)
     primaryColor.value = toHex6(defaultTheme.config.primary)
-    appBgColor.value = toHex6(defaultTheme.config.extInfo?.['--color-app-background'] || (defaultTheme.isDark ? '#171b1e' : '#f7f9fa'))
-    mainBgColor.value = toHex6(defaultTheme.config.extInfo?.['--color-main-background'] || (defaultTheme.isDark ? '#1e2428' : '#ffffff'))
+    appBgColor.value = colorForInput(defaultTheme.config.extInfo?.['--color-app-background'], defaultTheme.isDark ? '#171b1e' : '#f7f9fa')
+    mainBgColor.value = colorForInput(defaultTheme.config.extInfo?.['--color-main-background'], defaultTheme.isDark ? '#1e2428' : '#ffffff')
     fontColor.value = toHex6(defaultTheme.config.font || (defaultTheme.isDark ? '#e5e5e5' : '#212121'))
     navFontColor.value = ''
     badgePrimaryColor.value = ''
@@ -99,8 +116,8 @@ function resetFormFromTheme(target: ThemeDefinition | null, isCreatingNew = fals
     isDark.value = target.isDark
     isDarkFont.value = Boolean(target.isDarkFont)
     primaryColor.value = toHex6(target.config.primary)
-    appBgColor.value = toHex6(target.config.extInfo?.['--color-app-background'] || (target.isDark ? '#171b1e' : '#f7f9fa'))
-    mainBgColor.value = toHex6(target.config.extInfo?.['--color-main-background'] || (target.isDark ? '#1e2428' : '#ffffff'))
+    appBgColor.value = colorForInput(target.config.extInfo?.['--color-app-background'], target.isDark ? '#171b1e' : '#f7f9fa')
+    mainBgColor.value = colorForInput(target.config.extInfo?.['--color-main-background'], target.isDark ? '#1e2428' : '#ffffff')
     fontColor.value = toHex6(target.config.font || (target.isDark ? '#e5e5e5' : '#212121'))
     navFontColor.value = target.config.extInfo?.['--color-nav-font']
       ? isValidColor(target.config.extInfo['--color-nav-font'])

@@ -167,4 +167,54 @@ describe('ThemeEditorDialog component', () => {
     expect(badge.textContent?.trim()).toBe('Dark')
     unmount()
   })
+
+  it('preserves alpha channel of app/main background colors across load and save', async () => {
+    // The background color inputs used to coerce loaded values through toHex6,
+    // which truncates the alpha channel (#RRGGBBAA -> #RRGGBB). A theme that
+    // ships a translucent app/main background would therefore lose its alpha
+    // the moment the editor opened it, and saving would persist the opaque
+    // value. Both inputs must keep the alpha when present.
+    const translucentTheme: ThemeDefinition = {
+      ...sampleTheme,
+      config: {
+        ...sampleTheme.config,
+        extInfo: {
+          '--color-app-background': 'rgba(253, 249, 242, 0.5)',
+          '--color-main-background': 'rgba(255, 255, 255, 0.7)',
+        },
+      },
+    }
+
+    const { root, saveSpy, unmount } = mountDialog({
+      show: true,
+      themeDef: translucentTheme,
+      isNew: false,
+    })
+
+    await nextTick()
+
+    // The dialog renders several color picker rows in DOM order: primary,
+    // app background, main background, font color, ... The app/main
+    // background text inputs are the 2nd and 3rd .color-picker-row text inputs.
+    const pickerTextInputs = root.querySelectorAll<HTMLInputElement>(
+      '.color-picker-row input[type="text"]',
+    )
+    expect(pickerTextInputs.length).toBeGreaterThanOrEqual(3)
+    const appBgInput = pickerTextInputs[1]
+    const mainBgInput = pickerTextInputs[2]
+    // Loaded value retains the alpha (not truncated to opaque rgb)
+    expect(appBgInput.value).toMatch(/0\.5/)
+    expect(mainBgInput.value).toMatch(/0\.7/)
+
+    const saveBtn = requiredElement<HTMLButtonElement>(root, '.btn-primary')
+    saveBtn.click()
+    await nextTick()
+
+    expect(saveSpy).toHaveBeenCalled()
+    const [savedTheme] = saveSpy.mock.calls[0]
+    const ext = savedTheme.config.extInfo
+    expect(ext['--color-app-background']).toMatch(/0\.5/)
+    expect(ext['--color-main-background']).toMatch(/0\.7/)
+    unmount()
+  })
 })
