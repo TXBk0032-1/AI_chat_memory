@@ -31,9 +31,14 @@ function defaultSettings(): SettingsModel {
     setup_complete: true,
     secret_enabled: false,
     secret: '',
+    close_behavior: 'ask',
+    tray_click_behavior: 'show_menu',
+    theme: 'system',
+    language: 'system',
+    mcp_enabled: false,
     cloud_sync: { enabled: false, backend: 'webdav', webdav: { url: '', username: '', password: '' }, s3: {} as never, password: '' } as never,
     semantic_search: { enabled: false, backend: 'local', model_path: '', ollama: { base_url: '', model: '', dimensions: undefined }, llama_cpp: { base_url: '', model: '', dimensions: undefined }, openai_compatible: { base_url: '', api_key: '', model: '', dimensions: undefined } } as never,
-  } as SettingsModel
+  }
 }
 
 function mountComposable(settingsRef: Ref<SettingsModel>) {
@@ -97,10 +102,9 @@ describe('useSettings', () => {
     } as never)
     mocks.cancelSemanticWork.mockRejectedValue(new Error('cancel-failed'))
 
-    const setIntervalSpy = vi.spyOn(window, 'setInterval').mockImplementation((handler: TimerHandler) => {
-      // never actually fire; just return an opaque id
-      return 0 as unknown as number
-    })
+    const setIntervalSpy = vi
+      .spyOn(window, 'setInterval')
+      .mockImplementation((() => 0) as unknown as typeof window.setInterval)
     const clearIntervalSpy = vi.spyOn(window, 'clearInterval').mockImplementation(() => {})
 
     const settingsRef = ref(defaultSettings())
