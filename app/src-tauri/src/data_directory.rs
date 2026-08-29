@@ -2,6 +2,19 @@ use std::path::{Path, PathBuf};
 
 use crate::database;
 
+/// stdio bin target 不经 Tauri 启动，无法调用 `app_data_dir()`；按 Tauri 的
+/// Windows 语义（`{FOLDERID_RoamingAppData}\{identifier}`）从 APPDATA 推导，
+/// identifier 需与 tauri.conf.json 的 `identifier` 保持一致。
+pub fn fallback_app_data_dir() -> Result<PathBuf, crate::error::AppError> {
+    const IDENTIFIER: &str = "dev.aichatmemory.desktop";
+    let roaming = std::env::var_os("APPDATA").ok_or_else(|| {
+        crate::error::AppError::Configuration(
+            "环境变量 APPDATA 未设置，无法定位应用数据目录".into(),
+        )
+    })?;
+    Ok(PathBuf::from(roaming).join(IDENTIFIER))
+}
+
 pub async fn prepare_database_directory(
     configured: Option<&Path>,
     executable_dir: Option<&Path>,

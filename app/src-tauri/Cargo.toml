@@ -56,9 +56,12 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 futures = "0.3"
 aws-sdk-s3 = { version = "1.140.0", default-features = false, features = ["behavior-version-latest", "default-https-client", "http-1x", "rt-tokio", "rustls"] }
     async-trait = "0.1"
+    # transport-io 供 stdio bin target 使用；Cargo feature 为 crate 级统一，
+    # 无法只对单个 bin 收敛（仅引入 io.rs 与 tokio/io-std，体积可忽略）。
     rmcp = { version = "2.2", default-features = false, features = [
       "server",
       "transport-streamable-http-server",
+      "transport-io",
       "macros",
     ] }
     candle-core = { version = "0.9.1", features = ["cuda"] }
