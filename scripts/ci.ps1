@@ -179,7 +179,10 @@ function Invoke-ParallelSteps {
     $failedNames = @()
 
     foreach ($item in $processes) {
-        if (-not $item.Process.WaitForExit([TimeSpan]::FromMinutes(30))) {
+        # WaitForExit(TimeSpan) 仅存在于 .NET 5+（pwsh 7）；Windows PowerShell 5.1
+        # 只有毫秒整数重载，传 TimeSpan 会在启动阶段抛 MethodException 中断流水线。
+        $timeoutMilliseconds = [int][TimeSpan]::FromMinutes(30).TotalMilliseconds
+        if (-not $item.Process.WaitForExit($timeoutMilliseconds)) {
             $item.StartWatch.Stop()
             try { $item.Process.Kill() } catch { }
             Write-Host "FAILED [Parallel: Timeout $($item.Name)] exceeded the 30 minute timeout" -ForegroundColor Red
