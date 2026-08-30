@@ -38,7 +38,9 @@ jobs:
         with:
           cuda: "13.3.0"
           method: network
-          sub-packages: '["nvcc", "cudart", "cublas", "curand", "nvrtc", "visual_studio_integration"]'
+          # 不再使用 sub-packages 子包安装：CUDA 13.3 的子包拆分下
+          # include/crt/*（host_config.h 等）不会随 nvcc/cudart 子包落盘，
+          # candle-kernels 编译报 C1083。安装完整工具包与本机环境一致。
 
       - name: Build and test release
         env:
