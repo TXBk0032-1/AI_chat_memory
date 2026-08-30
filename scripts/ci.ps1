@@ -31,15 +31,25 @@ $env:CARGO_TERM_COLOR = "always"
 
 function Initialize-CudaBuildEnvironment {
     $vcvars = $null
-    if ($env:VSINSTALLDIR) {
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+    # CUDA 13.3 的 nvcc 只适配到 MSVC 14.4x（VS2022）。runner 镜像可能同时装有
+    # VS 18（MSVC 14.5x），-allow-unsupported-compiler 并不能保证其可编译；
+    # 因此优先锁定 VS2022，仅在缺失时回退 VSINSTALLDIR 与最新 VS。
+    if (Test-Path -LiteralPath $vswhere) {
+        $vsRoot = (& $vswhere -latest -products * -version "[17.0,18.0)" -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath -format value 2>$null | Select-Object -First 1)
+        if ($vsRoot) {
+            $candidate = Join-Path ("$vsRoot".Trim()) "VC\Auxiliary\Build\vcvars64.bat"
+            if (Test-Path -LiteralPath $candidate) { $vcvars = $candidate }
+        }
+    }
+    if (-not $vcvars -and $env:VSINSTALLDIR) {
         $candidate = Join-Path $env:VSINSTALLDIR "VC\Auxiliary\Build\vcvars64.bat"
         if (Test-Path -LiteralPath $candidate) { $vcvars = $candidate }
     }
-    $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
     if (-not $vcvars -and (Test-Path -LiteralPath $vswhere)) {
-        $vsRoot = (& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
+        $vsRoot = (& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath -format value 2>$null | Select-Object -First 1)
         if ($vsRoot) {
-            $candidate = Join-Path $vsRoot "VC\Auxiliary\Build\vcvars64.bat"
+            $candidate = Join-Path ("$vsRoot".Trim()) "VC\Auxiliary\Build\vcvars64.bat"
             if (Test-Path -LiteralPath $candidate) { $vcvars = $candidate }
         }
     }
