@@ -422,7 +422,8 @@ mod tests {
             assert_eq!(
                 sends_credential_over_plaintext_http(&remote_settings(base_url, *api_key)),
                 *expected,
-                "base_url={base_url} api_key={api_key:?}"
+                "base_url={base_url} api_key_present={}",
+                api_key.is_some()
             );
         }
     }

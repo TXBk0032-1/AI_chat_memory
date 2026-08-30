@@ -20,7 +20,7 @@ use crate::{
         },
     },
 };
-use rand::RngCore;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::time::Duration;
@@ -1826,8 +1826,7 @@ fn seal_contents_with_protector(
 ) -> Result<SealedBundle> {
     match protector {
         Some(protector) => {
-            let mut nonce = [0_u8; 24];
-            rand::rng().fill_bytes(&mut nonce);
+            let nonce = rand::rng().random::<[u8; 24]>();
             seal_bundle_protected_with_limits(contents, protector, nonce, limits)
         }
         None => seal_bundle_with_limits(contents, limits),
