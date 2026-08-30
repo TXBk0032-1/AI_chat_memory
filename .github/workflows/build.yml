@@ -10,7 +10,10 @@ permissions:
 
 jobs:
   build:
-    runs-on: windows-latest
+    # windows-latest 已迁移到 VS 2026（MSVC 14.5x），CUDA 13.3 的 nvcc 不支持；
+    # 锁定 windows-2022（VS2022 / MSVC 14.4x）与本机工具链一致。
+    # windows-2022 退役时需升级 CUDA 或改用 VCToolsVersion 指定 14.44 工具集。
+    runs-on: windows-2022
 
     steps:
       - name: Checkout
