@@ -15,6 +15,12 @@ $windowsPowerShellModules = Join-Path $env:SystemRoot "System32\WindowsPowerShel
 if (($env:PSModulePath -split ";") -notcontains $windowsPowerShellModules) {
     $env:PSModulePath = "$windowsPowerShellModules;$env:PSModulePath"
 }
+# 传给 5.1 子进程的干净模块路径：只含 5.1 自身的系统与机器级目录，确保
+# 二进制模块（Microsoft.PowerShell.Utility 等）可被自动加载，不受宿主环境影响。
+$win51ModulePath = @(
+    $windowsPowerShellModules,
+    (Join-Path $env:ProgramFiles "WindowsPowerShell\Modules")
+) -join ";"
 $Root = Split-Path -Parent $PSScriptRoot
 $App = Join-Path $Root "app"
 $Rust = Join-Path $App "src-tauri"
@@ -174,6 +180,9 @@ function Invoke-ParallelSteps {
         $psi.RedirectStandardOutput = $true
         $psi.RedirectStandardError = $true
         $psi.CreateNoWindow = $true
+        # 显式固定子进程的模块路径：并行分支里的 powershell.exe 5.1 契约测试
+        # 不再依赖继承自 pwsh 7 的 PSModulePath（node/cargo 不受该变量影响）。
+        $psi.EnvironmentVariables["PSModulePath"] = $win51ModulePath
 
         $process = [System.Diagnostics.Process]::new()
         $process.StartInfo = $psi
@@ -282,7 +291,13 @@ if ($Stage -eq "release") {
         throw "Close AI Chat Memory before release build (running process IDs: $ids)"
     }
     Invoke-Step "Build Windows NSIS installers" {
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $InstallerBuilder -ArtifactsDirectory $Artifacts -RustVersion $rustVersion
+        $previousModulePath = $env:PSModulePath
+        $env:PSModulePath = $win51ModulePath
+        try {
+            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $InstallerBuilder -ArtifactsDirectory $Artifacts -RustVersion $rustVersion
+        } finally {
+            $env:PSModulePath = $previousModulePath
+        }
     }
 }
 

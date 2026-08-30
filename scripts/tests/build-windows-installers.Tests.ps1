@@ -169,7 +169,18 @@ try {
             throw "Manifest artifact missing: $path"
         }
         Assert-Equal (Get-Item -LiteralPath $path).Length $artifact.bytes "$($artifact.name) byte count"
-        Assert-Equal ((Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()) $artifact.sha256 "$($artifact.name) hash"
+        $hashStream = [IO.File]::OpenRead($path)
+        try {
+            $hashSha = [Security.Cryptography.SHA256]::Create()
+            try {
+                $expectedHash = [BitConverter]::ToString($hashSha.ComputeHash($hashStream)).Replace('-', '').ToLowerInvariant()
+            } finally {
+                $hashSha.Dispose()
+            }
+        } finally {
+            $hashStream.Dispose()
+        }
+        Assert-Equal $expectedHash $artifact.sha256 "$($artifact.name) hash"
     }
     $expectedArtifactNames = @(($installers.name + $portable.name + "manifest.json") | Sort-Object)
     $actualArtifactNames = @((Get-ChildItem -LiteralPath $artifactsDirectory -File).Name | Sort-Object)

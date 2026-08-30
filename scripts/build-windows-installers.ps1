@@ -68,7 +68,19 @@ function Clear-Directory {
 function Get-Sha256 {
     param([Parameter(Mandatory)][string]$LiteralPath)
 
-    return (Get-FileHash -Algorithm SHA256 -LiteralPath $LiteralPath).Hash.ToLowerInvariant()
+    # 直接用 .NET 计算哈希：CI 的 powershell.exe 5.1 子进程在部分 runner 镜像上
+    # 无法自动加载 Microsoft.PowerShell.Utility（Get-FileHash 所在的二进制模块）。
+    $stream = [IO.File]::OpenRead($LiteralPath)
+    try {
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try {
+            return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+        } finally {
+            $sha.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
 }
 
 function Write-ReleaseManifest {

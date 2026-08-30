@@ -161,7 +161,18 @@ try {
     $Stream.Dispose()
 }
 
-$Hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $Item.FullName).Hash
+# 直接用 .NET 计算哈希，避免依赖模块自动加载（同 build-windows-installers.ps1 的 Get-Sha256）。
+$HashStream = [IO.File]::OpenRead($Item.FullName)
+try {
+    $HashSha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $Hash = [BitConverter]::ToString($HashSha.ComputeHash($HashStream)).Replace('-', '')
+    } finally {
+        $HashSha.Dispose()
+    }
+} finally {
+    $HashStream.Dispose()
+}
 [pscustomobject]@{
     path = $Item.FullName
     bytes = $Item.Length
