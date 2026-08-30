@@ -50,7 +50,7 @@ argon2 = "0.5"
 chacha20poly1305 = "0.10"
 keyring = { version = "3", features = ["windows-native"] }
 zeroize = { version = "1", features = ["derive"] }
-quick-xml = { version = "0.38", features = ["serialize"] }
+quick-xml = { version = "0.41", features = ["serialize"] }
 url = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 futures = "0.3"
