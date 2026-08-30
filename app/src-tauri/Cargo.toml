@@ -54,7 +54,7 @@ quick-xml = { version = "0.38", features = ["serialize"] }
 url = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 futures = "0.3"
-aws-sdk-s3 = { version = "1.140.0", default-features = false, features = ["behavior-version-latest", "default-https-client", "http-1x", "rt-tokio", "rustls"] }
+aws-sdk-s3 = { version = "1.144.0", default-features = false, features = ["behavior-version-latest", "default-https-client", "http-1x", "rt-tokio"] }
     async-trait = "0.1"
     # transport-io 供 stdio bin target 使用；Cargo feature 为 crate 级统一，
     # 无法只对单个 bin 收敛（仅引入 io.rs 与 tokio/io-std，体积可忽略）。
@@ -86,4 +86,4 @@ float8 = { path = "vendor/float8" }
 
 [dev-dependencies]
 aws-sigv4 = { version = "=1.5.1", default-features = false, features = ["sign-http", "http1"] }
-aws-smithy-http-client = { version = "=1.2.0", features = ["test-util"] }
+aws-smithy-http-client = { version = "=1.4.0", features = ["test-util"] }
