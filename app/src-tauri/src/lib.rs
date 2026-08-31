@@ -27,6 +27,8 @@ use tauri::Manager;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "windows")]
+    // SAFETY: SetErrorMode 是无指针参数的 Win32 调用，仅改变进程错误弹窗模式；
+    // 两个标志为文档化常量，不会引入内存安全问题。
     unsafe {
         #[link(name = "kernel32")]
         unsafe extern "system" {

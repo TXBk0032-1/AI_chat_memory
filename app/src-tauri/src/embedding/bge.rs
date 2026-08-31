@@ -588,12 +588,15 @@ fn try_load(
 ) -> Result<BertModel> {
     // sentence-transformers export sometimes nests under "bert." or has none.
     let weights = [model_dir.join("model.safetensors")];
+    // SAFETY: from_mmaped_safetensors 会内存映射模型文件；文件由应用自己管理，
+    // 加载与推理期间不会被修改或截断，映射内存始终有效。
     let vb_bert = unsafe {
         VarBuilder::from_mmaped_safetensors(&weights, dtype, device).map_err(candle_err)?
     };
     if let Ok(model) = BertModel::load(vb_bert.pp("bert"), config) {
         return Ok(model);
     }
+    // SAFETY: 同上——同一份应用管理的模型文件，mmap 生命周期与模型一致。
     let vb = unsafe {
         VarBuilder::from_mmaped_safetensors(&weights, dtype, device).map_err(candle_err)?
     };

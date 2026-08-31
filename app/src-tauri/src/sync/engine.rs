@@ -1216,7 +1216,11 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
             verified_head = true;
         }
         if already_published > 0 {
-            let head = &previous_head.as_ref().unwrap().0;
+            // already_published 由 previous_head.map(..).unwrap_or(0) 推出，大于 0 必有 head。
+            let head = &previous_head
+                .as_ref()
+                .expect("already_published > 0 implies previous_head is Some")
+                .0;
             if !verified_head {
                 self.download_verified_bundle(head, &self.device_id).await?;
             }

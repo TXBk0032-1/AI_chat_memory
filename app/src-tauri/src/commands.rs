@@ -641,6 +641,8 @@ pub async fn print_to_pdf(
         let target_path = path.clone();
 
         window
+            // SAFETY: WebView2 COM interop via webview2-com 生成的绑定；所有接口指针
+            // 均来自框架提供的 controller/environment，且仅在 WebView2 要求的 UI 线程上使用。
             .with_webview(move |webview| unsafe {
                 let controller = match webview.controller().CoreWebView2() {
                     Ok(c) => c,

@@ -576,6 +576,8 @@ fn load_model(
     let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json"))
         .map_err(|error| AppError::Configuration(error.to_string()))?;
     let try_load = |device: &Device, dtype: DType| -> Result<HarrierModel> {
+        // SAFETY: from_mmaped_safetensors 会内存映射模型文件；文件由应用自己管理，
+        // 加载与推理期间不会被修改或截断，映射内存始终有效。
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(
                 &[model_dir.join("model.safetensors")],
