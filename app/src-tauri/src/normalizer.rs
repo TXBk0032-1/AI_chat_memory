@@ -88,23 +88,99 @@ pub fn normalize_session(platform: &str, raw: &Value) -> Result<NormalizedSessio
     })
 }
 
+/// DeepSeek fragment 中的工具调用（SEARCH/CODE 等非正文片段）统一提取为
+/// `metadata.tool_calls` 条目：{name, result?, results_count?}。
+fn deepseek_tool_calls_from_fragments(fragments: &[Value]) -> Vec<Value> {
+    fragments
+        .iter()
+        .filter_map(|fragment| {
+            let kind = fragment
+                .get("type")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if matches!(kind, "REQUEST" | "RESPONSE" | "THINK" | "") {
+                return None;
+            }
+            let mut call = serde_json::Map::new();
+            call.insert("name".into(), Value::String(kind.to_string()));
+            if let Some(content) = fragment.get("content").and_then(Value::as_str)
+                && !content.is_empty()
+            {
+                call.insert("result".into(), Value::String(content.to_string()));
+            }
+            if let Some(results) = fragment.get("results").and_then(Value::as_array) {
+                call.insert("results_count".into(), json!(results.len()));
+            }
+            Some(Value::Object(call))
+        })
+        .collect()
+}
+
 fn normalize_deepseek_messages(raw: Option<&Value>) -> Vec<NormalizedMessage> {
     let references = raw
         .and_then(|value| value.get("_references"))
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    raw.and_then(|v| v.pointer("/data/biz_data/chat_messages")).and_then(Value::as_array)
-        .into_iter().flatten().filter_map(|m| {
+    raw.and_then(|v| v.pointer("/data/biz_data/chat_messages"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|m| {
             let fragments = m.get("fragments")?.as_array()?;
-            let thinking = fragments.iter().filter(|f| f.get("type").and_then(Value::as_str) == Some("THINK"))
-                .filter_map(|f| f.get("content").and_then(Value::as_str)).collect::<Vec<_>>().join("\n");
-            let content = fragments.iter().filter(|f| f.get("type").and_then(Value::as_str) != Some("THINK"))
-                .filter_map(|f| f.get("content").and_then(Value::as_str)).collect::<Vec<_>>().join("\n");
-            Some(NormalizedMessage { role: m.get("role").and_then(Value::as_str).unwrap_or("user").into(), content,
-                metadata: json!({"model": m.get("model"), "references": references, "thinking": if thinking.is_empty() { Value::Null } else { Value::String(thinking) }}),
-                created_at: normalize_timestamp(m.get("inserted_at")).or_else(|| normalize_timestamp(m.get("create_time"))) })
-        }).collect()
+            let mut thinking = Vec::new();
+            let mut content = Vec::new();
+            for fragment in fragments {
+                let kind = fragment
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                match kind {
+                    "THINK" => {
+                        if let Some(text) = fragment.get("content").and_then(Value::as_str) {
+                            thinking.push(text);
+                        }
+                    }
+                    "REQUEST" | "RESPONSE" | "" => {
+                        if let Some(text) = fragment.get("content").and_then(Value::as_str) {
+                            content.push(text);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let thinking = thinking.join("\n");
+            let tool_calls = deepseek_tool_calls_from_fragments(fragments);
+            let mut metadata = serde_json::Map::new();
+            metadata.insert(
+                "model".into(),
+                m.get("model").cloned().unwrap_or(Value::Null),
+            );
+            metadata.insert("references".into(), Value::Array(references.clone()));
+            metadata.insert(
+                "thinking".into(),
+                if thinking.is_empty() {
+                    Value::Null
+                } else {
+                    Value::String(thinking)
+                },
+            );
+            if !tool_calls.is_empty() {
+                metadata.insert("tool_calls".into(), Value::Array(tool_calls));
+            }
+            Some(NormalizedMessage {
+                role: m
+                    .get("role")
+                    .and_then(Value::as_str)
+                    .unwrap_or("user")
+                    .into(),
+                content: content.join("\n"),
+                metadata: Value::Object(metadata),
+                created_at: normalize_timestamp(m.get("inserted_at"))
+                    .or_else(|| normalize_timestamp(m.get("create_time"))),
+            })
+        })
+        .collect()
 }
 
 fn normalize_doubao_messages(raw: Option<&Value>) -> Vec<NormalizedMessage> {
@@ -232,6 +308,7 @@ pub fn normalize_deepseek_export(raw: &Value) -> Result<NormalizedSession> {
                 references.extend(results.iter().cloned());
             }
         }
+        let tool_calls = deepseek_tool_calls_from_fragments(&fragments);
         let (role, content) = if !user.is_empty() {
             ("user", user.join("\n"))
         } else if !assistant.is_empty() {
@@ -239,13 +316,48 @@ pub fn normalize_deepseek_export(raw: &Value) -> Result<NormalizedSession> {
         } else {
             continue;
         };
-        messages.push(NormalizedMessage { role: role.into(), content,
-            metadata: json!({"source":"deepseek_export","node_id":node.get("id").and_then(Value::as_str).unwrap_or(node_id),
-                "parent_node_id":node.get("parent"),"children_node_ids":node.get("children").cloned().unwrap_or_else(|| json!([])),
-                "fragment_types":types,"tool_types":tool_types,"search_result_count":search_result_count,"references":references,
-                "model":message.get("model"),"files":message.get("files").cloned().unwrap_or_else(||json!([])),
-                "thinking":if thinking.is_empty(){Value::Null}else{Value::String(thinking.join("\n"))}}),
-            created_at: normalize_timestamp(message.get("inserted_at")).or_else(|| normalize_timestamp(raw.get("updated_at"))).or_else(|| normalize_timestamp(raw.get("inserted_at"))) });
+        let mut metadata = serde_json::Map::new();
+        metadata.insert("source".into(), json!("deepseek_export"));
+        metadata.insert(
+            "node_id".into(),
+            json!(node.get("id").and_then(Value::as_str).unwrap_or(node_id)),
+        );
+        metadata.insert("parent_node_id".into(), json!(node.get("parent")));
+        metadata.insert(
+            "children_node_ids".into(),
+            node.get("children").cloned().unwrap_or_else(|| json!([])),
+        );
+        metadata.insert("fragment_types".into(), json!(types));
+        metadata.insert("tool_types".into(), json!(tool_types));
+        metadata.insert("search_result_count".into(), json!(search_result_count));
+        metadata.insert("references".into(), Value::Array(references));
+        metadata.insert(
+            "model".into(),
+            message.get("model").cloned().unwrap_or(Value::Null),
+        );
+        metadata.insert(
+            "files".into(),
+            message.get("files").cloned().unwrap_or_else(|| json!([])),
+        );
+        metadata.insert(
+            "thinking".into(),
+            if thinking.is_empty() {
+                Value::Null
+            } else {
+                Value::String(thinking.join("\n"))
+            },
+        );
+        if !tool_calls.is_empty() {
+            metadata.insert("tool_calls".into(), Value::Array(tool_calls));
+        }
+        messages.push(NormalizedMessage {
+            role: role.into(),
+            content,
+            metadata: Value::Object(metadata),
+            created_at: normalize_timestamp(message.get("inserted_at"))
+                .or_else(|| normalize_timestamp(raw.get("updated_at")))
+                .or_else(|| normalize_timestamp(raw.get("inserted_at"))),
+        });
     }
     messages.sort_by(|a, b| a.created_at.cmp(&b.created_at));
     let platform_session_id = text(raw.get("id"))
@@ -279,6 +391,65 @@ mod tests {
         assert_eq!(doubao.messages[0].role, "assistant");
         let kimi = normalize_session("kimi", &json!({"id":"k","name":"K","_conversation":{"messages":[{"role":"user","blocks":[{"text":{"content":"q"}}]}]}})).unwrap();
         assert_eq!(kimi.messages[0].content, "q");
+    }
+
+    #[test]
+    fn extracts_tool_calls_from_deepseek_live_messages() {
+        let session = normalize_session(
+            "deepseek",
+            &json!({
+                "id": "d",
+                "title": "D",
+                "_conversation": {
+                    "data": {"biz_data": {"chat_messages": [
+                        {"role": "assistant", "fragments": [
+                            {"type": "THINK", "content": "t"},
+                            {"type": "SEARCH", "results": [{"title": "S", "url": "https://example.com"}]},
+                            {"type": "RESPONSE", "content": "a"}
+                        ]}
+                    ]}}
+                }
+            }),
+        )
+        .unwrap();
+
+        let message = &session.messages[0];
+        assert_eq!(message.content, "a");
+        let tool_calls = message.metadata["tool_calls"].as_array().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0]["name"], "SEARCH");
+        assert_eq!(tool_calls[0]["results_count"], 1);
+        assert!(message.metadata.get("tool_calls").is_some());
+    }
+
+    #[test]
+    fn extracts_tool_calls_from_deepseek_export_messages() {
+        let session = normalize_deepseek_export(&json!({
+            "id": "conversation",
+            "mapping": {
+                "node": {
+                    "id": "node",
+                    "message": {
+                        "fragments": [
+                            {"type": "THINK", "content": "t"},
+                            {"type": "CODE_INTERPRETER", "content": "ran cells"},
+                            {"type": "RESPONSE", "content": "answer"}
+                        ]
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        let message = &session.messages[0];
+        assert_eq!(message.content, "answer");
+        assert_eq!(message.metadata["thinking"], "t");
+        let tool_calls = message.metadata["tool_calls"].as_array().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0]["name"], "CODE_INTERPRETER");
+        assert_eq!(tool_calls[0]["result"], "ran cells");
+        // 旧计数字段保留，便于既有消费者与导出对照。
+        assert_eq!(message.metadata["tool_types"], json!(["CODE_INTERPRETER"]));
     }
 
     #[test]
