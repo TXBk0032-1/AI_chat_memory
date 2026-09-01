@@ -200,6 +200,8 @@ const zhCN = {
     renderFullMarkdown: '渲染完整 Markdown',
     restoreLightweight: '恢复轻量模式',
     showThinking: '查看思考过程',
+    showToolCalls: '查看工具调用（{count}）',
+    toolCallResultCount: '结果 {count} 条',
   },
   dialogs: {
     infoTitle: '对话详细信息',

@@ -202,6 +202,8 @@ const enUS = {
     renderFullMarkdown: 'Render full Markdown',
     restoreLightweight: 'Restore lightweight mode',
     showThinking: 'Show reasoning',
+    showToolCalls: 'Show tool calls ({count})',
+    toolCallResultCount: '{count} results',
   },
   dialogs: {
     infoTitle: 'Conversation details',

@@ -24,6 +24,12 @@ export type Reference = {
   summary: string
 }
 
+export type ToolCall = {
+  name: string
+  result?: string
+  results_count?: number
+}
+
 export type SessionOpen = SessionSummary & {
   message_count: number
   has_branches: boolean
@@ -74,6 +80,23 @@ export function mergeMessageBatch(slots: Array<Message | undefined>, messages: M
 
 export function expandSearchHits(hits: SearchHit[]): SearchMatch[] {
   return hits.flatMap((hit) => Array.from({ length: hit.count }, (_, occurrence) => ({ ...hit, occurrence })))
+}
+
+// metadata 来自历史导入与旧版本数据库，条目形状无法保证，逐一校验避免渲染崩溃。
+export function toolCallsFromMetadata(metadata: Record<string, unknown> | undefined): ToolCall[] {
+  const entries = metadata?.tool_calls
+  if (!Array.isArray(entries)) return []
+  return entries.flatMap((entry) => {
+    if (typeof entry !== 'object' || entry === null) return []
+    const record = entry as Record<string, unknown>
+    if (typeof record.name !== 'string' || record.name.length === 0) return []
+    const call: ToolCall = { name: record.name }
+    if (typeof record.result === 'string' && record.result.length > 0) call.result = record.result
+    if (typeof record.results_count === 'number' && Number.isFinite(record.results_count)) {
+      call.results_count = record.results_count
+    }
+    return [call]
+  })
 }
 
 let cachedPositions: Record<string, ReadingPosition> | null = null

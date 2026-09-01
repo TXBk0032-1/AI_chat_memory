@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { evictOldestReadingPositions, expandSearchHits, loadReadingPosition, mergeMessageBatch, readingPositionKey, resetReadingPositionsCache, saveReadingPosition, type Message, type ReadingPosition } from './conversation'
+import { evictOldestReadingPositions, expandSearchHits, loadReadingPosition, mergeMessageBatch, readingPositionKey, resetReadingPositionsCache, saveReadingPosition, toolCallsFromMetadata, type Message, type ReadingPosition } from './conversation'
 
 function message(seq: number): Message {
   return { id: `message-${seq}`, role: 'assistant', content: `${seq}`, metadata: {}, seq }
@@ -111,5 +111,43 @@ describe('conversation loading helpers', () => {
     } finally {
       vi.unstubAllGlobals()
     }
+  })
+})
+
+describe('toolCallsFromMetadata', () => {
+  it('parses normalizer-captured tool calls with result text and result counts', () => {
+    expect(toolCallsFromMetadata({
+      tool_calls: [
+        { name: 'SEARCH', results_count: 3 },
+        { name: 'CODE_INTERPRETER', result: 'ran cells' },
+      ],
+    })).toEqual([
+      { name: 'SEARCH', results_count: 3 },
+      { name: 'CODE_INTERPRETER', result: 'ran cells' },
+    ])
+  })
+
+  it('returns an empty list for missing or non-array tool_calls', () => {
+    expect(toolCallsFromMetadata(undefined)).toEqual([])
+    expect(toolCallsFromMetadata({})).toEqual([])
+    expect(toolCallsFromMetadata({ tool_calls: 'SEARCH' })).toEqual([])
+    expect(toolCallsFromMetadata({ tool_calls: null })).toEqual([])
+  })
+
+  it('drops malformed entries and strips empty optional fields', () => {
+    expect(toolCallsFromMetadata({
+      tool_calls: [
+        null,
+        'SEARCH',
+        { result: 'no name' },
+        { name: '', results_count: 2 },
+        { name: 'SEARCH', result: '', results_count: Number.NaN },
+        { name: 'SEARCH', results_count: 0 },
+      ],
+    })).toEqual([
+      // 名字仍有效时保留条目，仅剔除空的 result / 非有限计数。
+      { name: 'SEARCH' },
+      { name: 'SEARCH', results_count: 0 },
+    ])
   })
 })

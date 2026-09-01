@@ -301,6 +301,11 @@ i.deepseek { background: #5273e6; } i.doubao { background: #e36f53; } i.kimi { b
 .thinking-reveal > div { min-height: 0; overflow: hidden; }
 .thinking.open .thinking-reveal { grid-template-rows: 1fr; opacity: 1; transform: translateY(0); }
 .thinking .markdown { margin-top: 10px; color: #66706d; font-size: 12px; }
+.tool-calls-list { margin: 10px 0 0; padding: 0; list-style: none; display: grid; gap: 9px; }
+.tool-call-item { display: grid; gap: 5px; justify-items: start; }
+.tool-call-name { padding: 2px 9px; border-radius: 999px; background: #e2ebe7; color: #3d5750; font-weight: 650; font-size: 10px; letter-spacing: .04em; font-family: "Cascadia Code", Consolas, monospace; }
+.tool-call-meta { color: #8a948f; }
+.tool-call-result { width: 100%; box-sizing: border-box; margin: 0; padding: 8px 10px; border: 1px solid #e3e9e6; border-radius: 10px; background: #fff; color: #4a524f; font-family: "Cascadia Code", Consolas, monospace; font-size: 11px; line-height: 1.55; white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow: auto; }
 .message-list.branch-mode { padding: 0; overflow: hidden; background: #f7f9f9; }
 .branch-view, .branch-overview { width: 100%; height: 100%; min-height: 0; }
 .branch-view { position: relative; }
@@ -665,6 +670,9 @@ html[data-theme="dark"] .reference-preview small { color: var(--color-primary-te
 html[data-theme="dark"] .thinking { color: #aeb8b5; border-color: #46514d; background: #272e2c; }
 html[data-theme="dark"] .thinking.open { border-color: #55736a; background: #263530; }
 html[data-theme="dark"] .thinking .markdown { color: #bfc7c4; }
+html[data-theme="dark"] .tool-call-name { background: #31413b; color: #a9c3b8; }
+html[data-theme="dark"] .tool-call-meta { color: #7f8a8f; }
+html[data-theme="dark"] .tool-call-result { background: #202725; border-color: #3a4540; color: #c3ccc8; }
 html[data-theme="dark"] .message-placeholder { color: #7f8a8f; }
 html[data-theme="dark"] .load-progress { color: var(--color-primary-text, #66b99d); }
 html[data-theme="dark"] .inline-retry { color: var(--color-primary-text, #72c3a8); }

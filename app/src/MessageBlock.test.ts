@@ -176,6 +176,75 @@ describe('MessageBlock oversized content', () => {
   })
 })
 
+describe('MessageBlock tool calls', () => {
+  function toolCallMessage(metadata: Record<string, unknown> = {
+    tool_calls: [
+      { name: 'SEARCH', results_count: 3 },
+      { name: 'CODE_INTERPRETER', result: 'ran cells' },
+    ],
+  }): Message {
+    return messageFixture({ content: 'answer', metadata })
+  }
+
+  it('omits the collapsible section when metadata has no tool calls', () => {
+    const harness = mountMessage(messageFixture({ content: 'answer' }))
+    try {
+      expect(harness.root.querySelector('.tool-calls')).toBeNull()
+      expect(harness.root.querySelector('.tool-calls-list')).toBeNull()
+    } finally {
+      harness.unmount()
+    }
+  })
+
+  it('starts collapsed and reveals name, result count and result on toggle', async () => {
+    const harness = mountMessage(toolCallMessage())
+    try {
+      expect(harness.root.querySelector('.tool-calls-list')).toBeNull()
+      buttonWithText(harness.root, '查看工具调用（2）').click()
+      await nextTick()
+
+      const names = [...harness.root.querySelectorAll('.tool-call-name')].map((el) => el.textContent)
+      expect(names).toEqual(['SEARCH', 'CODE_INTERPRETER'])
+      expect(harness.root.querySelector('.tool-call-meta')?.textContent).toBe('结果 3 条')
+      expect(requiredElement(harness.root, '.tool-call-result').textContent).toBe('ran cells')
+
+      buttonWithText(harness.root, '查看工具调用（2）').click()
+      await nextTick()
+      expect(harness.root.querySelector('.tool-calls-list')).toBeNull()
+    } finally {
+      harness.unmount()
+    }
+  })
+
+  it('localizes the toggle and result count with the active English locale', async () => {
+    setLocale('en-US')
+    const harness = mountMessage(toolCallMessage())
+    try {
+      expect(buttonWithText(harness.root, 'Show tool calls (2)')).toBeTruthy()
+      buttonWithText(harness.root, 'Show tool calls (2)').click()
+      await nextTick()
+      expect(harness.root.querySelector('.tool-call-meta')?.textContent).toBe('3 results')
+    } finally {
+      harness.unmount()
+    }
+  })
+
+  it('drops malformed tool call entries instead of rendering empty chips', async () => {
+    const harness = mountMessage(toolCallMessage({
+      tool_calls: [null, { result: 'no name' }, { name: '' }, 'SEARCH', { name: 'SEARCH', results_count: 2 }],
+    }))
+    try {
+      expect(buttonWithText(harness.root, '查看工具调用（1）')).toBeTruthy()
+      buttonWithText(harness.root, '查看工具调用（1）').click()
+      await nextTick()
+      const names = [...harness.root.querySelectorAll('.tool-call-name')].map((el) => el.textContent)
+      expect(names).toEqual(['SEARCH'])
+    } finally {
+      harness.unmount()
+    }
+  })
+})
+
 describe('MessageBlock rendered notifications and code copy', () => {
   function codeMessage(): Message {
     return messageFixture({ content: '```js\nconsole.log("hi")\n```' })
