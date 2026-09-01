@@ -264,7 +264,10 @@ pub async fn import_local_embedding_model(
     service: State<'_, AppService>,
     path: String,
 ) -> Result<(), String> {
-    let safe_path = validate_file_path(&path, &["onnx", "bin", "safetensors", "tar", "gz", "zip"])?;
+    // 入参是模型目录（前端目录选择器给出），不是单文件；
+    // config.json / tokenizer.json / model.safetensors 的存在性
+    // 由 LocalBgeBackend::import_from_path / LocalHarrierBackend::import_model_dir 探测。
+    let safe_path = validate_directory_path(&path)?;
     service
         .import_local_model(&safe_path)
         .await
@@ -788,6 +791,19 @@ mod export_tests {
         assert!(validate_file_path(r"\\.\COM1", &["md"]).is_err());
         assert!(validate_directory_path(r"C:\Windows\System32").is_err());
         assert!(validate_directory_path(r"\\?\C:\Windows").is_err());
+    }
+
+    #[test]
+    fn local_model_import_accepts_directory_paths() {
+        let dir = std::env::temp_dir().join(format!(
+            "ai-chat-memory-model-import-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let safe = validate_directory_path(dir.to_string_lossy().as_ref())
+            .expect("目录选择器给出的模型目录必须通过校验");
+        assert_eq!(safe, dir);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
 

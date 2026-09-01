@@ -788,6 +788,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn import_from_path_copies_model_directory_and_rejects_missing_files() {
+        let source = test_dir("import-source");
+        let model_dir = test_dir("import-target");
+        let incomplete = test_dir("import-incomplete");
+        for dir in [&source, &model_dir, &incomplete] {
+            let _ = tokio::fs::remove_dir_all(dir).await;
+            tokio::fs::create_dir_all(dir).await.unwrap();
+        }
+        tokio::fs::write(
+            model_dir.join("config.json"),
+            r#"{"model_type":"bert","hidden_size":384}"#,
+        )
+        .await
+        .unwrap();
+
+        let backend = LocalBgeBackend::open(
+            "fixture/bge-model".into(),
+            model_dir.clone(),
+            &LocalEmbeddingSettings::default(),
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+
+        for file in MODEL_FILES {
+            tokio::fs::write(source.join(file), "fixture")
+                .await
+                .unwrap();
+        }
+        // 缺少任一模型文件时必须整体失败，且先校验后拷贝，不产生半成品目录。
+        tokio::fs::write(incomplete.join("config.json"), "fixture")
+            .await
+            .unwrap();
+        let error = backend.import_from_path(&incomplete).await.unwrap_err();
+        assert!(
+            matches!(error, AppError::Configuration(message) if message.contains("tokenizer.json"))
+        );
+
+        backend.import_from_path(&source).await.unwrap();
+        for file in MODEL_FILES {
+            assert_eq!(
+                tokio::fs::read(model_dir.join(file)).await.unwrap(),
+                b"fixture"
+            );
+        }
+
+        for dir in [source, model_dir, incomplete] {
+            let _ = tokio::fs::remove_dir_all(dir).await;
+        }
+    }
+
+    #[tokio::test]
     async fn rejects_incompatible_model_architecture_before_loading() {
         let dir = test_dir("architecture");
         let _ = tokio::fs::remove_dir_all(&dir).await;
