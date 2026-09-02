@@ -1,5 +1,5 @@
-use super::super::{CONVERSATIONS_JSON_TOO_LARGE, read_zip_entry_with_limit};
 use crate::error::AppError;
+use crate::import_history::{CONVERSATIONS_JSON_TOO_LARGE, read_zip_entry_with_limit};
 use std::io::{Cursor, Write};
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::SimpleFileOptions};
 

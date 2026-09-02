@@ -195,7 +195,7 @@ async fn import_zip(State(service): State<AppService>, body: Bytes) -> impl Into
             ).into_response();
         }
     };
-    api_result(service.import_deepseek_zip(body.to_vec()).await)
+    api_result(service.import_history(body.to_vec()).await)
 }
 
 #[derive(Deserialize)]

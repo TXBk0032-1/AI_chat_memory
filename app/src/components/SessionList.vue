@@ -21,7 +21,15 @@ function highlightTitle(value: string) {
   return highlightHtml(html, props.query)
 }
 function platformName(value: string) {
-  return ({ deepseek: 'DeepSeek', doubao: t('app.platformDoubao'), kimi: 'Kimi' } as Record<string, string>)[value] || value
+  return ({
+    deepseek: 'DeepSeek',
+    doubao: t('app.platformDoubao'),
+    kimi: 'Kimi',
+    cherry: t('app.platformCherry'),
+    chatbox: t('app.platformChatbox'),
+    kelivo: t('app.platformKelivo'),
+    gemini: t('app.platformGemini'),
+  } as Record<string, string>)[value] || value
 }
 function formatDate(value?: string) {
   if (!value) return '-'

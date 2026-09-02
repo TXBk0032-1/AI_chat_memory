@@ -15,7 +15,7 @@ fn text(value: Option<&Value>) -> Option<String> {
     })
 }
 
-fn normalize_timestamp(value: Option<&Value>) -> Option<String> {
+pub(crate) fn normalize_timestamp(value: Option<&Value>) -> Option<String> {
     let raw = text(value)?;
     let trimmed = raw.trim();
     if let Ok(number) = trimmed.parse::<f64>() {

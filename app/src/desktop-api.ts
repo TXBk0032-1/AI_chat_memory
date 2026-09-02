@@ -171,7 +171,7 @@ export interface DesktopApi {
   searchSessionHits(id: string, query: string, mode?: SearchMode | null): Promise<SearchHit[]>
   getSessionBranches(id: string): Promise<BranchOverview>
   deleteSession(id: string): Promise<void>
-  importDeepseekZip(path: string): Promise<void>
+  importHistory(path: string): Promise<void>
   getSettings(): Promise<SettingsModel>
   saveSettings(settings: SettingsModel, cloudSyncCredentials?: CloudCredentialInput | null): Promise<SettingsModel>
   rotateSecret(): Promise<SettingsModel>
@@ -201,7 +201,7 @@ export const desktopApi: DesktopApi = {
   searchSessionHits: (id, query, mode = null) => invoke('search_session_hits', { id, query, mode }),
   getSessionBranches: (id) => invoke('get_session_branches', { id }),
   deleteSession: (id) => invoke('delete_session', { id }),
-  importDeepseekZip: (path) => invoke('import_deepseek_zip', { path }),
+  importHistory: (path) => invoke('import_history', { path }),
   getSettings: () => invoke('get_settings'),
   saveSettings: (settings, cloudSyncCredentials = null) => invoke('save_settings', { settings, cloudSyncCredentials }),
   rotateSecret: () => invoke('rotate_secret'),

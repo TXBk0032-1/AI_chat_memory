@@ -6,6 +6,7 @@ mod embedding;
 mod error;
 mod http_api;
 mod i18n;
+mod import_history;
 mod local_services;
 mod logging;
 mod mcp;
@@ -149,7 +150,7 @@ pub fn run() {
             commands::search_session_hits,
             commands::get_session_branches,
             commands::delete_session,
-            commands::import_deepseek_zip,
+            commands::import_history,
             commands::get_settings,
             commands::set_native_locale,
             commands::save_settings,

@@ -667,12 +667,12 @@ async function removeSession() {
 }
 
 async function importZip() {
-  const path = await open({ multiple: false, filters: [{ name: t('app.importFilterName'), extensions: ['zip'] }] })
+  const path = await open({ multiple: false, filters: [{ name: t('app.importFilterName'), extensions: ['zip', 'json', 'html'] }] })
   if (typeof path !== 'string') return
   loading.value = true
   error.value = ''
   try {
-    await desktopApi.importDeepseekZip(path)
+    await desktopApi.importHistory(path)
     await loadSessions()
   } catch (reason) {
     error.value = String(reason)
@@ -782,7 +782,15 @@ function formatDate(value?: string, compact = false) {
 }
 
 function platformName(value: string) {
-  return ({ deepseek: 'DeepSeek', doubao: t('app.platformDoubao'), kimi: 'Kimi' } as Record<string, string>)[value] ?? value
+  return ({
+    deepseek: 'DeepSeek',
+    doubao: t('app.platformDoubao'),
+    kimi: 'Kimi',
+    cherry: t('app.platformCherry'),
+    chatbox: t('app.platformChatbox'),
+    kelivo: t('app.platformKelivo'),
+    gemini: t('app.platformGemini'),
+  } as Record<string, string>)[value] ?? value
 }
 
 function roleName(value: string) {

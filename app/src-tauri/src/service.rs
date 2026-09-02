@@ -1,7 +1,5 @@
-use serde_json::Value;
 use sqlx::SqlitePool;
 use std::{
-    io::Read,
     path::{Path, PathBuf},
     sync::{
         Arc, OnceLock,
@@ -19,6 +17,7 @@ use crate::{
     database,
     embedding::EmbeddingManager,
     error::{AppError, Result},
+    import_history,
     models::*,
     normalizer,
     semantic::SemanticEngine,
@@ -49,18 +48,7 @@ use crate::{
     },
 };
 
-const MAX_CONVERSATIONS_JSON_BYTES: u64 = 128 * 1024 * 1024;
-const CONVERSATIONS_JSON_TOO_LARGE: &str = "conversations.json 解压后超过 128 MB 限制";
-
-fn read_zip_entry_with_limit<R: Read>(reader: R, max_bytes: u64) -> Result<String> {
-    let mut content = String::new();
-    let mut limited = reader.take(max_bytes.saturating_add(1));
-    limited.read_to_string(&mut content)?;
-    if content.len() as u64 > max_bytes {
-        return Err(AppError::InvalidData(CONVERSATIONS_JSON_TOO_LARGE.into()));
-    }
-    Ok(content)
-}
+const MAX_HISTORY_ARCHIVE_BYTES: usize = 128 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 struct CloudSyncRuntime {
@@ -1930,28 +1918,16 @@ impl AppService {
         })
     }
 
-    pub async fn import_deepseek_zip(&self, bytes: Vec<u8>) -> Result<ImportResponse> {
+    /// 多格式历史导入统一入口：按内容嗅探 DeepSeek ZIP / Cherry Studio /
+    /// Chatbox / Kelivo / Gemini Takeout，解析后走同一落库路径。
+    pub async fn import_history(&self, bytes: Vec<u8>) -> Result<ImportResponse> {
         self.ensure_writable()?;
         let archive_bytes = bytes.len();
-        if bytes.len() > 128 * 1024 * 1024 {
-            return Err(AppError::InvalidData("ZIP 文件超过 128 MB 限制".into()));
+        if archive_bytes > MAX_HISTORY_ARCHIVE_BYTES {
+            return Err(AppError::InvalidData("导入文件超过 128 MB 限制".into()));
         }
-        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
-        let file = archive
-            .by_name("conversations.json")
-            .map_err(|_| AppError::InvalidData("ZIP 中缺少 conversations.json".into()))?;
-        if file.size() > MAX_CONVERSATIONS_JSON_BYTES {
-            return Err(AppError::InvalidData(CONVERSATIONS_JSON_TOO_LARGE.into()));
-        }
-        if file.compressed_size() > 0 && file.size() / file.compressed_size() > 200 {
-            return Err(AppError::InvalidData("ZIP 压缩比异常".into()));
-        }
-        let content = read_zip_entry_with_limit(file, MAX_CONVERSATIONS_JSON_BYTES)?;
-        let conversations: Vec<Value> = serde_json::from_str(&content)?;
-        let normalized = conversations
-            .iter()
-            .map(normalizer::normalize_deepseek_export)
-            .collect::<Result<Vec<_>>>()?;
+        let archive = import_history::parse_import_history(bytes).await?;
+        let normalized = archive.sessions;
         let imported = {
             let _guard = self.sync_gate.lock().await;
             import_local_sessions(&self.pool, &normalized).await?
@@ -1969,10 +1945,11 @@ impl AppService {
             }
         }
         tracing::info!(
+            format = archive.format,
             archive_bytes,
-            conversations = normalized.len(),
+            sessions = normalized.len(),
             imported,
-            "DeepSeek archive import completed"
+            "history archive import completed"
         );
         self.notify_local_sync();
         Ok(ImportResponse {

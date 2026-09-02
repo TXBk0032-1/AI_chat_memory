@@ -86,29 +86,29 @@ pub async fn delete_session(service: State<'_, AppService>, id: String) -> Resul
 }
 
 #[tauri::command]
-pub async fn import_deepseek_zip(
+pub async fn import_history(
     service: State<'_, AppService>,
     path: String,
 ) -> Result<ImportResponse, String> {
     use tokio::io::AsyncReadExt;
-    let safe_path = validate_file_path(&path, &["zip"])?;
+    let safe_path = validate_file_path(&path, &["zip", "json", "html"])?;
     let file = tokio::fs::File::open(&safe_path)
         .await
         .map_err(|e| e.to_string())?;
-    const MAX_ZIP_BYTES: usize = 128 * 1024 * 1024;
+    const MAX_IMPORT_BYTES: usize = 128 * 1024 * 1024;
     let mut bytes = Vec::new();
-    file.take((MAX_ZIP_BYTES + 1) as u64)
+    file.take((MAX_IMPORT_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
         .await
         .map_err(|e| e.to_string())?;
-    if bytes.len() > MAX_ZIP_BYTES {
+    if bytes.len() > MAX_IMPORT_BYTES {
         tracing::warn!(
             archive_bytes = bytes.len(),
-            "desktop ZIP import rejected because it exceeds the size limit"
+            "desktop history import rejected because it exceeds the size limit"
         );
-        return Err("ZIP 文件超过 128 MB 限制".into());
+        return Err("导入文件超过 128 MB 限制".into());
     }
-    service.import_deepseek_zip(bytes).await.map_err(message)
+    service.import_history(bytes).await.map_err(message)
 }
 
 #[tauri::command]
