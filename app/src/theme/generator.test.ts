@@ -40,6 +40,16 @@ describe('theme generator', () => {
     expect(colors['--color-btn-close']).toBe('#ff0000')
   })
 
+  it('falls back to neutral background tones when extInfo omits them', () => {
+    const light = createThemeColors('rgb(22, 121, 97)', undefined, false)
+    expect(light['--color-app-background']).toBe('rgb(244, 245, 246)')
+    expect(light['--color-main-background']).toBe('rgb(255, 255, 255)')
+
+    const dark = createThemeColors('rgb(85, 196, 158)', undefined, true)
+    expect(dark['--color-app-background']).toBe('rgb(17, 22, 26)')
+    expect(dark['--color-main-background']).toBe('rgb(32, 37, 40)')
+  })
+
   it('skips generator-derived keys when merging extInfo', () => {
     const colors = createThemeColors('rgb(22, 121, 97)', 'rgb(33, 33, 33)', false, false, {
       '--color-primary': '#ff0000',
