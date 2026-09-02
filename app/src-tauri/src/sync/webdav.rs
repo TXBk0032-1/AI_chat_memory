@@ -10,7 +10,15 @@ use url::Url;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+const PROPFIND_BODY: &str = "<?xml version=\"1.0\"?><propfind xmlns=\"DAV:\"><prop><getetag/><getcontentlength/><resourcetype/></prop></propfind>";
+
 const MAX_RESPONSE_BYTES: usize = 128 * 1024 * 1024;
+// 幂等请求针对网关瞬断的重试预算。链路上的代理/TUN 软件在重负载下会把成功
+// 应答改写成 502（本机 FlClash TUN 实测 207 被换成 502），真实部署的 WebDAV
+// 网关也会瞬断；单次重试足以把偶发抖动压到可忽略。带条件的写操作不重试，
+// 否则首次写实际成功而应答丢失时，重放会得到 412 造成假冲突。
+const MAX_IDEMPOTENT_ATTEMPTS: usize = 2;
+const IDEMPOTENT_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 pub struct WebDavBackend {
     base_url: Url,
@@ -131,6 +139,41 @@ impl WebDavBackend {
         self.expect_success(response).await?;
         Ok(())
     }
+
+    /// 发送幂等请求并在网关瞬断时重试一次；返回原始响应，状态码语义由调用方解释。
+    async fn send_idempotent(
+        &self,
+        build: impl Fn() -> CloudResult<reqwest::RequestBuilder>,
+    ) -> CloudResult<Response> {
+        let mut attempt = 1usize;
+        loop {
+            let response = match build()?.send().await {
+                Ok(response) => response,
+                Err(error) => {
+                    let error = map_reqwest(error);
+                    if error.kind() == "protocol" && attempt < MAX_IDEMPOTENT_ATTEMPTS {
+                        attempt += 1;
+                        tokio::time::sleep(IDEMPOTENT_RETRY_DELAY).await;
+                        continue;
+                    }
+                    return Err(error);
+                }
+            };
+            if !is_transient_gateway_status(response.status()) || attempt >= MAX_IDEMPOTENT_ATTEMPTS
+            {
+                return Ok(response);
+            }
+            attempt += 1;
+            tokio::time::sleep(IDEMPOTENT_RETRY_DELAY).await;
+        }
+    }
+}
+
+fn is_transient_gateway_status(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE | StatusCode::GATEWAY_TIMEOUT
+    )
 }
 
 #[async_trait]
@@ -138,13 +181,14 @@ impl CloudBackend for WebDavBackend {
     async fn list_depth_one(&self, path: &RemotePath) -> CloudResult<Vec<RemoteEntry>> {
         let method = Method::from_bytes(b"PROPFIND").expect("static PROPFIND method");
         let response = self
-            .request(method, path)?
-            .header("Depth", "1")
-            .header("Content-Type", "application/xml")
-            .body("<?xml version=\"1.0\"?><propfind xmlns=\"DAV:\"><prop><getetag/><getcontentlength/><resourcetype/></prop></propfind>")
-            .send()
-            .await
-            .map_err(map_reqwest)?;
+            .send_idempotent(|| {
+                Ok(self
+                    .request(method.clone(), path)?
+                    .header("Depth", "1")
+                    .header("Content-Type", "application/xml")
+                    .body(PROPFIND_BODY))
+            })
+            .await?;
         let response = self.expect_success(response).await?;
         parse_multistatus(&Self::read_limited(response).await?)
     }
@@ -155,10 +199,8 @@ impl CloudBackend for WebDavBackend {
         for segment in path.segments() {
             current = current.join(segment)?;
             let response = self
-                .request(method.clone(), &current)?
-                .send()
-                .await
-                .map_err(map_reqwest)?;
+                .send_idempotent(|| self.request(method.clone(), &current))
+                .await?;
             if !(response.status().is_success()
                 || response.status() == StatusCode::METHOD_NOT_ALLOWED)
             {
@@ -170,10 +212,8 @@ impl CloudBackend for WebDavBackend {
 
     async fn get(&self, path: &RemotePath) -> CloudResult<RemoteObject> {
         let response = self
-            .request(Method::GET, path)?
-            .send()
-            .await
-            .map_err(map_reqwest)?;
+            .send_idempotent(|| self.request(Method::GET, path))
+            .await?;
         let response = self.expect_success(response).await?;
         let etag = response
             .headers()
@@ -397,6 +437,86 @@ fn offline(message: &'static str) -> CloudError {
 mod tests {
     use super::*;
     use crate::sync::{backend::CloudBackend, test_server::TestWebDav};
+    use std::{
+        io::{Read as _, Write as _},
+        net::TcpListener,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
+
+    /// 每接受一个连接应答一次固定报文；记录连接数供重试断言使用。
+    fn scripted_server(
+        responses: &'static [&'static str],
+        connections: Arc<AtomicUsize>,
+    ) -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for (index, stream) in listener.incoming().enumerate() {
+                connections.fetch_add(1, Ordering::SeqCst);
+                let mut stream = stream.unwrap();
+                let mut buffer = [0u8; 4096];
+                let _ = stream.read(&mut buffer);
+                let scripted = responses.get(index).or_else(|| responses.last()).unwrap();
+                let _ = stream.write_all(scripted.as_bytes());
+            }
+        });
+        address
+    }
+
+    #[test]
+    fn treats_only_gateway_statuses_as_transient_for_idempotent_reads() {
+        assert!(is_transient_gateway_status(StatusCode::BAD_GATEWAY));
+        assert!(is_transient_gateway_status(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(is_transient_gateway_status(StatusCode::GATEWAY_TIMEOUT));
+        assert!(!is_transient_gateway_status(StatusCode::NOT_FOUND));
+        assert!(!is_transient_gateway_status(StatusCode::UNAUTHORIZED));
+    }
+
+    #[test]
+    fn retries_transient_gateway_responses_for_idempotent_reads() {
+        let connections = Arc::new(AtomicUsize::new(0));
+        let address = scripted_server(
+            &[
+                "HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok",
+            ],
+            Arc::clone(&connections),
+        );
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let result = runtime.block_on(async {
+            let backend =
+                WebDavBackend::new(&format!("http://{address}/"), "user", "pass").unwrap();
+            backend.get(&RemotePath::parse("probe.bin").unwrap()).await
+        });
+        assert_eq!(result.unwrap().bytes, b"ok");
+        assert_eq!(connections.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn does_not_retry_conditional_writes_on_transient_gateway_responses() {
+        let connections = Arc::new(AtomicUsize::new(0));
+        let address = scripted_server(
+            &["HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"],
+            Arc::clone(&connections),
+        );
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let error = runtime
+            .block_on(async {
+                let backend =
+                    WebDavBackend::new(&format!("http://{address}/"), "user", "pass").unwrap();
+                backend
+                    .put_if_absent(&RemotePath::parse("probe.bin").unwrap(), b"one")
+                    .await
+            })
+            .unwrap_err();
+        assert_eq!(error.kind(), "protocol");
+        // 留出重试窗口：若有人给条件写加上了重试，这里的连接数会变成 2。
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(connections.load(Ordering::SeqCst), 1);
+    }
 
     #[tokio::test]
     async fn webdav_enforces_auth_listing_and_conditional_updates() {
