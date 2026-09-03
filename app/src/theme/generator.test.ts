@@ -42,30 +42,30 @@ describe('theme generator', () => {
 
   it('falls back to neutral background tones when extInfo omits them', () => {
     const light = createThemeColors('rgb(22, 121, 97)', undefined, false)
-    expect(light['--color-app-background']).toBe('rgb(244, 245, 246)')
-    expect(light['--color-main-background']).toBe('rgb(255, 255, 255)')
+    expect(light['--color-app-background']).toBe('rgba(244, 245, 246, 0.65)')
+    expect(light['--color-main-background']).toBe('rgba(255, 255, 255, 0.88)')
 
     const dark = createThemeColors('rgb(85, 196, 158)', undefined, true)
-    expect(dark['--color-app-background']).toBe('rgb(17, 22, 26)')
-    expect(dark['--color-main-background']).toBe('rgb(32, 37, 40)')
+    expect(dark['--color-app-background']).toBe('rgba(17, 22, 26, 0.70)')
+    expect(dark['--color-main-background']).toBe('rgba(32, 37, 40, 0.88)')
   })
 
   it('derives border tiers from the background tone and honors overrides', () => {
     const light = createThemeColors('rgb(22, 121, 97)', undefined, false)
-    expect(light['--color-border-subtle']).toBe('rgb(235, 235, 235)')
-    expect(light['--color-border']).toBe('rgb(209, 209, 209)')
-    expect(light['--color-border-strong']).toBe('rgb(173, 173, 173)')
+    expect(light['--color-border-subtle']).toBe('rgba(235, 235, 235, 0.88)')
+    expect(light['--color-border']).toBe('rgba(209, 209, 209, 0.88)')
+    expect(light['--color-border-strong']).toBe('rgba(173, 173, 173, 0.88)')
 
     const dark = createThemeColors('rgb(85, 196, 158)', undefined, true)
-    expect(dark['--color-border-subtle']).toBe('rgb(45, 50, 53)')
-    expect(dark['--color-border']).toBe('rgb(59, 63, 66)')
-    expect(dark['--color-border-strong']).toBe('rgb(77, 81, 83)')
+    expect(dark['--color-border-subtle']).toBe('rgba(45, 50, 53, 0.88)')
+    expect(dark['--color-border']).toBe('rgba(59, 63, 66, 0.88)')
+    expect(dark['--color-border-strong']).toBe('rgba(77, 81, 83, 0.88)')
 
     const overridden = createThemeColors('rgb(22, 121, 97)', undefined, false, false, {
       '--color-border': '#123456',
     })
     expect(overridden['--color-border']).toBe('#123456')
-    expect(overridden['--color-border-subtle']).toBe('rgb(235, 235, 235)')
+    expect(overridden['--color-border-subtle']).toBe('rgba(235, 235, 235, 0.88)')
   })
 
   it('skips generator-derived keys when merging extInfo', () => {

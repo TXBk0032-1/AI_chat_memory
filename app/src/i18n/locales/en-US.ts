@@ -267,6 +267,7 @@ const enUS = {
       quickPalette: 'Popular Color Palette',
       appBgColor: 'App Background',
       mainBgColor: 'Main Content Background',
+      opacity: 'Opacity',
       fontColor: 'Main Font Color',
       advancedTitle: 'Advanced Interface Colors',
       navFontColor: 'Navigation Highlight Font',

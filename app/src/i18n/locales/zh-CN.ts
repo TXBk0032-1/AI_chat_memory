@@ -265,6 +265,7 @@ const zhCN = {
       quickPalette: '流行色推荐',
       appBgColor: '应用背景色（App Background）',
       mainBgColor: '内容区背景色（Main Background）',
+      opacity: '不透明度',
       fontColor: '主字体颜色（Font Color）',
       advancedTitle: '高级界面色彩细节',
       navFontColor: '导航文字高亮色',

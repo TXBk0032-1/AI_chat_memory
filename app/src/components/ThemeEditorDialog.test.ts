@@ -217,4 +217,59 @@ describe('ThemeEditorDialog component', () => {
     expect(ext['--color-main-background']).toMatch(/0\.7/)
     unmount()
   })
+
+  it('updates opacity via slider and preserves opacity on native color input', async () => {
+    const { root, saveSpy, unmount } = mountDialog({
+      show: true,
+      themeDef: sampleTheme,
+      isNew: false,
+    })
+
+    await nextTick()
+
+    const sliders = root.querySelectorAll<HTMLInputElement>('.alpha-slider-wrap input[type="range"]')
+    expect(sliders.length).toBe(2)
+    const appBgSlider = sliders[0]
+    const mainBgSlider = sliders[1]
+
+    // Slide app background opacity to 45%
+    appBgSlider.value = '45'
+    appBgSlider.dispatchEvent(new Event('input'))
+    await nextTick()
+
+    // Slide main background opacity to 80%
+    mainBgSlider.value = '80'
+    mainBgSlider.dispatchEvent(new Event('input'))
+    await nextTick()
+
+    // Verify text inputs reflect new opacity
+    const pickerTextInputs = root.querySelectorAll<HTMLInputElement>(
+      '.color-picker-row input[type="text"]',
+    )
+    const appBgInput = pickerTextInputs[1]
+    const mainBgInput = pickerTextInputs[2]
+    expect(appBgInput.value).toMatch(/0\.45/)
+    expect(mainBgInput.value).toMatch(/0\.8/)
+
+    // Native color picker input: changing hex should preserve the 0.45 alpha
+    const colorPickers = root.querySelectorAll<HTMLInputElement>('.color-picker-native')
+    expect(colorPickers.length).toBeGreaterThanOrEqual(2)
+    const appBgNativePicker = colorPickers[1]
+    appBgNativePicker.value = '#123456'
+    appBgNativePicker.dispatchEvent(new Event('input'))
+    await nextTick()
+
+    expect(appBgInput.value).toBe('rgba(18, 52, 86, 0.45)')
+
+    // Save and verify persistence
+    const saveBtn = requiredElement<HTMLButtonElement>(root, '.btn-primary')
+    saveBtn.click()
+    await nextTick()
+
+    expect(saveSpy).toHaveBeenCalled()
+    const [savedTheme] = saveSpy.mock.calls[0]
+    expect(savedTheme.config.extInfo['--color-app-background']).toBe('rgba(18, 52, 86, 0.45)')
+    expect(savedTheme.config.extInfo['--color-main-background']).toMatch(/0\.8/)
+    unmount()
+  })
 })

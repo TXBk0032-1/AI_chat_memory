@@ -21,6 +21,8 @@ import {
   normalizeColor,
   toHex6,
   isValidColor,
+  parseRgba,
+  formatRgba,
 } from '../theme'
 
 const props = defineProps<{
@@ -103,8 +105,8 @@ function resetFormFromTheme(target: ThemeDefinition | null, isCreatingNew = fals
     isDark.value = defaultTheme.isDark
     isDarkFont.value = Boolean(defaultTheme.isDarkFont)
     primaryColor.value = toHex6(defaultTheme.config.primary)
-    appBgColor.value = colorForInput(defaultTheme.config.extInfo?.['--color-app-background'], defaultTheme.isDark ? '#171b1e' : '#f7f9fa')
-    mainBgColor.value = colorForInput(defaultTheme.config.extInfo?.['--color-main-background'], defaultTheme.isDark ? '#1e2428' : '#ffffff')
+    appBgColor.value = colorForInput(defaultTheme.config.extInfo?.['--color-app-background'], defaultTheme.isDark ? 'rgba(23, 27, 30, 0.70)' : 'rgba(247, 249, 250, 0.65)')
+    mainBgColor.value = colorForInput(defaultTheme.config.extInfo?.['--color-main-background'], defaultTheme.isDark ? 'rgba(30, 36, 40, 0.88)' : 'rgba(255, 255, 255, 0.88)')
     fontColor.value = toHex6(defaultTheme.config.font || (defaultTheme.isDark ? '#e5e5e5' : '#212121'))
     navFontColor.value = ''
     badgePrimaryColor.value = ''
@@ -116,8 +118,8 @@ function resetFormFromTheme(target: ThemeDefinition | null, isCreatingNew = fals
     isDark.value = target.isDark
     isDarkFont.value = Boolean(target.isDarkFont)
     primaryColor.value = toHex6(target.config.primary)
-    appBgColor.value = colorForInput(target.config.extInfo?.['--color-app-background'], target.isDark ? '#171b1e' : '#f7f9fa')
-    mainBgColor.value = colorForInput(target.config.extInfo?.['--color-main-background'], target.isDark ? '#1e2428' : '#ffffff')
+    appBgColor.value = colorForInput(target.config.extInfo?.['--color-app-background'], target.isDark ? 'rgba(23, 27, 30, 0.70)' : 'rgba(247, 249, 250, 0.65)')
+    mainBgColor.value = colorForInput(target.config.extInfo?.['--color-main-background'], target.isDark ? 'rgba(30, 36, 40, 0.88)' : 'rgba(255, 255, 255, 0.88)')
     fontColor.value = toHex6(target.config.font || (target.isDark ? '#e5e5e5' : '#212121'))
     navFontColor.value = target.config.extInfo?.['--color-nav-font']
       ? isValidColor(target.config.extInfo['--color-nav-font'])
@@ -172,16 +174,70 @@ function onModeToggle(mode: 'light' | 'dark') {
   if (isDark.value === (mode === 'dark')) return
   isDark.value = mode === 'dark'
   if (isDark.value) {
-    if (appBgColor.value === '#f7f9fa' || appBgColor.value === '#ffffff') appBgColor.value = '#171b1e'
-    if (mainBgColor.value === '#ffffff' || mainBgColor.value === '#f7f9fa') mainBgColor.value = '#1e2428'
+    if (appBgColor.value === '#f7f9fa' || appBgColor.value === '#ffffff' || appBgColor.value.includes('247, 249, 250')) {
+      appBgColor.value = 'rgba(23, 27, 30, 0.70)'
+    }
+    if (mainBgColor.value === '#ffffff' || mainBgColor.value === '#f7f9fa' || mainBgColor.value.includes('255, 255, 255')) {
+      mainBgColor.value = 'rgba(30, 36, 40, 0.88)'
+    }
     if (fontColor.value === '#212121' || fontColor.value === '#333333') fontColor.value = '#e5e5e5'
     if (primaryColor.value === '#167961') primaryColor.value = '#55c49e'
   } else {
-    if (appBgColor.value === '#171b1e' || appBgColor.value === '#121212') appBgColor.value = '#f7f9fa'
-    if (mainBgColor.value === '#1e2428' || mainBgColor.value === '#1a1a1a') mainBgColor.value = '#ffffff'
+    if (appBgColor.value === '#171b1e' || appBgColor.value === '#121212' || appBgColor.value.includes('23, 27, 30')) {
+      appBgColor.value = 'rgba(247, 249, 250, 0.65)'
+    }
+    if (mainBgColor.value === '#1e2428' || mainBgColor.value === '#1a1a1a' || mainBgColor.value.includes('30, 36, 40') || mainBgColor.value.includes('32, 37, 40')) {
+      mainBgColor.value = 'rgba(255, 255, 255, 0.88)'
+    }
     if (fontColor.value === '#e5e5e5' || fontColor.value === '#ffffff') fontColor.value = '#212121'
     if (primaryColor.value === '#55c49e') primaryColor.value = '#167961'
   }
+}
+
+const appBgHex = computed(() => {
+  return isValidColor(appBgColor.value) ? toHex6(appBgColor.value) : (isDark.value ? '#171b1e' : '#f7f9fa')
+})
+
+const appBgAlpha = computed(() => {
+  if (!isValidColor(appBgColor.value)) return 1
+  return parseRgba(appBgColor.value).a
+})
+
+const mainBgHex = computed(() => {
+  return isValidColor(mainBgColor.value) ? toHex6(mainBgColor.value) : (isDark.value ? '#1e2428' : '#ffffff')
+})
+
+const mainBgAlpha = computed(() => {
+  if (!isValidColor(mainBgColor.value)) return 1
+  return parseRgba(mainBgColor.value).a
+})
+
+function onAppBgHexInput(hex: string) {
+  const currentAlpha = isValidColor(appBgColor.value) ? parseRgba(appBgColor.value).a : (isDark.value ? 0.70 : 0.65)
+  const { r, g, b } = parseRgba(hex)
+  appBgColor.value = formatRgba(r, g, b, currentAlpha)
+}
+
+function onAppBgAlphaInput(alphaPercent: number | string) {
+  const a = Math.max(0.05, Math.min(1, Number(alphaPercent) / 100))
+  const { r, g, b } = isValidColor(appBgColor.value)
+    ? parseRgba(appBgColor.value)
+    : (isDark.value ? { r: 23, g: 27, b: 30 } : { r: 247, g: 249, b: 250 })
+  appBgColor.value = formatRgba(r, g, b, a)
+}
+
+function onMainBgHexInput(hex: string) {
+  const currentAlpha = isValidColor(mainBgColor.value) ? parseRgba(mainBgColor.value).a : 0.88
+  const { r, g, b } = parseRgba(hex)
+  mainBgColor.value = formatRgba(r, g, b, currentAlpha)
+}
+
+function onMainBgAlphaInput(alphaPercent: number | string) {
+  const a = Math.max(0.05, Math.min(1, Number(alphaPercent) / 100))
+  const { r, g, b } = isValidColor(mainBgColor.value)
+    ? parseRgba(mainBgColor.value)
+    : (isDark.value ? { r: 30, g: 36, b: 40 } : { r: 255, g: 255, b: 255 })
+  mainBgColor.value = formatRgba(r, g, b, a)
 }
 
 function selectAccent(hex: string) {
@@ -446,24 +502,54 @@ function closeDialog() {
 
                 <div class="form-grid-2">
                   <div class="form-field">
-                    <label>{{ t('settings.themeEditor.appBgColor') }}</label>
+                    <div class="field-label-row">
+                      <label>{{ t('settings.themeEditor.appBgColor') }}</label>
+                      <span class="opacity-pill">{{ t('settings.themeEditor.opacity') }} {{ Math.round(appBgAlpha * 100) }}%</span>
+                    </div>
                     <div class="color-picker-row">
                       <div class="color-input-wrap">
-                        <input v-model="appBgColor" type="color" class="color-picker-native" />
+                        <input :value="appBgHex" type="color" class="color-picker-native" @input="onAppBgHexInput(($event.target as HTMLInputElement).value)" />
                         <span class="color-preview-badge" :style="{ backgroundColor: appBgColor }"></span>
                       </div>
                       <input v-model="appBgColor" type="text" class="theme-input font-mono flex-1" />
                     </div>
+                    <div class="alpha-slider-wrap">
+                      <input
+                        type="range"
+                        min="10"
+                        max="100"
+                        step="1"
+                        :value="Math.round(appBgAlpha * 100)"
+                        class="theme-slider"
+                        :aria-label="t('settings.themeEditor.appBgColor') + ' ' + t('settings.themeEditor.opacity')"
+                        @input="onAppBgAlphaInput(($event.target as HTMLInputElement).value)"
+                      />
+                    </div>
                   </div>
 
                   <div class="form-field">
-                    <label>{{ t('settings.themeEditor.mainBgColor') }}</label>
+                    <div class="field-label-row">
+                      <label>{{ t('settings.themeEditor.mainBgColor') }}</label>
+                      <span class="opacity-pill">{{ t('settings.themeEditor.opacity') }} {{ Math.round(mainBgAlpha * 100) }}%</span>
+                    </div>
                     <div class="color-picker-row">
                       <div class="color-input-wrap">
-                        <input v-model="mainBgColor" type="color" class="color-picker-native" />
+                        <input :value="mainBgHex" type="color" class="color-picker-native" @input="onMainBgHexInput(($event.target as HTMLInputElement).value)" />
                         <span class="color-preview-badge" :style="{ backgroundColor: mainBgColor }"></span>
                       </div>
                       <input v-model="mainBgColor" type="text" class="theme-input font-mono flex-1" />
+                    </div>
+                    <div class="alpha-slider-wrap">
+                      <input
+                        type="range"
+                        min="10"
+                        max="100"
+                        step="1"
+                        :value="Math.round(mainBgAlpha * 100)"
+                        class="theme-slider"
+                        :aria-label="t('settings.themeEditor.mainBgColor') + ' ' + t('settings.themeEditor.opacity')"
+                        @input="onMainBgAlphaInput(($event.target as HTMLInputElement).value)"
+                      />
                     </div>
                   </div>
                 </div>
@@ -928,6 +1014,37 @@ function closeDialog() {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
+}
+
+.field-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.opacity-pill {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--color-700, #475569);
+  background: var(--color-primary-alpha-900, rgba(0, 0, 0, 0.05));
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+
+.alpha-slider-wrap {
+  margin-top: 6px;
+}
+
+.theme-slider {
+  width: 100%;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--color-primary-alpha-800, #cbd5e1);
+  accent-color: var(--color-primary, #167961);
+  outline: none;
+  cursor: pointer;
+  display: block;
 }
 
 .mt-3 {
