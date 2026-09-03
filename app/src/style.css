@@ -162,13 +162,13 @@ i.deepseek { background: #5273e6; } i.doubao { background: #e36f53; } i.kimi { b
 .pane-resizer:hover::after, .pane-resizer:focus-visible::after, .content-grid.resizing .pane-resizer::after { inset: 0 1px; opacity: 1; }
 .content-grid.resizing { cursor: col-resize; user-select: none; }
 .session-pane, .detail-pane { min-width: 0; min-height: 0; background: var(--color-main-background, #fff); }
-.session-pane { overflow-y: auto; border-right: 1px solid var(--color-border-subtle, #dfe3e5); }
-.session-list-wrapper { width: 100%; }
+.session-pane { display: flex; flex-direction: column; height: 100%; min-height: 0; min-width: 0; overflow: hidden; border-right: 1px solid var(--color-border-subtle, #dfe3e5); }
+.session-list-wrapper { width: 100%; flex: 1; min-height: 0; overflow-y: auto; }
 .session-items { position: relative; width: 100%; }
 .session-state-enter-active, .session-state-leave-active { transition: opacity .16s ease; }
 .session-state-enter-from, .session-state-leave-to { opacity: 0; }
 .table-head, .session-row { display: grid; grid-template-columns: minmax(190px, 1fr) 102px 108px; gap: 14px; align-items: center; }
-.table-head { position: sticky; top: 0; z-index: 2; height: 34px; padding: 0 18px; color: #8b9397; background: #f7f8f8; border-bottom: 1px solid var(--color-border-subtle, #e1e4e6); font-size: 10px; font-weight: 650; text-transform: uppercase; }
+.table-head { flex: 0 0 34px; z-index: 2; height: 34px; padding: 0 18px; color: var(--color-650, #8b9397); background: var(--color-main-background, #fff); border-bottom: 1px solid var(--color-border-subtle, #e1e4e6); font-size: 10px; font-weight: 650; text-transform: uppercase; }
 .session-row { position: relative; width: 100%; min-height: 64px; padding: 9px 18px; border: 0; border-bottom: 1px solid var(--color-border-subtle, #eceeef); color: #2d3336; background: var(--color-main-background, #fff); text-align: left; transition: color .2s ease, background-color .28s ease, box-shadow .32s cubic-bezier(.2, .8, .2, 1), transform .22s ease; }
 .session-row:hover { background: color-mix(in srgb, var(--color-main-background, #fff) 96%, #10171a 4%); }
 .session-row:active { transform: scale(.995); }
@@ -181,8 +181,8 @@ i.deepseek { background: #5273e6; } i.doubao { background: #e36f53; } i.kimi { b
 .platform-cell { display: flex; align-items: center; gap: 7px; color: #646c70; font-size: 11px; }
 .session-row time { color: #7d8589; font-size: 10px; white-space: nowrap; }
 .loading-state, .empty-state, .detail-placeholder { display: flex; flex-direction: column; align-items: center; justify-content: center; color: #98a0a4; }
-.loading-state { height: 150px; gap: 9px; font-size: 12px; }
-.empty-state { min-height: 300px; padding: 30px; }
+.loading-state { flex: 1; min-height: 0; height: 150px; gap: 9px; font-size: 12px; }
+.empty-state { flex: 1; min-height: 0; min-height: 300px; padding: 30px; }
 .empty-state strong, .detail-placeholder strong { margin-top: 13px; color: #4e565a; font-size: 13px; }
 .empty-state span, .detail-placeholder span { margin-top: 6px; color: #969da1; font-size: 11px; text-align: center; }
 .load-more { width: calc(100% - 36px); height: 34px; margin: 12px 18px 18px; border: 1px solid var(--color-border, #d2d7d9); border-radius: 12px; color: #596166; background: #fff; font-size: 11px; transition: color .15s ease, background-color .15s ease, border-color .15s ease, transform .08s ease; }
@@ -608,8 +608,8 @@ html[data-theme="dark"] .behavior-settings select { color: #edf1f2; }
 html[data-theme="dark"] .search-field:focus-within { border-color: var(--color-primary, #55c49e); box-shadow: 0 0 0 2px var(--color-primary-subtle, rgba(85, 196, 158, 0.2)); }
 html[data-theme="dark"] .filter-button.active { color: var(--color-primary-text, #82d2ba); border-color: var(--color-primary-border, #467c6e); background: var(--color-primary-subtle, rgba(85, 196, 158, 0.15)); }
 html[data-theme="dark"] .filter-panel,
-html[data-theme="dark"] .table-head,
 html[data-theme="dark"] .search-navigation { color: #9da6aa; background: rgba(255, 255, 255, 0.025); border-color: var(--color-border, rgba(255, 255, 255, 0.06)); }
+html[data-theme="dark"] .table-head { color: var(--color-700, #8e9a9f); background: var(--color-main-background, rgba(26, 30, 33, 0.82)); border-bottom: 1px solid var(--color-border-subtle, rgba(255, 255, 255, 0.06)); }
 html[data-theme="dark"] .detail-placeholder { color: #8b979c; background: transparent; border: none; }
 html[data-theme="dark"] .filter-panel label span,
 html[data-theme="dark"] .search-navigation > span,
