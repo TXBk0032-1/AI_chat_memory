@@ -105,8 +105,8 @@ function resetFormFromTheme(target: ThemeDefinition | null, isCreatingNew = fals
     isDark.value = defaultTheme.isDark
     isDarkFont.value = Boolean(defaultTheme.isDarkFont)
     primaryColor.value = toHex6(defaultTheme.config.primary)
-    appBgColor.value = colorForInput(defaultTheme.config.extInfo?.['--color-app-background'], defaultTheme.isDark ? 'rgba(18, 21, 23, 0.70)' : 'rgba(245, 247, 249, 0.65)')
-    mainBgColor.value = colorForInput(defaultTheme.config.extInfo?.['--color-main-background'], defaultTheme.isDark ? 'rgba(26, 30, 33, 0.92)' : 'rgba(255, 255, 255, 0.92)')
+    appBgColor.value = colorForInput(defaultTheme.config.extInfo?.['--color-app-background'], defaultTheme.isDark ? 'rgba(18, 21, 23, 0.55)' : 'rgba(245, 247, 249, 0.55)')
+    mainBgColor.value = colorForInput(defaultTheme.config.extInfo?.['--color-main-background'], defaultTheme.isDark ? 'rgba(26, 30, 33, 0.82)' : 'rgba(255, 255, 255, 0.85)')
     fontColor.value = toHex6(defaultTheme.config.font || (defaultTheme.isDark ? '#e5e5e5' : '#212121'))
     navFontColor.value = ''
     badgePrimaryColor.value = ''
@@ -118,8 +118,8 @@ function resetFormFromTheme(target: ThemeDefinition | null, isCreatingNew = fals
     isDark.value = target.isDark
     isDarkFont.value = Boolean(target.isDarkFont)
     primaryColor.value = toHex6(target.config.primary)
-    appBgColor.value = colorForInput(target.config.extInfo?.['--color-app-background'], target.isDark ? 'rgba(18, 21, 23, 0.70)' : 'rgba(245, 247, 249, 0.65)')
-    mainBgColor.value = colorForInput(target.config.extInfo?.['--color-main-background'], target.isDark ? 'rgba(26, 30, 33, 0.92)' : 'rgba(255, 255, 255, 0.92)')
+    appBgColor.value = colorForInput(target.config.extInfo?.['--color-app-background'], target.isDark ? 'rgba(18, 21, 23, 0.55)' : 'rgba(245, 247, 249, 0.55)')
+    mainBgColor.value = colorForInput(target.config.extInfo?.['--color-main-background'], target.isDark ? 'rgba(26, 30, 33, 0.82)' : 'rgba(255, 255, 255, 0.85)')
     fontColor.value = toHex6(target.config.font || (target.isDark ? '#e5e5e5' : '#212121'))
     navFontColor.value = target.config.extInfo?.['--color-nav-font']
       ? isValidColor(target.config.extInfo['--color-nav-font'])
@@ -175,19 +175,19 @@ function onModeToggle(mode: 'light' | 'dark') {
   isDark.value = mode === 'dark'
   if (isDark.value) {
     if (appBgColor.value === '#f7f9fa' || appBgColor.value === '#ffffff' || appBgColor.value.includes('245, 247, 249') || appBgColor.value.includes('247, 249, 250')) {
-      appBgColor.value = 'rgba(18, 21, 23, 0.70)'
+      appBgColor.value = 'rgba(18, 21, 23, 0.55)'
     }
     if (mainBgColor.value === '#ffffff' || mainBgColor.value === '#f7f9fa' || mainBgColor.value.includes('255, 255, 255')) {
-      mainBgColor.value = 'rgba(26, 30, 33, 0.92)'
+      mainBgColor.value = 'rgba(26, 30, 33, 0.82)'
     }
     if (fontColor.value === '#212121' || fontColor.value === '#333333') fontColor.value = '#e5e5e5'
     if (primaryColor.value === '#167961') primaryColor.value = '#55c49e'
   } else {
     if (appBgColor.value === '#171b1e' || appBgColor.value === '#121212' || appBgColor.value.includes('18, 21, 23') || appBgColor.value.includes('23, 27, 30')) {
-      appBgColor.value = 'rgba(245, 247, 249, 0.65)'
+      appBgColor.value = 'rgba(245, 247, 249, 0.55)'
     }
     if (mainBgColor.value === '#1e2428' || mainBgColor.value === '#1a1a1a' || mainBgColor.value.includes('26, 30, 33') || mainBgColor.value.includes('30, 36, 40') || mainBgColor.value.includes('32, 37, 40')) {
-      mainBgColor.value = 'rgba(255, 255, 255, 0.92)'
+      mainBgColor.value = 'rgba(255, 255, 255, 0.85)'
     }
     if (fontColor.value === '#e5e5e5' || fontColor.value === '#ffffff') fontColor.value = '#212121'
     if (primaryColor.value === '#55c49e') primaryColor.value = '#167961'

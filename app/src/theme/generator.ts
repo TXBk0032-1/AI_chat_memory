@@ -84,10 +84,10 @@ export function createThemeColors(
   // 背景基调兜底：预设与主题编辑器都会写入这两个变量（style.css 的主要表面
   // 消费它们），缺失时给中性基调，保证任意主题下界面背景都有定义且透出亚克力磨砂。
   if (!colors['--color-app-background']) {
-    colors['--color-app-background'] = isDark ? 'rgba(18, 21, 23, 0.70)' : 'rgba(245, 247, 249, 0.65)'
+    colors['--color-app-background'] = isDark ? 'rgba(18, 21, 23, 0.55)' : 'rgba(245, 247, 249, 0.55)'
   }
   if (!colors['--color-main-background']) {
-    colors['--color-main-background'] = isDark ? 'rgba(26, 30, 33, 0.92)' : 'rgba(255, 255, 255, 0.92)'
+    colors['--color-main-background'] = isDark ? 'rgba(26, 30, 33, 0.82)' : 'rgba(255, 255, 255, 0.85)'
   }
 
   // 边框三档从主背景基调派生，背景换 tone 时边框随之变化；extInfo 可显式覆盖。
