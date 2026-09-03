@@ -90,6 +90,19 @@ export function createThemeColors(
     colors['--color-main-background'] = isDark ? 'rgb(32, 37, 40)' : 'rgb(255, 255, 255)'
   }
 
+  // 边框三档从主背景基调派生，背景换 tone 时边框随之变化；extInfo 可显式覆盖。
+  // subtle = 发丝分割线，default = 常规组件描边，strong = 强调/可悬停描边。
+  const mainBackground = colors['--color-main-background']
+  if (!colors['--color-border-subtle']) {
+    colors['--color-border-subtle'] = RGB_Linear_Shade(isDark ? 0.06 : -0.08, mainBackground)
+  }
+  if (!colors['--color-border']) {
+    colors['--color-border'] = RGB_Linear_Shade(isDark ? 0.12 : -0.18, mainBackground)
+  }
+  if (!colors['--color-border-strong']) {
+    colors['--color-border-strong'] = RGB_Linear_Shade(isDark ? 0.2 : -0.32, mainBackground)
+  }
+
   return colors
 }
 

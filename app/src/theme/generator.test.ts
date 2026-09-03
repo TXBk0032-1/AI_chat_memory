@@ -50,6 +50,24 @@ describe('theme generator', () => {
     expect(dark['--color-main-background']).toBe('rgb(32, 37, 40)')
   })
 
+  it('derives border tiers from the background tone and honors overrides', () => {
+    const light = createThemeColors('rgb(22, 121, 97)', undefined, false)
+    expect(light['--color-border-subtle']).toBe('rgb(235, 235, 235)')
+    expect(light['--color-border']).toBe('rgb(209, 209, 209)')
+    expect(light['--color-border-strong']).toBe('rgb(173, 173, 173)')
+
+    const dark = createThemeColors('rgb(85, 196, 158)', undefined, true)
+    expect(dark['--color-border-subtle']).toBe('rgb(45, 50, 53)')
+    expect(dark['--color-border']).toBe('rgb(59, 63, 66)')
+    expect(dark['--color-border-strong']).toBe('rgb(77, 81, 83)')
+
+    const overridden = createThemeColors('rgb(22, 121, 97)', undefined, false, false, {
+      '--color-border': '#123456',
+    })
+    expect(overridden['--color-border']).toBe('#123456')
+    expect(overridden['--color-border-subtle']).toBe('rgb(235, 235, 235)')
+  })
+
   it('skips generator-derived keys when merging extInfo', () => {
     const colors = createThemeColors('rgb(22, 121, 97)', 'rgb(33, 33, 33)', false, false, {
       '--color-primary': '#ff0000',

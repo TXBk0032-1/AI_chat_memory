@@ -9,6 +9,9 @@ export interface ThemeColors {
 export interface ThemeExtInfo {
   '--color-app-background'?: string
   '--color-main-background'?: string
+  '--color-border'?: string
+  '--color-border-subtle'?: string
+  '--color-border-strong'?: string
   '--color-nav-font'?: string
   '--color-badge-primary'?: string
   '--color-badge-secondary'?: string
