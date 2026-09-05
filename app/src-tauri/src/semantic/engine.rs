@@ -1,8 +1,13 @@
 use sqlx::SqlitePool;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{Mutex, Notify, RwLock};
+
+/// Consecutive single-chunk probe failures before a poison chunk is
+/// quarantined as 'error' and removed from the pending queue head.
+const MAX_CHUNK_FAILURES: usize = 3;
 
 use super::index;
 use crate::{
@@ -25,6 +30,9 @@ pub struct SemanticEngine {
     generation: Arc<AtomicU64>,
     last_error: Arc<RwLock<Option<String>>>,
     reindex_progress: Arc<RwLock<Option<ReindexProgress>>>,
+    /// Consecutive probe failures per chunk id (in-memory only; a restart
+    /// grants a fresh budget while 'error' status persists in SQLite).
+    chunk_failures: Arc<std::sync::Mutex<HashMap<i64, usize>>>,
 }
 
 impl SemanticEngine {
@@ -39,6 +47,7 @@ impl SemanticEngine {
             generation: Arc::new(AtomicU64::new(0)),
             last_error: Arc::new(RwLock::new(None)),
             reindex_progress: Arc::new(RwLock::new(None)),
+            chunk_failures: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -151,6 +160,17 @@ impl SemanticEngine {
             )
             .await?;
         }
+        // A manual reindex is the recovery path for chunks quarantined as
+        // 'error' by the poison-chunk probe: re-queue them and hand out a
+        // fresh failure budget.
+        self.chunk_failures.lock().unwrap().clear();
+        sqlx::query(
+            "UPDATE embedding_chunks SET status = 'pending', error = NULL, updated_at = ?
+             WHERE status = 'error'",
+        )
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await?;
         let identity = self.embeddings.read().await.identity();
         let total_sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
             .fetch_one(&self.pool)
@@ -607,6 +627,45 @@ impl SemanticEngine {
         self.drain_pending_inner().await
     }
 
+    /// Bumps the failure counter for each poison chunk and quarantines it as
+    /// 'error' once the budget is exhausted, so the pending queue head can
+    /// move on. Chunks are only counted when a sibling in the same batch
+    /// succeeded — a whole-batch failure is a service-level outage and never
+    /// burns a chunk's budget.
+    async fn record_chunk_failures(&self, failures: &[(i64, AppError)]) {
+        for (chunk_id, error) in failures {
+            let attempts = {
+                let mut counters = self.chunk_failures.lock().unwrap();
+                let attempts = counters
+                    .entry(*chunk_id)
+                    .and_modify(|attempts| *attempts += 1)
+                    .or_insert(1);
+                *attempts
+            };
+            if attempts < MAX_CHUNK_FAILURES {
+                continue;
+            }
+            match index::mark_chunk_error(&self.pool, *chunk_id, &error.to_string()).await {
+                Ok(()) => {
+                    self.chunk_failures.lock().unwrap().remove(chunk_id);
+                    tracing::warn!(
+                        chunk_id = *chunk_id,
+                        attempts,
+                        error = %error,
+                        "poison chunk quarantined as error; pending queue unblocked"
+                    );
+                }
+                Err(mark_error) => {
+                    tracing::warn!(
+                        %mark_error,
+                        chunk_id = *chunk_id,
+                        "failed to quarantine poison chunk"
+                    );
+                }
+            }
+        }
+    }
+
     async fn drain_pending_inner(&self) -> Result<()> {
         let generation = self.current_generation();
         'fetch: loop {
@@ -672,18 +731,19 @@ impl SemanticEngine {
                     .collect::<Vec<_>>();
                 let started = std::time::Instant::now();
                 let embed_started = std::time::Instant::now();
-                let vectors = match backend.embed_documents(&texts).await {
+                let (pending, vectors) = match backend.embed_documents(&texts).await {
                     Ok(vectors) => {
                         *self.last_error.write().await = None;
-                        vectors
+                        (pending, vectors)
                     }
                     Err(error) => {
                         // Classify by error type, not message text: local
                         // backends signal user cancellation via
                         // AppError::Cancelled, while everything else (CUDA
                         // OOM, HTTP timeouts, 5xx) is a transient failure that
-                        // must propagate so worker_loop's existing 5s self-heal
-                        // timer re-wakes the drain.
+                        // either isolates a poison chunk or propagates so
+                        // worker_loop's existing 5s self-heal timer re-wakes
+                        // the drain.
                         if matches!(error, AppError::Cancelled(_)) {
                             tracing::info!(%error, pending = pending.len(), "semantic embedding cancelled");
                             self.publish_reindex_progress(
@@ -702,9 +762,44 @@ impl SemanticEngine {
                             .await;
                             break 'fetch;
                         }
-                        // Keep chunks pending so a later successful model load can resume.
-                        tracing::warn!(%error, pending = pending.len(), "semantic embedding failed; scheduling self retry");
-                        return Err(error);
+                        // Probe the batch chunk-by-chunk: a single poison chunk
+                        // must not block the queue, but a service-level outage
+                        // (model reload, CUDA OOM, HTTP 5xx) blames no chunk
+                        // and hands off to the worker self-heal timer instead.
+                        let mut survivors = Vec::new();
+                        let mut survivor_vectors = Vec::new();
+                        let mut failures: Vec<(i64, AppError)> = Vec::new();
+                        for item in &pending {
+                            match backend
+                                .embed_documents(std::slice::from_ref(&item.text))
+                                .await
+                            {
+                                Ok(mut vectors) if !vectors.is_empty() => {
+                                    survivors.push(item.clone());
+                                    survivor_vectors.push(vectors.remove(0));
+                                }
+                                Ok(_) => {
+                                    failures.push((
+                                        item.id,
+                                        AppError::InvalidData(
+                                            "embedding backend returned no vectors".into(),
+                                        ),
+                                    ));
+                                }
+                                Err(single_error) => failures.push((item.id, single_error)),
+                            }
+                        }
+                        if survivors.is_empty() {
+                            tracing::warn!(%error, pending = pending.len(), "semantic embedding failed for the whole batch; scheduling self retry");
+                            return Err(error);
+                        }
+                        self.record_chunk_failures(&failures).await;
+                        tracing::info!(
+                            failed = failures.len(),
+                            survived = survivors.len(),
+                            "batch embedding failure isolated via single-chunk probe"
+                        );
+                        (survivors, survivor_vectors)
                     }
                 };
                 let embed_ms = embed_started.elapsed().as_millis();
@@ -1066,5 +1161,150 @@ mod tests {
             "expected multiple packs, got {}",
             embed_calls.load(Ordering::SeqCst)
         );
+    }
+
+    /// Fails any batch that contains a poison text but embeds healthy texts.
+    struct PoisonBackend {
+        embed_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl EmbeddingBackend for PoisonBackend {
+        fn identity(&self) -> BackendIdentity {
+            BackendIdentity {
+                backend: EmbeddingBackendKind::Local,
+                backend_id: "local".into(),
+                model_id: "test".into(),
+                dimensions: 8,
+            }
+        }
+
+        async fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            self.embed_calls.fetch_add(1, Ordering::SeqCst);
+            if texts.iter().any(|text| text.contains("poison")) {
+                return Err(AppError::Configuration("poison batch exploded".into()));
+            }
+            Ok(vec![vec![0.0; 8]; texts.len()])
+        }
+
+        async fn embed_queries(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            Ok(vec![vec![0.0; 8]; texts.len()])
+        }
+
+        async fn healthcheck(&self) -> Result<EmbeddingHealth> {
+            Ok(EmbeddingHealth {
+                ok: true,
+                backend: EmbeddingBackendKind::Local,
+                model_id: "test".into(),
+                dimensions: Some(8),
+                message: "ok".into(),
+            })
+        }
+    }
+
+    async fn drain_test_pool() -> sqlx::SqlitePool {
+        crate::database::connection::register_sqlite_vec();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE embedding_chunks (
+                id INTEGER PRIMARY KEY,
+                message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                backend_id TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                error TEXT,
+                dim INTEGER,
+                updated_at TEXT NOT NULL,
+                text TEXT NOT NULL
+            );
+             CREATE VIRTUAL TABLE embedding_vec USING vec0(
+                chunk_id INTEGER PRIMARY KEY,
+                embedding float[8] distance_metric=cosine,
+                +session_id TEXT,
+                +message_id TEXT,
+                +platform TEXT
+             );",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool
+    }
+
+    async fn insert_drain_chunk(pool: &sqlx::SqlitePool, chunk_id: i64, text: &str) {
+        sqlx::query(
+            "INSERT INTO embedding_chunks
+             (id, message_id, session_id, platform, backend_id, model_id, status, updated_at, text)
+             VALUES (?, ?, 's1', 'test', 'local', 'test', 'pending', 'now', ?)",
+        )
+        .bind(chunk_id)
+        .bind(format!("msg-{chunk_id}"))
+        .bind(text)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn chunk_state(pool: &sqlx::SqlitePool, chunk_id: i64) -> (String, Option<String>) {
+        sqlx::query_as("SELECT status, error FROM embedding_chunks WHERE id = ?")
+            .bind(chunk_id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn poison_chunk_is_isolated_without_blocking_the_queue() {
+        let pool = drain_test_pool().await;
+        insert_drain_chunk(&pool, 1, "poison text").await;
+        insert_drain_chunk(&pool, 2, "healthy text one").await;
+        insert_drain_chunk(&pool, 3, "healthy text two").await;
+        let settings = SemanticSearchSettings {
+            enabled: true,
+            backend: EmbeddingBackendKind::Local,
+            ..SemanticSearchSettings::default()
+        };
+        let manager = EmbeddingManager::from_backend_for_test(
+            std::env::temp_dir(),
+            settings,
+            Arc::new(PoisonBackend {
+                embed_calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        let engine = SemanticEngine::new(pool.clone(), std::env::temp_dir(), manager);
+
+        // First drain: the batch containing the poison chunk fails, the probe
+        // rescues both healthy chunks and burns the poison chunk's first
+        // failure credit. The trailing lone-poison re-fetch surfaces as Err
+        // (service-level) so the worker self-heal timer takes over.
+        engine.drain_pending().await.unwrap_err();
+        assert_eq!(chunk_state(&pool, 2).await.0, "ready");
+        assert_eq!(chunk_state(&pool, 3).await.0, "ready");
+        assert_eq!(chunk_state(&pool, 1).await.0, "pending");
+
+        // Second drain: the poison chunk is alone now, so its failure looks
+        // like a service-level outage and must NOT burn another credit.
+        engine.drain_pending().await.unwrap_err();
+        assert_eq!(chunk_state(&pool, 1).await.0, "pending");
+
+        // A healthy sibling re-arriving burns the remaining credits and then
+        // quarantines the poison chunk as 'error', unblocking the queue.
+        insert_drain_chunk(&pool, 4, "healthy text three").await;
+        engine.drain_pending().await.unwrap_err();
+        assert_eq!(chunk_state(&pool, 1).await.0, "pending");
+        assert_eq!(chunk_state(&pool, 4).await.0, "ready");
+
+        insert_drain_chunk(&pool, 5, "healthy text four").await;
+        engine.drain_pending().await.unwrap();
+        let (status, error) = chunk_state(&pool, 1).await;
+        assert_eq!(status, "error");
+        assert!(error.unwrap().contains("poison batch exploded"));
+        assert_eq!(chunk_state(&pool, 5).await.0, "ready");
     }
 }
