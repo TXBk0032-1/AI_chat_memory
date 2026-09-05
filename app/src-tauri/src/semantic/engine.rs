@@ -7,7 +7,7 @@ use tokio::sync::{Mutex, Notify, RwLock};
 use super::index;
 use crate::{
     embedding::EmbeddingManager,
-    error::Result,
+    error::{AppError, Result},
     models::{
         EmbeddingHealth, ReindexProgress, SearchMode, SearchQuery, SemanticRuntimeStatus,
         SemanticStatus, SessionList, SessionSearchHit,
@@ -588,10 +588,11 @@ impl SemanticEngine {
             if let Err(error) = self.drain_pending().await {
                 *self.last_error.write().await = Some(error.to_string());
                 tracing::warn!(%error, "semantic index worker failed; scheduling retry");
-                // An embed failure leaves pending chunks un-processed and nothing else
-                // re-wakes the worker. Schedule a self-retry so indexing
-                // eventually resumes after a transient CUDA/HTTP failure instead of
-                // stalling until the next external import or reindex.
+                // drain_pending propagates transient embed failures as Err
+                // (user cancellation still returns Ok). Pending chunks stay
+                // queued and nothing else re-wakes the worker, so schedule a
+                // self-retry to resume after a transient CUDA/HTTP failure
+                // instead of stalling until the next external import or reindex.
                 let engine = Arc::clone(&self);
                 tauri::async_runtime::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -677,11 +678,13 @@ impl SemanticEngine {
                         vectors
                     }
                     Err(error) => {
-                        let message = error.to_string();
-                        *self.last_error.write().await = Some(message.clone());
-                        if message.contains("取消")
-                            || message.to_ascii_lowercase().contains("cancel")
-                        {
+                        // Classify by error type, not message text: local
+                        // backends signal user cancellation via
+                        // AppError::Cancelled, while everything else (CUDA
+                        // OOM, HTTP timeouts, 5xx) is a transient failure that
+                        // must propagate so worker_loop's existing 5s self-heal
+                        // timer re-wakes the drain.
+                        if matches!(error, AppError::Cancelled(_)) {
                             tracing::info!(%error, pending = pending.len(), "semantic embedding cancelled");
                             self.publish_reindex_progress(
                                 ReindexProgress {
@@ -700,10 +703,8 @@ impl SemanticEngine {
                             break 'fetch;
                         }
                         // Keep chunks pending so a later successful model load can resume.
-                        tracing::warn!(%error, pending = pending.len(), "semantic embedding failed; will retry later");
-                        // Avoid a tight spin while CUDA recovers from bad batches.
-                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                        break 'fetch;
+                        tracing::warn!(%error, pending = pending.len(), "semantic embedding failed; scheduling self retry");
+                        return Err(error);
                     }
                 };
                 let embed_ms = embed_started.elapsed().as_millis();
