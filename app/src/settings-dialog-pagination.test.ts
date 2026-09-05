@@ -9,10 +9,13 @@ import type { LanguagePreference, SettingsModel } from './desktop-api'
 import { setLanguagePreference, setLocale } from './i18n'
 
 const styleSource = readFileSync(resolve(process.cwd(), 'src/style.css'), 'utf8')
-const tauriConfig = JSON.parse(
-  readFileSync(resolve(process.cwd(), 'src-tauri/tauri.conf.json'), 'utf8'),
-) as { app: { windows: Array<{ minWidth: number }> } }
-const minimumWindowWidth = tauriConfig.app.windows[0].minWidth
+// The main window is created programmatically in lib.rs (for the on_navigation
+// guard), so the minimum window size now lives next to WebviewWindowBuilder
+// instead of tauri.conf.json.
+const libSource = readFileSync(resolve(process.cwd(), 'src-tauri/src/lib.rs'), 'utf8')
+const minSizeMatch = libSource.match(/min_inner_size\(([\d.]+),\s*[\d.]+\)/)
+if (!minSizeMatch) throw new Error('min_inner_size not found in src-tauri/src/lib.rs')
+const minimumWindowWidth = Number(minSizeMatch[1])
 
 function ruleFor(selector: string) {
   const escapedSelector = selector.replace(/[.*+?^\${}()|[\]\\]/g, '\\$&')

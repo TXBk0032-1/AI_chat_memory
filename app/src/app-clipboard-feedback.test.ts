@@ -14,7 +14,8 @@ describe('clipboard and link failure feedback', () => {
   it('catches markdown link open failures and shows a toast', () => {
     const body = appSource.slice(appSource.indexOf('async function openMarkdownLink'), appSource.indexOf('async function refreshApiStatus') > -1 ? appSource.indexOf('async function refreshApiStatus') : appSource.indexOf('function formatDate'))
     expect(body).toContain('try {')
-    expect(body).toContain('await openUrl(link.href)')
+    expect(body).toContain('await openUrl(href)')
+    expect(body).toContain('classifyMarkdownLink(href)')
     expect(body).toContain("catch {")
     expect(body).toContain("showToast(t('app.openLinkFailed'))")
   })
