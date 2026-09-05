@@ -623,6 +623,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn search_session_hits_folds_non_ascii_case_like_rust_not_sqlite() {
+        let pool = create_detail_pool().await;
+        sqlx::query("INSERT INTO sessions (id, platform, platform_session_id) VALUES ('unicode', 'deepseek', 'unicode')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let thinking_metadata = json!({"thinking": "Жёлтый ЯБЛОКО рядом"});
+        sqlx::query("INSERT INTO messages (id, session_id, role, content, metadata, seq) VALUES ('umlaut', 'unicode', 'assistant', 'Äpfel und ÉLÉPHANT und ÄPFEL', ?, 1)")
+            .bind(thinking_metadata.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // SQLite's lower() leaves non-ASCII uppercase untouched, so an SQL
+        // prefilter would drop this row entirely. Folding must match Rust
+        // semantics in both directions.
+        let content_hits = search_session_hits(&pool, "unicode", "äpfel")
+            .await
+            .unwrap();
+        assert_eq!(content_hits.len(), 1);
+        assert_eq!(content_hits[0].field, SearchHitField::Content);
+        assert_eq!(content_hits[0].message_id, "umlaut");
+        assert_eq!(
+            content_hits[0].count, 2,
+            "Äpfel and ÄPFEL both fold to äpfel"
+        );
+
+        let accent_hits = search_session_hits(&pool, "unicode", "ÉLÉPHANT")
+            .await
+            .unwrap();
+        assert_eq!(accent_hits.len(), 1);
+        assert_eq!(accent_hits[0].count, 1);
+
+        let thinking_hits = search_session_hits(&pool, "unicode", "яблоко")
+            .await
+            .unwrap();
+        assert_eq!(thinking_hits.len(), 1);
+        assert_eq!(thinking_hits[0].field, SearchHitField::Thinking);
+        assert_eq!(thinking_hits[0].count, 1);
+    }
+
+    #[tokio::test]
     async fn sync_status_returns_normalized_epoch_string() {
         let pool = create_detail_pool().await;
         sqlx::query("INSERT INTO sessions (id, platform, platform_session_id, updated_at) VALUES ('iso-newest', 'deepseek', 'iso', '2026-06-08T01:35:06.105+08:00')")

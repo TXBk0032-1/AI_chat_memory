@@ -74,8 +74,17 @@ pub async fn search_session_hits(
     if needle.is_empty() {
         return Ok(Vec::new());
     }
-    let rows = sqlx::query("SELECT id, seq, content, json_extract(metadata, '$.thinking') AS thinking FROM messages WHERE session_id = ? AND (instr(lower(content), ?) > 0 OR instr(lower(COALESCE(json_extract(metadata, '$.thinking'), '')), ?) > 0) ORDER BY seq")
-        .bind(id).bind(&needle).bind(&needle).fetch_all(pool).await?;
+    // Case folding stays entirely in Rust: SQLite's lower() only folds ASCII,
+    // so an SQL prefilter would silently drop rows whose non-ASCII uppercase
+    // content matches a lowercase needle (e.g. "ÄPFEL" vs "äpfel"). Session
+    // text volumes are small enough for a linear scan.
+    let rows = sqlx::query(
+        "SELECT id, seq, content, json_extract(metadata, '$.thinking') AS thinking
+         FROM messages WHERE session_id = ? ORDER BY seq",
+    )
+    .bind(id)
+    .fetch_all(pool)
+    .await?;
     let mut hits = Vec::new();
     for row in rows {
         let message_id: String = row.try_get("id")?;
