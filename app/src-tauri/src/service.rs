@@ -304,15 +304,28 @@ impl AppService {
         data_dir: PathBuf,
         role: ServiceRole,
     ) -> Result<Self> {
+        let build_started = std::time::Instant::now();
         let settings_value = settings.get().await;
-        let embeddings =
-            EmbeddingManager::from_settings(data_dir.clone(), settings_value.semantic_search)
-                .await?;
+        let embeddings = {
+            let started = std::time::Instant::now();
+            let manager =
+                EmbeddingManager::from_settings(data_dir.clone(), settings_value.semantic_search)
+                    .await;
+            tracing::info!(
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "service build: embedding manager ready"
+            );
+            manager?
+        };
         crate::database::connection::ensure_embedding_vec_table(
             &pool,
             Some(embeddings.identity().dimensions),
         )
         .await?;
+        tracing::info!(
+            elapsed_ms = build_started.elapsed().as_millis() as u64,
+            "service build: embedding vec table ready"
+        );
         let identity = embeddings.identity();
         crate::database::connection::activate_embedding_index(
             &pool,
@@ -320,7 +333,15 @@ impl AppService {
             &identity.model_id,
         )
         .await?;
+        tracing::info!(
+            elapsed_ms = build_started.elapsed().as_millis() as u64,
+            "service build: embedding index activated"
+        );
         let semantic = Arc::new(SemanticEngine::new(pool.clone(), data_dir, embeddings));
+        tracing::info!(
+            elapsed_ms = build_started.elapsed().as_millis() as u64,
+            "service build: semantic engine constructed"
+        );
         if role == ServiceRole::Desktop {
             semantic.start_worker();
         }
@@ -345,6 +366,11 @@ impl AppService {
         if role == ServiceRole::Desktop {
             service.start_cloud_sync_worker(worker_receiver);
         }
+        tracing::info!(
+            elapsed_ms = build_started.elapsed().as_millis() as u64,
+            role = ?role,
+            "service build: finished"
+        );
         Ok(service)
     }
 
