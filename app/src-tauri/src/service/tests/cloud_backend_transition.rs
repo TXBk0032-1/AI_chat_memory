@@ -392,12 +392,17 @@ async fn settings_write_failure_restores_every_s3_credential_and_the_active_draf
         .pending_mutations(i64::MAX)
         .await
         .unwrap();
-    tokio::fs::create_dir(data_dir.join("settings.json.tmp"))
+    // 让 settings.json 的原子写入必然失败：persist 已改用 uuid 临时名，
+    // 固定的 *.tmp 注入点不再生效，改为把主文件路径替换成目录，
+    // 使最终的 rename(tmp→main) 必然报 Io 错误。
+    tokio::fs::remove_file(data_dir.join("settings.json"))
+        .await
+        .unwrap();
+    tokio::fs::create_dir(data_dir.join("settings.json"))
         .await
         .unwrap();
     let mut next = settings_before.clone();
     next.setup_complete = !next.setup_complete;
-
     let error = service
         .update_settings_with_cloud_credentials(
             next,
@@ -2353,7 +2358,11 @@ async fn settings_write_failure_after_rotation_keeps_the_active_generation_and_n
     let credentials: Arc<dyn CredentialStore> = Arc::new(MemoryCredentialStore::default());
     let (service, _server, settings_before, backend, data_dir) =
         configured_encrypted_s3_service(credentials).await;
-    tokio::fs::create_dir(data_dir.join("settings.json.tmp"))
+    // uuid 临时名无法预占，改为把主文件路径替换成目录注入写失败。
+    tokio::fs::remove_file(data_dir.join("settings.json"))
+        .await
+        .unwrap();
+    tokio::fs::create_dir(data_dir.join("settings.json"))
         .await
         .unwrap();
 
@@ -3875,8 +3884,12 @@ async fn rewrite_cloud_archive_surfaces_and_marks_a_failed_local_generation_comm
     .unwrap();
     service.ensure_local_device().await.unwrap();
     service.sync_store.seed_local_baseline().await.unwrap();
-    // 让 settings.json 的原子写入必然失败（临时文件名被目录占用）。
-    tokio::fs::create_dir(data_dir.join("settings.json.tmp"))
+    // 让 settings.json 的原子写入必然失败（uuid 临时名无法预占，
+    // 改为把主文件路径替换成目录，使最终 rename 必然失败）。
+    tokio::fs::remove_file(data_dir.join("settings.json"))
+        .await
+        .unwrap();
+    tokio::fs::create_dir(data_dir.join("settings.json"))
         .await
         .unwrap();
 
@@ -3903,7 +3916,7 @@ async fn rewrite_cloud_archive_surfaces_and_marks_a_failed_local_generation_comm
     );
 
     // 补偿语义：解除写入故障后，下一次同步以远端代次自愈本地设置。
-    tokio::fs::remove_dir(data_dir.join("settings.json.tmp"))
+    tokio::fs::remove_dir(data_dir.join("settings.json"))
         .await
         .unwrap();
     service

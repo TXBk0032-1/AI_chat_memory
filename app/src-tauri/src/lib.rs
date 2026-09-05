@@ -35,35 +35,32 @@ fn create_main_window(app: tauri::AppHandle) -> tauri::Result<tauri::WebviewWind
     use tauri::webview::WebviewWindowBuilder;
 
     let navigation_app = app.clone();
-    let window = WebviewWindowBuilder::new(
-        &app,
-        "main",
-        tauri::WebviewUrl::App("index.html".into()),
-    )
-    .title("AI Chat Memory")
-    .inner_size(1280.0, 820.0)
-    .min_inner_size(900.0, 620.0)
-    .decorations(false)
-    .transparent(true)
-    .on_navigation(move |url| {
-        if is_app_origin(url) {
-            return true;
-        }
-        let target = url.to_string();
-        let navigation_app = navigation_app.clone();
-        tauri::async_runtime::spawn(async move {
-            use tauri_plugin_opener::OpenerExt;
-            if let Err(error) = navigation_app.opener().open_url(&target, None::<&str>) {
-                tracing::warn!(
-                    %error,
-                    target = %target,
-                    "failed to hand navigation off to the system browser"
-                );
-            }
-        });
-        false
-    })
-    .build()?;
+    let window =
+        WebviewWindowBuilder::new(&app, "main", tauri::WebviewUrl::App("index.html".into()))
+            .title("AI Chat Memory")
+            .inner_size(1280.0, 820.0)
+            .min_inner_size(900.0, 620.0)
+            .decorations(false)
+            .transparent(true)
+            .on_navigation(move |url| {
+                if is_app_origin(url) {
+                    return true;
+                }
+                let target = url.to_string();
+                let navigation_app = navigation_app.clone();
+                tauri::async_runtime::spawn(async move {
+                    use tauri_plugin_opener::OpenerExt;
+                    if let Err(error) = navigation_app.opener().open_url(&target, None::<&str>) {
+                        tracing::warn!(
+                            %error,
+                            target = %target,
+                            "failed to hand navigation off to the system browser"
+                        );
+                    }
+                });
+                false
+            })
+            .build()?;
     Ok(window)
 }
 
