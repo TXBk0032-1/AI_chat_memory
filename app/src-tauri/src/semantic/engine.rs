@@ -137,6 +137,9 @@ impl SemanticEngine {
     }
 
     pub async fn request_session_index(&self, session_id: &str) -> Result<()> {
+        // A leftover latched cancel flag would make every embed abort
+        // immediately; new incremental work implies indexing is wanted again.
+        self.clear_cancel_flag().await;
         let identity = self.embeddings.read().await.identity();
         index::queue_session_chunks(&self.pool, session_id, &identity).await?;
         self.wake.notify_one();
@@ -667,6 +670,9 @@ impl SemanticEngine {
     }
 
     async fn drain_pending_inner(&self) -> Result<()> {
+        // A previous user cancel latches the flag; a fresh drain means new
+        // work is expected, so clear the residue before consuming the queue.
+        self.clear_cancel_flag().await;
         let generation = self.current_generation();
         'fetch: loop {
             if self.current_generation() != generation {
@@ -1210,7 +1216,19 @@ mod tests {
             .await
             .unwrap();
         sqlx::raw_sql(
-            "CREATE TABLE embedding_chunks (
+            "CREATE TABLE sessions (
+                id TEXT PRIMARY KEY,
+                platform TEXT NOT NULL,
+                title TEXT
+            );
+             CREATE TABLE messages (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT,
+                seq INTEGER
+            );
+             CREATE TABLE embedding_chunks (
                 id INTEGER PRIMARY KEY,
                 message_id TEXT NOT NULL,
                 session_id TEXT NOT NULL,
@@ -1306,5 +1324,51 @@ mod tests {
         assert_eq!(status, "error");
         assert!(error.unwrap().contains("poison batch exploded"));
         assert_eq!(chunk_state(&pool, 5).await.0, "ready");
+    }
+
+    #[tokio::test]
+    async fn cancel_flag_resets_for_incremental_and_drained_work() {
+        let pool = drain_test_pool().await;
+        insert_drain_chunk(&pool, 1, "text one").await;
+        let settings = SemanticSearchSettings {
+            enabled: true,
+            backend: EmbeddingBackendKind::Local,
+            ..SemanticSearchSettings::default()
+        };
+        let manager = EmbeddingManager::from_backend_for_test(
+            std::env::temp_dir(),
+            settings,
+            Arc::new(LocalKindBackend {
+                embed_calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        let engine = SemanticEngine::new(pool.clone(), std::env::temp_dir(), manager);
+        let flag_is_set = || async {
+            engine
+                .embeddings
+                .read()
+                .await
+                .cancel_flag()
+                .load(std::sync::atomic::Ordering::SeqCst)
+        };
+
+        engine.cancel_semantic_work().await.unwrap();
+        assert!(flag_is_set().await);
+
+        // Incremental import work implies indexing is wanted again.
+        engine.request_session_index("s1").await.unwrap();
+        assert!(!flag_is_set().await);
+
+        // A fresh drain also clears any residue latched mid-cancel.
+        engine.cancel_semantic_work().await.unwrap();
+        engine.drain_pending().await.unwrap();
+        assert!(!flag_is_set().await);
+        let identity = engine.embeddings.read().await.identity();
+        assert_eq!(
+            index::count_chunks(&pool, &identity, "ready")
+                .await
+                .unwrap(),
+            1
+        );
     }
 }
