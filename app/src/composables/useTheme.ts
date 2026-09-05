@@ -1,4 +1,5 @@
 import { setTheme as setNativeTheme } from '@tauri-apps/api/app'
+import { toRaw } from 'vue'
 import type { Ref } from 'vue'
 import type { SettingsModel, ThemePreference } from '../desktop-api'
 import { applyThemeToDOM, resolveTheme, type ResolvedTheme, type ThemeDefinition } from '../theme'
@@ -8,7 +9,16 @@ export function useTheme(settings: Ref<SettingsModel>, onApplied: (animate: bool
   let savedPreference: ThemePreference = 'system'
   let savedLightId: string | undefined
   let savedDarkId: string | undefined
+  let savedCustomThemes: ThemeDefinition[] = []
   let themeTransitionTimer: number | undefined
+
+  // The preview snapshot must cover custom_themes too: creating, editing or
+  // deleting a theme mutates the live settings object, and a dialog cancel
+  // would otherwise leave those edits permanently applied.
+  function snapshotCustomThemes() {
+    const raw = toRaw(settings.value).custom_themes || []
+    savedCustomThemes = structuredClone(raw) as ThemeDefinition[]
+  }
 
   function effectiveTheme(preference = settings.value.theme): 'light' | 'dark' {
     return preference === 'system' ? (systemThemeQuery?.matches ? 'dark' : 'light') : preference
@@ -122,18 +132,21 @@ export function useTheme(settings: Ref<SettingsModel>, onApplied: (animate: bool
     savedPreference = settings.value.theme
     savedLightId = settings.value.light_theme_id
     savedDarkId = settings.value.dark_theme_id
+    snapshotCustomThemes()
   }
 
   function acceptPreview() {
     savedPreference = settings.value.theme
     savedLightId = settings.value.light_theme_id
     savedDarkId = settings.value.dark_theme_id
+    snapshotCustomThemes()
   }
 
   function cancelPreview() {
     settings.value.theme = savedPreference
     settings.value.light_theme_id = savedLightId
     settings.value.dark_theme_id = savedDarkId
+    settings.value.custom_themes = savedCustomThemes
     commitTheme(savedPreference, savedLightId, savedDarkId, true)
   }
 

@@ -253,6 +253,7 @@ const enUS = {
     editTheme: 'Edit Theme',
     duplicateTheme: 'Use as Template',
     deleteTheme: 'Delete Theme',
+    deleteThemeConfirm: 'Click again to confirm deletion',
     exportTheme: 'Export Theme',
     themeEditor: {
       createTitle: 'Create Custom Theme',

@@ -112,6 +112,39 @@ describe('useTheme composable', () => {
     expect(document.documentElement.dataset.themeId).toBe('green')
   })
 
+  it('rolls custom_themes back to the snapshot on cancelPreview', () => {
+    const settings = ref(createTestSettings())
+    const onApplied = vi.fn()
+    const theme = useTheme(settings, onApplied)
+
+    const seedTheme = {
+      id: 'custom_seed',
+      name: 'Seed',
+      nameKey: '',
+      isDark: false,
+      isCustom: true,
+      config: { primary: 'rgb(10, 10, 10)' },
+    }
+    theme.saveCustomTheme(seedTheme)
+    expect(settings.value.custom_themes).toHaveLength(1)
+
+    theme.beginPreview()
+    // Inside the preview: edit the seed, add another theme, delete the seed —
+    // cancel must restore the exact beginPreview snapshot in all three cases.
+    const edited = { ...seedTheme, config: { primary: 'rgb(20, 20, 20)' } }
+    theme.saveCustomTheme(edited)
+    expect(settings.value.custom_themes?.[0].config.primary).toBe('rgb(20, 20, 20)')
+    theme.saveCustomTheme({ ...seedTheme, id: 'custom_extra', name: 'Extra' }, false)
+    expect(settings.value.custom_themes).toHaveLength(2)
+    theme.deleteCustomTheme('custom_seed')
+    expect(settings.value.custom_themes).toHaveLength(1)
+
+    theme.cancelPreview()
+    expect(settings.value.custom_themes).toHaveLength(1)
+    expect(settings.value.custom_themes?.[0].id).toBe('custom_seed')
+    expect(settings.value.custom_themes?.[0].config.primary).toBe('rgb(10, 10, 10)')
+  })
+
   it('saves, activates and deletes custom themes', () => {
     const settings = ref(createTestSettings())
     const onApplied = vi.fn()

@@ -251,6 +251,7 @@ const zhCN = {
     editTheme: '编辑主题',
     duplicateTheme: '以此为模板',
     deleteTheme: '删除主题',
+    deleteThemeConfirm: '再次点击确认删除',
     exportTheme: '导出主题',
     themeEditor: {
       createTitle: '新建自定义主题',

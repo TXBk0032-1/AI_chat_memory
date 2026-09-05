@@ -93,6 +93,7 @@ watch(() => props.visible, (visible) => {
   } else {
     cloudPassword.value = ''
     syncPassword.value = ''
+    pendingDeleteThemeId.value = null
     s3AccessKeyId.value = ''
     s3SecretAccessKey.value = ''
     s3SessionToken.value = ''
@@ -381,6 +382,20 @@ function onSaveCustomTheme(theme: ThemeDefinition, activate: boolean) {
   }
 }
 
+// Delete confirmation is a two-step inline state on the card's trash icon:
+// the first click arms the pending id, the second click on the same icon
+// actually deletes. A stray hover-click can no longer destroy a theme.
+const pendingDeleteThemeId = ref<string | null>(null)
+
+function onRequestDeleteCustomTheme(id: string) {
+  if (pendingDeleteThemeId.value !== id) {
+    pendingDeleteThemeId.value = id
+    return
+  }
+  pendingDeleteThemeId.value = null
+  onDeleteCustomTheme(id)
+}
+
 function onDeleteCustomTheme(id: string) {
   const currentCustom = (settings.value.custom_themes || []).filter((t) => t.id !== id)
   settings.value.custom_themes = currentCustom
@@ -562,9 +577,9 @@ function onDeleteCustomTheme(id: string) {
                       <button
                         v-if="item.isCustom"
                         type="button"
-                        class="theme-card-icon-btn is-danger"
-                        :title="t('settings.deleteTheme')"
-                        @click="onDeleteCustomTheme(item.id)"
+                        :class="['theme-card-icon-btn', 'is-danger', { 'is-confirming': pendingDeleteThemeId === item.id }]"
+                        :title="pendingDeleteThemeId === item.id ? t('settings.deleteThemeConfirm') : t('settings.deleteTheme')"
+                        @click="onRequestDeleteCustomTheme(item.id)"
                       >
                         <Trash2 :size="12" />
                       </button>
@@ -638,9 +653,9 @@ function onDeleteCustomTheme(id: string) {
                       <button
                         v-if="item.isCustom"
                         type="button"
-                        class="theme-card-icon-btn is-danger"
-                        :title="t('settings.deleteTheme')"
-                        @click="onDeleteCustomTheme(item.id)"
+                        :class="['theme-card-icon-btn', 'is-danger', { 'is-confirming': pendingDeleteThemeId === item.id }]"
+                        :title="pendingDeleteThemeId === item.id ? t('settings.deleteThemeConfirm') : t('settings.deleteTheme')"
+                        @click="onRequestDeleteCustomTheme(item.id)"
                       >
                         <Trash2 :size="12" />
                       </button>
