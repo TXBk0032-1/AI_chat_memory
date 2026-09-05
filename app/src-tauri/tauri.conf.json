@@ -10,17 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [
-      {
-        "title": "AI Chat Memory",
-        "width": 1280,
-        "height": 820,
-        "minWidth": 900,
-        "minHeight": 620,
-        "decorations": false,
-        "transparent": true
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:; img-src 'self' data: blob: https:; connect-src 'self' http://127.0.0.1:* http://localhost:* ws://localhost:* ws://127.0.0.1:*; object-src 'none';"
     }

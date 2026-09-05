@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { renderMarkdown } from './markdown'
+import { classifyMarkdownLink, renderMarkdown } from './markdown'
 import type { Message, Reference } from './conversation'
 
 const message: Message = {
@@ -57,5 +57,23 @@ describe('markdown rendering', () => {
     expect(html).toContain('class="katex"')
     expect(html).toContain('regex = r&quot;\\[a-z\\]&quot;')
     expect(html).not.toContain('$$a-z$$')
+  })
+})
+
+describe('markdown link classification', () => {
+  it('delegates network protocols to the system browser', () => {
+    expect(classifyMarkdownLink('https://example.com/page')).toBe('open')
+    expect(classifyMarkdownLink('HTTP://EXAMPLE.COM')).toBe('open')
+    expect(classifyMarkdownLink('mailto:someone@example.com')).toBe('open')
+  })
+
+  it('keeps foreign and relative schemes inside the webview sandbox', () => {
+    expect(classifyMarkdownLink('data:text/html,<h1>hi</h1>')).toBe('ignore')
+    expect(classifyMarkdownLink('javascript:alert(1)')).toBe('ignore')
+    expect(classifyMarkdownLink('file:///C:/Windows/System32')).toBe('ignore')
+    expect(classifyMarkdownLink('#top')).toBe('ignore')
+    expect(classifyMarkdownLink('')).toBe('ignore')
+    expect(classifyMarkdownLink(null)).toBe('ignore')
+    expect(classifyMarkdownLink(undefined)).toBe('ignore')
   })
 })

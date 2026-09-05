@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { open, save } from '@tauri-apps/plugin-dialog'
 import { openUrl } from '@tauri-apps/plugin-opener'
+import { classifyMarkdownLink } from './markdown'
 import { toJpeg, toPng } from 'html-to-image'
 import {
   ArrowDown,
@@ -766,11 +767,17 @@ function handleContextMenuKey(event: KeyboardEvent) {
 }
 
 async function openMarkdownLink(event: MouseEvent) {
-  const link = (event.target as HTMLElement).closest<HTMLAnchorElement>('a.reference-link')
-  if (!link || !/^https?:\/\//i.test(link.href)) return
+  const link = (event.target as HTMLElement).closest<HTMLAnchorElement>('a[href]')
+  if (!link) return
+  // Any anchor in the message area is prevented from navigating the webview
+  // itself; only known network protocols go to the system browser. The
+  // delegation must stay bound to the message list — a document-level
+  // delegate would swallow ThemeEditorDialog's data: download anchor.
+  const href = link.getAttribute('href') ?? ''
   event.preventDefault()
+  if (classifyMarkdownLink(href) !== 'open') return
   try {
-    await openUrl(link.href)
+    await openUrl(href)
   } catch {
     showToast(t('app.openLinkFailed'))
   }
@@ -985,7 +992,7 @@ onBeforeUnmount(() => {
                 <label><input v-model="loopSearch" type="checkbox" />{{ t('app.loop') }}</label>
               </div>
             </Transition>
-            <div ref="messageListRef" :class="['message-list', { 'branch-mode': detailMode === 'branches' }]" @scroll.passive="handleMessageScroll" @click="openMarkdownLink">
+            <div ref="messageListRef" :class="['message-list', { 'branch-mode': detailMode === 'branches' }]" @scroll.passive="handleMessageScroll" @click="openMarkdownLink" @auxclick="openMarkdownLink">
               <div v-if="selectedMatches.length" class="search-scroll-markers" aria-hidden="true">
                 <i v-for="(match, index) in selectedMatches" :key="`${match.message_id}-${match.field}-${index}`" :style="{ top: `${((displayedSeqIndexes.get(match.seq) ?? 0) + 0.5) / Math.max(displayedMessageSeqs.length, 1) * 100}%` }"></i>
               </div>

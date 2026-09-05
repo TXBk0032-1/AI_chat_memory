@@ -4,6 +4,18 @@ import katex from 'katex'
 import type { Message, Reference } from './conversation'
 import { translate as t } from './i18n'
 
+/**
+ * How an anchor click inside the message area must be handled: `open` hands
+ * the URL to the system browser, `ignore` leaves the anchor untouched. The
+ * webview itself must never navigate natively to foreign content.
+ */
+export type MarkdownLinkAction = 'open' | 'ignore'
+
+export function classifyMarkdownLink(href: string | null | undefined): MarkdownLinkAction {
+  if (!href) return 'ignore'
+  return /^(https?:|mailto:)/i.test(href.trim()) ? 'open' : 'ignore'
+}
+
 const markdown = new MarkdownIt({ html: false, linkify: true, breaks: true }).use(texmath, {
   engine: katex,
   delimiters: ['dollars', 'brackets'],

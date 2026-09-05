@@ -25,6 +25,74 @@ use settings::SettingsStore;
 use std::sync::Arc;
 use tauri::Manager;
 
+/// Creates the main window with an `on_navigation` guard: any navigation away
+/// from the app origin is blocked and handed to the system browser, so a stray
+/// link can never turn the webview into a plain browser and dissolve the UI.
+/// The frontend click delegate is the first line of defense; this is the
+/// process-level backstop. wry only supports navigation hooks at builder time,
+/// which is why the window is not auto-created from the config.
+fn create_main_window(app: tauri::AppHandle) -> tauri::Result<tauri::WebviewWindow> {
+    use tauri::webview::WebviewWindowBuilder;
+
+    let navigation_app = app.clone();
+    let window = WebviewWindowBuilder::new(
+        &app,
+        "main",
+        tauri::WebviewUrl::App("index.html".into()),
+    )
+    .title("AI Chat Memory")
+    .inner_size(1280.0, 820.0)
+    .min_inner_size(900.0, 620.0)
+    .decorations(false)
+    .transparent(true)
+    .on_navigation(move |url| {
+        if is_app_origin(url) {
+            return true;
+        }
+        let target = url.to_string();
+        let navigation_app = navigation_app.clone();
+        tauri::async_runtime::spawn(async move {
+            use tauri_plugin_opener::OpenerExt;
+            if let Err(error) = navigation_app.opener().open_url(&target, None::<&str>) {
+                tracing::warn!(
+                    %error,
+                    target = %target,
+                    "failed to hand navigation off to the system browser"
+                );
+            }
+        });
+        false
+    })
+    .build()?;
+    Ok(window)
+}
+
+/// Whether `url` belongs to the application surface and may navigate the
+/// webview: the dev server origin, the Windows production origin
+/// `http://tauri.localhost`, the `tauri://localhost` custom scheme, and the
+/// data/blob/bootstrap pages used by in-app downloads and webview init.
+fn is_app_origin(url: &tauri::Url) -> bool {
+    if matches!(url.scheme(), "data" | "blob") || url.as_str() == "about:blank" {
+        return true;
+    }
+    if url.scheme() == "tauri" && url.host_str() == Some("localhost") {
+        return true;
+    }
+    if url.scheme() == "http" {
+        let host = url.host_str().unwrap_or_default();
+        if tauri::is_dev()
+            && matches!(host, "localhost" | "127.0.0.1")
+            && url.port().map(|port| port == 1420).unwrap_or(true)
+        {
+            return true;
+        }
+        if cfg!(target_os = "windows") && host == "tauri.localhost" && url.port().is_none() {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[cfg(target_os = "windows")]
@@ -61,12 +129,16 @@ pub fn run() {
                     eprintln!("failed to initialize file logging: {error}");
                 }
             }
+            // The main window is created programmatically (not via the config
+            // auto-creation) so the builder can attach an `on_navigation`
+            // guard; wry only supports navigation hooks at build time. This
+            // must run before the acrylic setup below, which looks the window
+            // up by its "main" label.
+            let main_window = create_main_window(app.handle().clone())?;
             #[cfg(target_os = "windows")]
-            if let Some(window) = app.get_webview_window("main") {
-                match window_vibrancy::apply_acrylic(&window, Some((18, 18, 18, 110))) {
-                    Ok(()) => tracing::info!("acrylic window effect enabled"),
-                    Err(error) => tracing::warn!(%error, "acrylic window effect unavailable"),
-                }
+            match window_vibrancy::apply_acrylic(&main_window, Some((18, 18, 18, 110))) {
+                Ok(()) => tracing::info!("acrylic window effect enabled"),
+                Err(error) => tracing::warn!(%error, "acrylic window effect unavailable"),
             }
             tracing::info!(app_data_dir=%data_dir.display(), "application starting");
 
