@@ -101,7 +101,13 @@ export function useSettings(
   }
 
   async function rotateSecret() {
-    settings.value = await api.rotateSecret()
+    // Partial settings operations must patch only the fields they own: the
+    // dialog can hold unsaved edits across tabs, and a wholesale replacement
+    // would flush them back to the on-disk values. Wholesale assignment is
+    // reserved for the open baseline and the save commit point.
+    const updated = await api.rotateSecret()
+    settings.value.secret = updated.secret
+    settings.value.secret_enabled = updated.secret_enabled
     secretCopied.value = false
   }
 
@@ -312,7 +318,11 @@ export function useSettings(
     semanticBusy.value = true
     try {
       await api.importLocalEmbeddingModel(path)
-      settings.value = await api.getSettings()
+      // Merge only the semantic_search subtree: the import refreshes model
+      // metadata on disk, but the dialog may hold unrelated unsaved edits
+      // that a wholesale replacement would destroy.
+      const updated = await api.getSettings()
+      settings.value.semantic_search = updated.semantic_search
       await refreshSemanticStatus()
     } catch (reason) {
       error.value = String(reason)

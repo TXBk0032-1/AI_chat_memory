@@ -17,11 +17,12 @@ const mocks = vi.hoisted(() => ({
   reindexSemantic: vi.fn(),
   downloadLocalEmbeddingModel: vi.fn(),
   importLocalEmbeddingModel: vi.fn(),
+  dialogOpen: vi.fn(),
 }))
 
 vi.mock('../desktop-api', () => ({ desktopApi: mocks }))
 // The composable imports the tauri dialog plugin; stub it so the module loads.
-vi.mock('@tauri-apps/plugin-dialog', () => ({ open: vi.fn() }))
+vi.mock('@tauri-apps/plugin-dialog', () => ({ open: mocks.dialogOpen }))
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn().mockResolvedValue(() => {}) }))
 vi.mock('../mcp-config', () => ({ buildMcpClientConfig: () => '' }))
 
@@ -163,5 +164,55 @@ describe('useSettings', () => {
 
     unmount()
     vi.unstubAllGlobals()
+  })
+
+  it('patches only the owned fields when rotating the secret mid-dialog', async () => {
+    const settingsRef = ref(defaultSettings())
+    // Unsaved draft edits the user made in other tabs of the dialog.
+    settingsRef.value.allowed_origins = ['https://draft.example.com']
+    const cloudSync = settingsRef.value.cloud_sync as unknown as { password: string }
+    cloudSync.password = 'unsaved-password'
+    const diskState = defaultSettings()
+    diskState.secret = 'rotated-secret'
+    diskState.secret_enabled = true
+    diskState.allowed_origins = ['https://ondisk.example.com']
+    mocks.rotateSecret.mockResolvedValue(diskState)
+
+    const { exposed, unmount } = mountComposable(settingsRef)
+    await exposed.rotateSecret()
+
+    // Only the credential fields take the rotated disk state...
+    expect(settingsRef.value.secret).toBe('rotated-secret')
+    expect(settingsRef.value.secret_enabled).toBe(true)
+    // ...and every unsaved draft survives the rotation.
+    expect(settingsRef.value.allowed_origins).toEqual(['https://draft.example.com'])
+    expect(cloudSync.password).toBe('unsaved-password')
+    expect(exposed.secretCopied.value).toBe(false)
+
+    unmount()
+  })
+
+  it('merges only the semantic_search subtree after importing a local model', async () => {
+    const settingsRef = ref(defaultSettings())
+    settingsRef.value.allowed_origins = ['https://draft.example.com']
+    const importedState = defaultSettings()
+    ;(importedState.semantic_search as unknown as { model_path: string }).model_path =
+      'C:/models/bge'
+    importedState.allowed_origins = ['https://ondisk.example.com']
+    mocks.dialogOpen.mockResolvedValue('C:/models/bge')
+    mocks.importLocalEmbeddingModel.mockResolvedValue(undefined)
+    mocks.getSettings.mockResolvedValue(importedState)
+
+    const { exposed, unmount } = mountComposable(settingsRef)
+    await exposed.importLocalModel()
+
+    // The refreshed model metadata lands, but the unrelated unsaved draft
+    // (allowed_origins) must not be flushed back to the disk value.
+    expect((settingsRef.value.semantic_search as unknown as { model_path: string }).model_path).toBe(
+      'C:/models/bge',
+    )
+    expect(settingsRef.value.allowed_origins).toEqual(['https://draft.example.com'])
+
+    unmount()
   })
 })
