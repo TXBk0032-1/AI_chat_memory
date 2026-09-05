@@ -1,6 +1,7 @@
 use rand::RngCore;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+use tokio::io::AsyncWriteExt;
 
 use crate::{
     error::{AppError, Result},
@@ -17,6 +18,11 @@ pub struct SettingsStore {
     path: PathBuf,
     value: RwLock<AppSettings>,
     credentials: Arc<dyn CredentialStore>,
+    /// Serializes the whole validate → persist → in-memory swap chain in
+    /// `update`, so concurrent writers cannot interleave on the same tmp and
+    /// backup file names. `persist` itself must be called while holding it
+    /// (or during single-threaded load-time repair).
+    write_lock: tokio::sync::Mutex<()>,
 }
 
 impl SettingsStore {
@@ -32,16 +38,33 @@ impl SettingsStore {
         path: PathBuf,
         credentials: Arc<dyn CredentialStore>,
     ) -> Result<Self> {
+        let mut recovered_from_backup = false;
         let mut value = if path.exists() {
             match serde_json::from_slice(&tokio::fs::read(&path).await?) {
                 Ok(value) => value,
-                Err(error) => {
-                    let corrupt = path
-                        .with_extension(format!("corrupt-{}.json", chrono::Utc::now().timestamp()));
-                    tokio::fs::rename(&path, &corrupt).await?;
-                    tracing::error!(%error, path=%corrupt.display(), "settings were corrupt; restored defaults");
-                    AppSettings::default()
-                }
+                Err(error) => match Self::read_backup(&path).await {
+                    Some(backup_value) => {
+                        tracing::warn!(
+                            %error,
+                            "settings.json was corrupt; recovered from settings.json.bak and rewriting it"
+                        );
+                        recovered_from_backup = true;
+                        backup_value
+                    }
+                    None => {
+                        let corrupt = path.with_extension(format!(
+                            "corrupt-{}.json",
+                            chrono::Utc::now().timestamp()
+                        ));
+                        tokio::fs::rename(&path, &corrupt).await?;
+                        tracing::error!(
+                            %error,
+                            path=%corrupt.display(),
+                            "settings were corrupt and no backup could be read; restored defaults"
+                        );
+                        AppSettings::default()
+                    }
+                },
             }
         } else {
             AppSettings::default()
@@ -99,11 +122,23 @@ impl SettingsStore {
             path,
             value: RwLock::new(value.clone()),
             credentials,
+            write_lock: tokio::sync::Mutex::new(()),
         };
-        if migrated_plaintext_secret && let Err(error) = store.persist(&value).await {
+        if migrated_plaintext_secret {
+            if let Err(error) = store.persist(&value).await {
+                tracing::warn!(
+                    %error,
+                    "failed to remove the plaintext userscript secret from settings.json"
+                );
+            }
+            // The backup made during this write mirrors the legacy file and
+            // may still carry the plaintext secret; drop it.
+            let _ = tokio::fs::remove_file(store.backup_path()).await;
+        }
+        if recovered_from_backup && let Err(error) = store.persist(&value).await {
             tracing::warn!(
                 %error,
-                "failed to remove the plaintext userscript secret from settings.json"
+                "failed to rewrite the backup-recovered settings back to settings.json"
             );
         }
         Ok(store)
@@ -121,6 +156,9 @@ impl SettingsStore {
         self.current()
     }
     pub async fn update(&self, mut value: AppSettings) -> Result<AppSettings> {
+        // Serialize the whole chain: two concurrent writers used to race past
+        // each other and interleave on the shared tmp/backup file names.
+        let _write_guard = self.write_lock.lock().await;
         validate_origins(&value.allowed_origins)?;
         value.cloud_sync.normalize();
         self.apply_secret_policy(&mut value).await?;
@@ -187,27 +225,94 @@ impl SettingsStore {
 
     /// Atomically writes settings.json with the userscript secret stripped, so
     /// the plaintext never reaches disk even when callers echo it back.
+    ///
+    /// Durability contract: `main` is copied (never renamed) to
+    /// `settings.json.bak`, so a complete settings.json exists on disk at
+    /// every instant; the unique-named tmp file is fsynced before the final
+    /// rename; and the `.bak` is kept as the one-version-older recovery point
+    /// for the load-side self-heal.
     async fn persist(&self, value: &AppSettings) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
+        self.cleanup_stale_temporaries().await;
         let mut persisted = value.clone();
         persisted.secret = None;
-        let temporary = self.path.with_extension("json.tmp");
-        let backup = self.path.with_extension("json.bak");
-        tokio::fs::write(&temporary, serde_json::to_vec_pretty(&persisted)?).await?;
+        let payload = serde_json::to_vec_pretty(&persisted)?;
+        let temporary = self
+            .path
+            .with_extension(format!("json.tmp-{}", uuid::Uuid::new_v4().simple()));
+        {
+            let mut writer = tokio::io::BufWriter::new(tokio::fs::File::create(&temporary).await?);
+            writer.write_all(&payload).await?;
+            writer.flush().await?;
+            // FlushFileBuffers: a power cut must not leave a zero-byte main
+            // behind the final rename.
+            writer.get_ref().sync_all().await?;
+        }
+        // Copy (never rename) the previous main out of the way so the live
+        // settings.json is never absent from disk.
         if self.path.exists() {
-            let _ = tokio::fs::remove_file(&backup).await;
-            tokio::fs::rename(&self.path, &backup).await?;
+            if let Err(error) = tokio::fs::copy(self.path.clone(), self.backup_path()).await {
+                tracing::warn!(%error, "failed to back up settings.json before overwrite");
+            }
         }
         if let Err(error) = tokio::fs::rename(&temporary, &self.path).await {
-            if backup.exists() {
-                let _ = tokio::fs::rename(&backup, &self.path).await;
-            }
+            // main is untouched; drop the tmp and surface the error.
+            let _ = tokio::fs::remove_file(&temporary).await;
             return Err(error.into());
         }
-        let _ = tokio::fs::remove_file(&backup).await;
         Ok(())
+    }
+
+    fn backup_path(&self) -> PathBuf {
+        self.path.with_extension("json.bak")
+    }
+
+    /// Removes `settings.json.tmp-*` leftovers from crashed writers so unique
+    /// temporary names cannot accumulate forever.
+    async fn cleanup_stale_temporaries(&self) {
+        let Some(parent) = self.path.parent() else {
+            return;
+        };
+        let Some(file_name) = self
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+        else {
+            return;
+        };
+        let prefix = format!("{file_name}.tmp-");
+        let Ok(mut entries) = tokio::fs::read_dir(parent).await else {
+            return;
+        };
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with(&prefix) {
+                let _ = tokio::fs::remove_file(entry.path()).await;
+            }
+        }
+    }
+
+    /// Best-effort read of `settings.json.bak`; `None` when it is missing or
+    /// unreadable.
+    async fn read_backup(path: &Path) -> Option<AppSettings> {
+        let backup = path.with_extension("json.bak");
+        let bytes = match tokio::fs::read(&backup).await {
+            Ok(bytes) => bytes,
+            Err(_) => return None,
+        };
+        match serde_json::from_slice::<AppSettings>(&bytes) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    path=%backup.display(),
+                    "settings.json.bak is unreadable too"
+                );
+                None
+            }
+        }
     }
 }
 
@@ -282,6 +387,103 @@ mod tests {
                 .starts_with("settings.corrupt-")
         }));
         let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn recovers_corrupt_settings_from_backup_and_rewrites_it() {
+        let (store, root, _credentials) = test_store().await;
+        let path = root.join("settings.json");
+        // Two updates: the second write's backup captures the first version.
+        let mut value = store.current();
+        value.language = LanguagePreference::EnUs;
+        store.update(value).await.unwrap();
+        let mut value = store.current();
+        value.language = LanguagePreference::ZhCn;
+        store.update(value).await.unwrap();
+
+        tokio::fs::write(&path, b"{ corrupt").await.unwrap();
+        let reloaded = SettingsStore::load_with_credential_store(
+            path.clone(),
+            Arc::new(MemoryCredentialStore::default()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reloaded.current().language,
+            LanguagePreference::EnUs,
+            "the one-version-older backup must win over defaults"
+        );
+
+        // The recovery rewrote settings.json so it parses again and no
+        // corrupt-*.json archive was needed.
+        let healed = tokio::fs::read(&path).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&healed).unwrap();
+        assert_eq!(parsed["language"], serde_json::json!("en-US"));
+        assert!(!root.read_dir().unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("settings.corrupt-")
+        }));
+    }
+
+    #[tokio::test]
+    async fn concurrent_updates_serialize_on_the_write_lock() {
+        let (store, root, _credentials) = test_store().await;
+        let store = Arc::new(store);
+        let mut handles = Vec::new();
+        for index in 0..10 {
+            let store = Arc::clone(&store);
+            handles.push(tokio::spawn(async move {
+                let mut value = store.current();
+                value.allowed_origins = vec![format!("https://example{index}.com")];
+                store.update(value).await.unwrap();
+            }));
+        }
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        let final_value = store.current();
+        assert_eq!(
+            final_value.allowed_origins.len(),
+            1,
+            "exactly one writer's value must survive, not an interleaved merge"
+        );
+        let raw = tokio::fs::read(root.join("settings.json")).await.unwrap();
+        serde_json::from_slice::<AppSettings>(&raw)
+            .expect("settings.json must stay parseable under concurrent writers");
+        assert_settings_json_has_no_secret(&root).await;
+    }
+
+    #[tokio::test]
+    async fn persist_keeps_a_backup_and_leaves_no_temporary_files() {
+        let (store, root, _credentials) = test_store().await;
+        let mut value = store.current();
+        value.language = LanguagePreference::EnUs;
+        store.update(value).await.unwrap();
+        let mut value = store.current();
+        value.language = LanguagePreference::ZhCn;
+        store.update(value).await.unwrap();
+
+        // main and the kept one-version-older backup both parse.
+        let main = tokio::fs::read(root.join("settings.json")).await.unwrap();
+        serde_json::from_slice::<AppSettings>(&main).unwrap();
+        let backup = tokio::fs::read(root.join("settings.json.bak"))
+            .await
+            .unwrap();
+        serde_json::from_slice::<AppSettings>(&backup).unwrap();
+        assert!(
+            !root.read_dir().unwrap().any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("settings.json.tmp-")
+            }),
+            "persist must clean up its unique temporary files"
+        );
     }
 
     #[test]
