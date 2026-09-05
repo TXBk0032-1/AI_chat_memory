@@ -263,15 +263,14 @@ describe('MessageBlock rendered notifications and code copy', () => {
     }
   }
 
-  it('emits content-rendered scoped to its own root element', async () => {
+  it('emits content-rendered as a parameterless signal', async () => {
     const harness = mountMessage(codeMessage())
     try {
       await nextTick()
       expect(harness.contentRendered).toHaveBeenCalled()
-      const root = harness.contentRendered.mock.calls[0][0] as HTMLElement
-      expect(root).toBeInstanceOf(HTMLElement)
-      expect(root.dataset.messageId).toBe('message-1')
-      expect(root.classList.contains('message-block')).toBe(true)
+      // The renderer scans the whole document; the emit must carry no payload
+      // so a narrow root can never shadow other same-tick messages.
+      expect(harness.contentRendered.mock.calls[0]).toEqual([])
     } finally {
       harness.unmount()
     }

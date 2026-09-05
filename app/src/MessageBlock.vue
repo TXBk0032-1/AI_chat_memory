@@ -19,7 +19,7 @@ const props = defineProps<{
   roleLabel: string
 }>()
 
-const emit = defineEmits<{ toggleThinking: [messageId: string]; contentRendered: [root: HTMLElement] }>()
+const emit = defineEmits<{ toggleThinking: [messageId: string]; contentRendered: [] }>()
 
 const rootElement = ref<HTMLElement | null>(null)
 
@@ -101,10 +101,9 @@ function handleBlockClick(event: MouseEvent) {
 
 function notifyRendered() {
   void nextTick(() => {
-    // Scope the notification to this block so the parent renders Mermaid
-    // diagrams inside this message only, instead of scanning the whole
-    // document on every mount while the virtual list scrolls.
-    if (rootElement.value) emit('contentRendered', rootElement.value)
+    // Parameterless signal: the renderer scans the whole document so
+    // same-tick mounts from several messages cannot shadow each other.
+    emit('contentRendered')
   })
 }
 

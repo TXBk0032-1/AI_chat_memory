@@ -43,7 +43,12 @@ export function useMermaidRenderer(effectiveTheme: () => 'light' | 'dark') {
     instance = null
   }
 
-  async function renderMermaidDiagrams(root: ParentNode = document) {
+  // Always scans the whole document: callers used to pass a per-message root,
+  // which broke the renderVersion coalescing assumption ("the latest caller's
+  // root is a superset of earlier ones") and silently skipped diagrams when
+  // several messages mounted in the same tick. A full-document query is
+  // microseconds and keeps same-tick bursts batched into one render pass.
+  async function renderMermaidDiagrams(): Promise<void> {
     const version = ++renderVersion
     await nextTick()
     // An export render temporarily reconfigures the shared instance with the
@@ -51,7 +56,7 @@ export function useMermaidRenderer(effectiveTheme: () => 'light' | 'dark') {
     // before rendering in-app diagrams.
     await exportCompletion?.catch(() => {})
     if (version !== renderVersion) return
-    const diagrams = [...root.querySelectorAll<HTMLElement>('.mermaid-diagram:not([data-rendered])')]
+    const diagrams = [...document.querySelectorAll<HTMLElement>('.mermaid-diagram:not([data-rendered])')]
     if (!diagrams.length) return
     const t0 = performance.now()
     const mermaid = await loadMermaid()

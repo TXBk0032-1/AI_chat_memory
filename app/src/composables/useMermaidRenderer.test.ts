@@ -114,22 +114,39 @@ describe('Mermaid rendering', () => {
     expect(mermaid.initialize).toHaveBeenLastCalledWith(expect.objectContaining({ theme: 'dark' }))
   })
 
-  it('renders only the diagrams inside the provided root', async () => {
-    const scopedElement = diagram()
-    const root = { querySelectorAll: vi.fn(() => [scopedElement]) } as unknown as ParentNode
-    vi.stubGlobal('document', {
-      querySelectorAll: vi.fn(() => {
-        throw new Error('unexpected full document scan')
-      }),
-    })
-    mermaid.render.mockResolvedValueOnce({ svg: '<svg>scoped</svg>' })
+  it('scans the whole document so same-tick mounts cannot shadow each other', async () => {
+    const first = diagram('graph TD\nA-->B')
+    const second = diagram('graph TD\nC-->D')
+    mermaid.render
+      .mockResolvedValueOnce({ svg: '<svg>one</svg>' })
+      .mockResolvedValueOnce({ svg: '<svg>two</svg>' })
+    vi.stubGlobal('document', { querySelectorAll: vi.fn(() => [first, second]) })
 
     const renderer = useMermaidRenderer(() => 'dark')
-    await renderer.renderMermaidDiagrams(root)
+    await renderer.renderMermaidDiagrams()
 
-    expect(root.querySelectorAll).toHaveBeenCalledWith('.mermaid-diagram:not([data-rendered])')
-    expect(document.querySelectorAll).not.toHaveBeenCalled()
-    expect(scopedElement.innerHTML).toBe('<svg>scoped</svg>')
-    expect(scopedElement.dataset.rendered).toBe('true')
+    expect(document.querySelectorAll).toHaveBeenCalledWith('.mermaid-diagram:not([data-rendered])')
+    expect(first.innerHTML).toBe('<svg>one</svg>')
+    expect(second.innerHTML).toBe('<svg>two</svg>')
+    expect(second.dataset.rendered).toBe('true')
+  })
+
+  it('coalesces same-tick bursts into a single render pass', async () => {
+    const element = diagram()
+    mermaid.render.mockResolvedValue({ svg: '<svg>once</svg>' })
+    const query = vi.fn(() => [element])
+    vi.stubGlobal('document', { querySelectorAll: query })
+
+    const renderer = useMermaidRenderer(() => 'dark')
+    const first = renderer.renderMermaidDiagrams()
+    const second = renderer.renderMermaidDiagrams()
+    await Promise.all([first, second])
+
+    // The second call bumps renderVersion, so the first one bails at the
+    // version check before scanning or rendering: one pass, one scan.
+    expect(query).toHaveBeenCalledTimes(1)
+    expect(mermaid.render).toHaveBeenCalledTimes(1)
+    expect(element.innerHTML).toBe('<svg>once</svg>')
+    expect(element.dataset.rendered).toBe('true')
   })
 })
