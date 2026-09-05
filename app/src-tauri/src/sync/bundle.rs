@@ -19,7 +19,7 @@ const PREFIX_LENGTH: usize = 9;
 const LIMIT_ERROR_PREFIX: &str = "bundle exceeds configured limits: ";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PreviousValidation {
+pub(crate) enum PreviousValidation {
     StrictChain,
     ReleasedV1Unchained,
 }
@@ -271,6 +271,63 @@ fn open_bundle_protected_with_previous_validation(
     protector: Option<&dyn PayloadProtector>,
     previous_validation: PreviousValidation,
 ) -> Result<DecodedBundle> {
+    let (header, payload_offset) =
+        parse_bundle_header_with_offset(bytes, limits, protector, previous_validation)?;
+    let payload = &bytes[payload_offset..];
+    let plaintext = match header.protection {
+        ProtectionAlgorithm::Plain => payload.to_vec(),
+        ProtectionAlgorithm::XChaCha20Poly1305 => {
+            let protector = protector.ok_or_else(|| {
+                AppError::Crypto("encrypted bundle requires a payload protector".into())
+            })?;
+            if protector.algorithm() != header.protection {
+                return Err(AppError::Crypto(
+                    "payload protector algorithm mismatch".into(),
+                ));
+            }
+            let nonce = decode_nonce(header.nonce.as_deref())?;
+            let contents = BundleContents {
+                vault_id: header.vault_id.clone(),
+                generation_id: header.generation_id.clone(),
+                device_id: header.device_id.clone(),
+                start_seq: header.start_seq,
+                end_seq: header.end_seq,
+                previous_path: header.previous_path.clone(),
+                previous_sha256: header.previous_sha256.clone(),
+                previous_end_seq: header.previous_end_seq,
+                changes: Vec::new(),
+            };
+            let aad =
+                authenticated_header_bytes(&contents, header.protection, header.nonce.as_deref())?;
+            protector.open(&aad, payload, nonce)?
+        }
+    };
+    let decompressed = decompress_limited(&plaintext, limits.max_decompressed_bytes)?;
+    let files = read_tar(&decompressed, limits)?;
+    decode_contents(header, files, limits, previous_validation)
+}
+
+/// Key-less structural validation of a sealed envelope: envelope framing,
+/// plaintext header parse + `validate_header`, protection policy match, and a
+/// ciphertext payload length/digest check. It never decrypts, so the pull
+/// chain can walk on the returned header while authenticity of the
+/// header-driven walk is only enforced later by the AAD-bound open.
+pub(crate) fn parse_bundle_header(
+    bytes: &[u8],
+    limits: &BundleLimits,
+    protector: Option<&dyn PayloadProtector>,
+    previous_validation: PreviousValidation,
+) -> Result<BundleHeader> {
+    parse_bundle_header_with_offset(bytes, limits, protector, previous_validation)
+        .map(|(header, _)| header)
+}
+
+fn parse_bundle_header_with_offset(
+    bytes: &[u8],
+    limits: &BundleLimits,
+    protector: Option<&dyn PayloadProtector>,
+    previous_validation: PreviousValidation,
+) -> Result<(BundleHeader, usize)> {
     if bytes.len() > limits.max_envelope_bytes || bytes.len() < PREFIX_LENGTH {
         return invalid("bundle envelope size is invalid");
     }
@@ -304,37 +361,7 @@ fn open_bundle_protected_with_previous_validation(
     {
         return invalid("bundle payload length or digest mismatch");
     }
-    let plaintext = match header.protection {
-        ProtectionAlgorithm::Plain => payload.to_vec(),
-        ProtectionAlgorithm::XChaCha20Poly1305 => {
-            let protector = protector.ok_or_else(|| {
-                AppError::Crypto("encrypted bundle requires a payload protector".into())
-            })?;
-            if protector.algorithm() != header.protection {
-                return Err(AppError::Crypto(
-                    "payload protector algorithm mismatch".into(),
-                ));
-            }
-            let nonce = decode_nonce(header.nonce.as_deref())?;
-            let contents = BundleContents {
-                vault_id: header.vault_id.clone(),
-                generation_id: header.generation_id.clone(),
-                device_id: header.device_id.clone(),
-                start_seq: header.start_seq,
-                end_seq: header.end_seq,
-                previous_path: header.previous_path.clone(),
-                previous_sha256: header.previous_sha256.clone(),
-                previous_end_seq: header.previous_end_seq,
-                changes: Vec::new(),
-            };
-            let aad =
-                authenticated_header_bytes(&contents, header.protection, header.nonce.as_deref())?;
-            protector.open(&aad, payload, nonce)?
-        }
-    };
-    let decompressed = decompress_limited(&plaintext, limits.max_decompressed_bytes)?;
-    let files = read_tar(&decompressed, limits)?;
-    decode_contents(header, files, limits, previous_validation)
+    Ok((header, payload_offset))
 }
 
 fn validate_sealed_bundle(

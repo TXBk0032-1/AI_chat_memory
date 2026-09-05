@@ -252,10 +252,10 @@ impl SettingsStore {
         }
         // Copy (never rename) the previous main out of the way so the live
         // settings.json is never absent from disk.
-        if self.path.exists() {
-            if let Err(error) = tokio::fs::copy(self.path.clone(), self.backup_path()).await {
-                tracing::warn!(%error, "failed to back up settings.json before overwrite");
-            }
+        if self.path.exists()
+            && let Err(error) = tokio::fs::copy(self.path.clone(), self.backup_path()).await
+        {
+            tracing::warn!(%error, "failed to back up settings.json before overwrite");
         }
         if let Err(error) = tokio::fs::rename(&temporary, &self.path).await {
             // main is untouched; drop the tmp and surface the error.

@@ -4,8 +4,9 @@ use crate::{
     sync::{
         backend::{CloudBackend, RemotePath},
         bundle::{
-            BundleLimits, DecodedBundle, ProtectionAlgorithm, SealedBundle, is_bundle_limit_error,
-            open_bundle_protected, open_released_v1_unchained_bundle_protected,
+            BundleHeader, BundleLimits, DecodedBundle, PreviousValidation, ProtectionAlgorithm,
+            SealedBundle, is_bundle_limit_error, open_bundle_protected,
+            open_released_v1_unchained_bundle_protected, parse_bundle_header,
             seal_bundle_protected_with_limits, seal_bundle_with_limits,
         },
         crypto::PayloadProtector,
@@ -53,14 +54,31 @@ pub struct HeadDocument {
     pub sha256: String,
 }
 
+/// A downloaded remote bundle kept as its raw envelope plus the validated
+/// plaintext header only. The decrypted, decompressed, deserialized heap is
+/// produced on demand at apply time so a pull chain never holds more than one
+/// decoded bundle in memory.
 struct RemoteBundleDownload {
-    decoded: DecodedBundle,
+    /// Compact raw envelope bytes; the cumulative size is capped by
+    /// MAX_PULL_CHAIN_BYTES during the chain walk.
+    raw: Vec<u8>,
+    /// Plaintext header validated by `parse_bundle_header` at download time.
+    /// Authenticity of these fields is only enforced at apply time via the
+    /// AAD-bound open.
+    header: BundleHeader,
     released_v1_unchained: bool,
     path: String,
     sha256: String,
-    /// Size of the raw (still-encrypted) envelope bytes downloaded for this
-    /// bundle, used to cap cumulative pull memory/bandwidth.
-    raw_bytes_len: usize,
+}
+
+/// Result of rebuilding a released-v1 writer's history: the legacy head is
+/// decoded once with its filtered pending changes, and the strict suffix keeps
+/// raw envelopes for streaming apply.
+struct ReleasedV1Replay {
+    head: DecodedBundle,
+    head_path: String,
+    head_sha256: String,
+    suffix: Vec<RemoteBundleDownload>,
 }
 
 struct ReleasedV1BundleCandidate {
@@ -459,7 +477,7 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
             let downloaded = self
                 .download_remote_bundle(&document, remote_device_id, compatibility)
                 .await?;
-            chain_bytes = chain_bytes.saturating_add(downloaded.raw_bytes_len);
+            chain_bytes = chain_bytes.saturating_add(downloaded.raw.len());
             if chain_bytes > MAX_PULL_CHAIN_BYTES {
                 return Err(AppError::InvalidData(
                     "remote bundle chain exceeded the cumulative byte budget".into(),
@@ -469,11 +487,12 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
                 released_v1_boundary = Some((document, downloaded));
                 break;
             }
-            let decoded = &downloaded.decoded;
+            // The plaintext header is all the walk needs; the decrypted heap
+            // stays untouched until apply time.
             current = match (
-                decoded.header.previous_path.clone(),
-                decoded.header.previous_sha256.clone(),
-                decoded.header.previous_end_seq,
+                downloaded.header.previous_path.clone(),
+                downloaded.header.previous_sha256.clone(),
+                downloaded.header.previous_end_seq,
             ) {
                 (Some(path), Some(sha256), Some(end_seq)) => Some(HeadDocument {
                     generation_id: self.generation_id.clone(),
@@ -491,67 +510,119 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
             };
             chain.push(downloaded);
         }
-        let requires_released_v1_reconstruction = released_v1_boundary.is_some();
-        if let Some((boundary, downloaded)) = released_v1_boundary {
-            chain = self
-                .reconstruct_released_v1_history(
-                    ReleasedV1Reconstruction {
-                        devices_path,
-                        remote_device_id,
-                        legacy_head: &boundary,
-                        cursor,
-                        cursor_anchor,
-                    },
-                    downloaded,
-                    chain,
-                )
-                .await?;
-        }
-
         let mut pulled = 0;
-        let ordered = if requires_released_v1_reconstruction {
-            chain
-        } else {
-            chain.into_iter().rev().collect()
-        };
-        for mut downloaded in ordered {
-            let expected = self
-                .store
-                .remote_cursor(&self.generation_id, remote_device_id)
-                .await?
-                .map(|value| value.cursor_seq)
-                .unwrap_or(cursor);
-            if downloaded.released_v1_unchained {
+        // Streaming apply: at most one bundle's decrypted heap is alive at any
+        // moment; the raw envelopes resident in memory are bounded by
+        // MAX_PULL_CHAIN_BYTES.
+        match released_v1_boundary {
+            Some((boundary, downloaded)) => {
+                let replay = self
+                    .reconstruct_released_v1_history(
+                        ReleasedV1Reconstruction {
+                            devices_path,
+                            remote_device_id,
+                            legacy_head: &boundary,
+                            cursor,
+                            cursor_anchor,
+                        },
+                        downloaded,
+                        chain,
+                    )
+                    .await?;
+                let mut head = replay.head;
+                let expected = self
+                    .store
+                    .remote_cursor(&self.generation_id, remote_device_id)
+                    .await?
+                    .map(|value| value.cursor_seq)
+                    .unwrap_or(cursor);
                 let covered_start = expected
                     .checked_add(1)
                     .ok_or_else(|| AppError::InvalidData("released v1 cursor overflow".into()))?;
-                downloaded.decoded.header.start_seq = covered_start;
-                downloaded.decoded.contents.start_seq = covered_start;
-                downloaded.decoded.header.previous_path = None;
-                downloaded.decoded.header.previous_sha256 = None;
-                downloaded.decoded.header.previous_end_seq = (expected > 0).then_some(expected);
-                downloaded.decoded.contents.previous_path = None;
-                downloaded.decoded.contents.previous_sha256 = None;
-                downloaded.decoded.contents.previous_end_seq =
-                    downloaded.decoded.header.previous_end_seq;
+                head.header.start_seq = covered_start;
+                head.contents.start_seq = covered_start;
+                head.header.previous_path = None;
+                head.header.previous_sha256 = None;
+                head.header.previous_end_seq = (expected > 0).then_some(expected);
+                head.contents.previous_path = None;
+                head.contents.previous_sha256 = None;
+                head.contents.previous_end_seq = head.header.previous_end_seq;
+                let anchor = RemoteObjectAnchor {
+                    end_seq: head.header.end_seq,
+                    path: replay.head_path,
+                    sha256: replay.head_sha256,
+                };
+                let outcome = merger
+                    .apply_bundle(
+                        &self.generation_id,
+                        remote_device_id,
+                        expected,
+                        &head,
+                        &anchor,
+                    )
+                    .await?;
+                pulled += outcome.applied;
+                for downloaded in replay.suffix {
+                    pulled += self
+                        .decode_and_apply_bundle(merger, remote_device_id, downloaded)
+                        .await?;
+                }
             }
-            let anchor = RemoteObjectAnchor {
-                end_seq: downloaded.decoded.header.end_seq,
-                path: downloaded.path.clone(),
-                sha256: downloaded.sha256.clone(),
-            };
-            let outcome = merger
-                .apply_bundle(
-                    &self.generation_id,
-                    remote_device_id,
-                    expected,
-                    &downloaded.decoded,
-                    &anchor,
-                )
-                .await?;
-            pulled += outcome.applied;
+            None => {
+                for downloaded in chain.into_iter().rev() {
+                    pulled += self
+                        .decode_and_apply_bundle(merger, remote_device_id, downloaded)
+                        .await?;
+                }
+            }
         }
         Ok(pulled)
+    }
+
+    /// Decodes one raw envelope — enforcing, through the AAD-bound open, the
+    /// authenticity of the header fields that drove the chain walk — and
+    /// applies it against the live cursor. The decoded heap is dropped as soon
+    /// as the call returns.
+    async fn decode_and_apply_bundle(
+        &self,
+        merger: &MergeEngine,
+        remote_device_id: &str,
+        downloaded: RemoteBundleDownload,
+    ) -> Result<usize> {
+        let expected = self
+            .store
+            .remote_cursor(&self.generation_id, remote_device_id)
+            .await?
+            .map(|value| value.cursor_seq)
+            .unwrap_or(0);
+        let decoded = if downloaded.released_v1_unchained {
+            open_released_v1_unchained_bundle_protected(
+                &downloaded.raw,
+                &self.bundle_limits,
+                self.protector.as_deref(),
+            )?
+        } else {
+            open_bundle_protected(
+                &downloaded.raw,
+                &self.bundle_limits,
+                self.protector.as_deref(),
+            )?
+        };
+        let anchor = RemoteObjectAnchor {
+            end_seq: decoded.header.end_seq,
+            path: downloaded.path,
+            sha256: downloaded.sha256,
+        };
+        let outcome = merger
+            .apply_bundle(
+                &self.generation_id,
+                remote_device_id,
+                expected,
+                &decoded,
+                &anchor,
+            )
+            .await?;
+        Ok(outcome.applied)
     }
 
     async fn reconstruct_released_v1_history(
@@ -559,7 +630,7 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
         reconstruction: ReleasedV1Reconstruction<'_>,
         legacy_head_bundle: RemoteBundleDownload,
         strict_suffix: Vec<RemoteBundleDownload>,
-    ) -> Result<Vec<RemoteBundleDownload>> {
+    ) -> Result<ReleasedV1Replay> {
         let ReleasedV1Reconstruction {
             devices_path,
             remote_device_id,
@@ -623,20 +694,20 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
                     Some(VaultCompatibility::ReleasedV1Writers),
                 )
                 .await?;
-            candidate_bytes = candidate_bytes.saturating_add(bundle.raw_bytes_len);
+            candidate_bytes = candidate_bytes.saturating_add(bundle.raw.len());
             if candidate_bytes > MAX_RELEASED_V1_BYTES {
                 return Err(AppError::InvalidData(
                     "released v1 bundle download exceeded the cumulative byte budget".into(),
                 ));
             }
-            if bundle.decoded.header.start_seq != start_seq {
+            if bundle.header.start_seq != start_seq {
                 return Err(AppError::InvalidData(
                     "released v1 bundle filename does not match its sequence range".into(),
                 ));
             }
-            let has_no_previous = bundle.decoded.header.previous_path.is_none()
-                && bundle.decoded.header.previous_sha256.is_none()
-                && bundle.decoded.header.previous_end_seq.is_none();
+            let has_no_previous = bundle.header.previous_path.is_none()
+                && bundle.header.previous_sha256.is_none()
+                && bundle.header.previous_end_seq.is_none();
             if bundle.released_v1_unchained || has_no_previous {
                 candidates.push(ReleasedV1BundleCandidate {
                     path: path_display,
@@ -648,7 +719,7 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
         if !candidates.iter().any(|candidate| {
             candidate.path == legacy_head.path
                 && candidate.sha256 == legacy_head.sha256
-                && candidate.bundle.decoded.header.end_seq == legacy_head.end_seq
+                && candidate.bundle.header.end_seq == legacy_head.end_seq
         }) {
             return Err(AppError::InvalidData(
                 "released v1 authoritative head bundle was not found in immutable history".into(),
@@ -662,7 +733,7 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
             if !candidates.iter().any(|candidate| {
                 candidate.path == anchor.path
                     && candidate.sha256 == anchor.sha256
-                    && candidate.bundle.decoded.header.end_seq == anchor.end_seq
+                    && candidate.bundle.header.end_seq == anchor.end_seq
             }) {
                 return Err(AppError::SyncProtocol(
                     "released v1 immutable history no longer contains the persisted cursor anchor"
@@ -671,9 +742,12 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
             }
         }
 
+        // Decode one candidate at a time; only the deduplicated event map
+        // (bounded by MAX_RELEASED_V1_EVENTS) stays resident across candidates.
         let mut unique_events = BTreeMap::<i64, BundleChange>::new();
         for candidate in &candidates {
-            for change in &candidate.bundle.decoded.contents.changes {
+            let decoded = self.open_stored_bundle(&candidate.bundle)?;
+            for change in &decoded.contents.changes {
                 match unique_events.get(&change.local_seq) {
                     Some(existing) if existing == change => {}
                     Some(_) => {
@@ -705,25 +779,20 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
             ));
         }
 
-        let mut decoded = legacy_head_bundle.decoded;
-        decoded.contents.changes = pending;
-        decoded.contents.start_seq = decoded
+        // The legacy head is decoded exactly once here; its surviving decoded
+        // heap is the only one carried out of the reconstruction.
+        let mut head = self.open_stored_bundle(&legacy_head_bundle)?;
+        head.contents.changes = pending;
+        head.contents.start_seq = head
             .contents
             .changes
             .first()
             .map(|change| change.local_seq)
             .ok_or_else(|| AppError::InvalidData("released v1 history is empty".into()))?;
-        decoded.header.start_seq = decoded.contents.start_seq;
-        let mut reconstructed = vec![RemoteBundleDownload {
-            decoded,
-            released_v1_unchained: true,
-            path: legacy_head.path.clone(),
-            sha256: legacy_head.sha256.clone(),
-            raw_bytes_len: legacy_head_bundle.raw_bytes_len,
-        }];
+        head.header.start_seq = head.contents.start_seq;
 
         if let Some(oldest_current) = strict_suffix.last() {
-            let header = &oldest_current.decoded.header;
+            let header = &oldest_current.header;
             if header.previous_path.as_deref() != Some(legacy_head.path.as_str())
                 || header.previous_sha256.as_deref() != Some(legacy_head.sha256.as_str())
                 || header.previous_end_seq != Some(legacy_head.end_seq)
@@ -733,8 +802,27 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
                 ));
             }
         }
-        reconstructed.extend(strict_suffix.into_iter().rev());
-        Ok(reconstructed)
+        Ok(ReleasedV1Replay {
+            head,
+            head_path: legacy_head.path.clone(),
+            head_sha256: legacy_head.sha256.clone(),
+            suffix: strict_suffix.into_iter().rev().collect(),
+        })
+    }
+
+    /// Opens a downloaded bundle with the variant its header classification
+    /// selected at download time, so the decode is guaranteed to succeed
+    /// whenever the header parse did.
+    fn open_stored_bundle(&self, bundle: &RemoteBundleDownload) -> Result<DecodedBundle> {
+        if bundle.released_v1_unchained {
+            open_released_v1_unchained_bundle_protected(
+                &bundle.raw,
+                &self.bundle_limits,
+                self.protector.as_deref(),
+            )
+        } else {
+            open_bundle_protected(&bundle.raw, &self.bundle_limits, self.protector.as_deref())
+        }
     }
 
     async fn download_verified_bundle(
@@ -750,7 +838,12 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
                 "released v1 unchained bundle is not valid in a current bundle chain".into(),
             ));
         }
-        Ok(downloaded.decoded)
+        // Single-bundle decode for the caller; the heap is dropped on return.
+        open_bundle_protected(
+            &downloaded.raw,
+            &self.bundle_limits,
+            self.protector.as_deref(),
+        )
     }
 
     async fn download_remote_bundle(
@@ -771,20 +864,25 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
                 "remote bundle SHA-256 does not match its chain reference".into(),
             ));
         }
-        let (decoded, released_v1_unchained) = match open_bundle_protected(
+        // Structural header validation only: the plaintext header drives the
+        // chain walk, while authenticity is enforced later at apply time by
+        // the AAD-bound decrypt.
+        let (header, released_v1_unchained) = match parse_bundle_header(
             &object.bytes,
             &self.bundle_limits,
             self.protector.as_deref(),
+            PreviousValidation::StrictChain,
         ) {
-            Ok(decoded) => (decoded, false),
+            Ok(header) => (header, false),
             Err(strict_error) => {
-                match open_released_v1_unchained_bundle_protected(
+                match parse_bundle_header(
                     &object.bytes,
                     &self.bundle_limits,
                     self.protector.as_deref(),
+                    PreviousValidation::ReleasedV1Unchained,
                 ) {
-                    Ok(decoded) if compatibility == Some(VaultCompatibility::ReleasedV1Writers) => {
-                        (decoded, true)
+                    Ok(header) if compatibility == Some(VaultCompatibility::ReleasedV1Writers) => {
+                        (header, true)
                     }
                     Ok(_) => {
                         return Err(AppError::SyncProtocol(
@@ -795,21 +893,21 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
                 }
             }
         };
-        if decoded.header.vault_id != self.vault_id
-            || decoded.header.generation_id != self.generation_id
-            || decoded.header.device_id != remote_device_id
-            || decoded.header.end_seq != document.end_seq
+        if header.vault_id != self.vault_id
+            || header.generation_id != self.generation_id
+            || header.device_id != remote_device_id
+            || header.end_seq != document.end_seq
         {
             return Err(AppError::InvalidData(
                 "remote bundle does not match its chain reference".into(),
             ));
         }
         Ok(RemoteBundleDownload {
-            decoded,
+            raw: object.bytes,
+            header,
             released_v1_unchained,
             path: document.path.clone(),
             sha256: document.sha256.clone(),
-            raw_bytes_len: object.bytes.len(),
         })
     }
 
