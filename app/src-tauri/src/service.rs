@@ -306,6 +306,7 @@ impl AppService {
     ) -> Result<Self> {
         let build_started = std::time::Instant::now();
         let settings_value = settings.get().await;
+        let semantic_enabled = settings_value.semantic_search.enabled;
         let embeddings = {
             let started = std::time::Instant::now();
             let manager =
@@ -344,6 +345,16 @@ impl AppService {
         );
         if role == ServiceRole::Desktop {
             semantic.start_worker();
+        }
+        if semantic_enabled {
+            // Warm the local model concurrently with first-screen rendering so
+            // neither the first search nor the first index batch pays the
+            // weight-loading stall. Applies to MCP too: its search surface
+            // uses the same backend.
+            let semantic_for_warmup = Arc::clone(&semantic);
+            tauri::async_runtime::spawn(async move {
+                semantic_for_warmup.warm_up_backend().await;
+            });
         }
         let sync_store = SyncStore::new(pool.clone());
         let credentials: Arc<dyn CredentialStore> =

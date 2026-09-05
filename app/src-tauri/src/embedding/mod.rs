@@ -37,6 +37,13 @@ pub trait EmbeddingBackend: Send + Sync {
     fn is_ready(&self) -> bool {
         true
     }
+    /// Best-effort background warm-up: pre-loads heavy local resources so the
+    /// first embed/search does not pay a load stall. The default is a no-op
+    /// for backends with nothing to pre-load (HTTP) or that already load
+    /// lazily on first use.
+    async fn warm_up(&self) -> Result<()> {
+        Ok(())
+    }
     fn runtime_device(&self) -> Option<String> {
         None
     }

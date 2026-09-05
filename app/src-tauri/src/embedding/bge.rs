@@ -287,6 +287,12 @@ impl EmbeddingBackend for LocalBgeBackend {
         model_files_present(&self.model_dir) && self.is_loaded()
     }
 
+    async fn warm_up(&self) -> Result<()> {
+        // ensure_loaded is idempotent and serialized by load_gate, so a
+        // background warm-up can safely race the first embed request.
+        self.ensure_loaded().await
+    }
+
     fn runtime_device(&self) -> Option<String> {
         Some(self.runtime_device_label())
     }

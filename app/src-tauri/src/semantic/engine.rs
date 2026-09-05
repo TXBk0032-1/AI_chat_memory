@@ -136,6 +136,32 @@ impl SemanticEngine {
         self.embeddings.read().await.clear_cancel();
     }
 
+    /// Pre-loads the active local model in the background so the first embed
+    /// or search does not pay the weight-loading stall. Reads the current
+    /// manager at call time: if a reload swapped the backend first, this
+    /// warms the new backend instead. Failures are logged, never surfaced —
+    /// the regular lazy load path still covers them.
+    pub async fn warm_up_backend(&self) {
+        let manager = self.embeddings.read().await;
+        if !manager.settings().enabled || manager.is_ready() {
+            return;
+        }
+        let backend = manager.active();
+        drop(manager);
+        let started = std::time::Instant::now();
+        match backend.warm_up().await {
+            Ok(()) => tracing::info!(
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "semantic backend warmed up in background"
+            ),
+            Err(error) => tracing::warn!(
+                %error,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "semantic backend background warmup failed; falling back to lazy load"
+            ),
+        }
+    }
+
     pub async fn request_session_index(&self, session_id: &str) -> Result<()> {
         // A leftover latched cancel flag would make every embed abort
         // immediately; new incremental work implies indexing is wanted again.
@@ -883,7 +909,7 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use sqlx::sqlite::SqlitePoolOptions;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use crate::{
         embedding::{BackendIdentity, EmbeddingBackend},
@@ -1370,5 +1396,107 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    /// Tracks warm_up calls and flips to ready after the first warm-up.
+    struct WarmTrackingBackend {
+        warmups: Arc<AtomicUsize>,
+        ready: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl EmbeddingBackend for WarmTrackingBackend {
+        fn identity(&self) -> BackendIdentity {
+            BackendIdentity {
+                backend: EmbeddingBackendKind::Local,
+                backend_id: "local".into(),
+                model_id: "test".into(),
+                dimensions: 8,
+            }
+        }
+
+        fn is_ready(&self) -> bool {
+            self.ready.load(Ordering::SeqCst)
+        }
+
+        async fn warm_up(&self) -> Result<()> {
+            self.warmups.fetch_add(1, Ordering::SeqCst);
+            self.ready.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            Ok(vec![vec![0.0; 8]; texts.len()])
+        }
+
+        async fn embed_queries(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            Ok(vec![vec![0.0; 8]; texts.len()])
+        }
+
+        async fn healthcheck(&self) -> Result<EmbeddingHealth> {
+            Ok(EmbeddingHealth {
+                ok: true,
+                backend: EmbeddingBackendKind::Local,
+                model_id: "test".into(),
+                dimensions: Some(8),
+                message: "ok".into(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn warm_up_runs_once_until_backend_is_ready() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let warmups = Arc::new(AtomicUsize::new(0));
+        let ready = Arc::new(AtomicBool::new(false));
+        let manager = EmbeddingManager::from_backend_for_test(
+            std::env::temp_dir(),
+            SemanticSearchSettings {
+                enabled: true,
+                backend: EmbeddingBackendKind::Local,
+                ..SemanticSearchSettings::default()
+            },
+            Arc::new(WarmTrackingBackend {
+                warmups: warmups.clone(),
+                ready: ready.clone(),
+            }),
+        );
+        let engine = SemanticEngine::new(pool, std::env::temp_dir(), manager);
+
+        engine.warm_up_backend().await;
+        assert_eq!(warmups.load(Ordering::SeqCst), 1);
+        // Once the backend reports ready, repeated warm-ups are no-ops.
+        engine.warm_up_backend().await;
+        assert_eq!(warmups.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn warm_up_skips_when_semantic_disabled() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let warmups = Arc::new(AtomicUsize::new(0));
+        let manager = EmbeddingManager::from_backend_for_test(
+            std::env::temp_dir(),
+            SemanticSearchSettings {
+                enabled: false,
+                backend: EmbeddingBackendKind::Local,
+                ..SemanticSearchSettings::default()
+            },
+            Arc::new(WarmTrackingBackend {
+                warmups: warmups.clone(),
+                ready: Arc::new(AtomicBool::new(false)),
+            }),
+        );
+        let engine = SemanticEngine::new(pool, std::env::temp_dir(), manager);
+
+        engine.warm_up_backend().await;
+        assert_eq!(warmups.load(Ordering::SeqCst), 0);
     }
 }
