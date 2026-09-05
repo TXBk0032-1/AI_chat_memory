@@ -1,5 +1,6 @@
 use crate::{
     error::{AppError, Result},
+    semantic::engine::SemanticEngine,
     sync::{
         backend::{CloudBackend, RemotePath},
         bundle::{
@@ -217,6 +218,7 @@ pub struct SyncEngine<B: ?Sized> {
     protector: Option<Arc<dyn PayloadProtector>>,
     bundle_limits: BundleLimits,
     single_flight: Mutex<()>,
+    semantic: Option<Arc<SemanticEngine>>,
 }
 
 impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
@@ -296,7 +298,15 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
             protector,
             bundle_limits: BundleLimits::default(),
             single_flight: Mutex::new(()),
+            semantic: None,
         }
+    }
+
+    /// Attaches the semantic engine so pulled remote snapshots wake up vector
+    /// re-indexing and stale vectors get cleaned through the merge path.
+    pub fn with_semantic(mut self, semantic: Option<Arc<SemanticEngine>>) -> Self {
+        self.semantic = semantic;
+        self
     }
 
     #[cfg(test)]
@@ -360,7 +370,7 @@ impl<B: CloudBackend + ?Sized + 'static> SyncEngine<B> {
             Err(error) if error.kind() == "not_found" => return Ok(SyncReport::default()),
             Err(error) => return Err(cloud_error(error)),
         };
-        let merger = MergeEngine::new(self.store.pool().clone(), None);
+        let merger = MergeEngine::new(self.store.pool().clone(), self.semantic.clone());
         let mut report = SyncReport::default();
         for entry in entries.into_iter().filter(|entry| {
             entry.is_collection

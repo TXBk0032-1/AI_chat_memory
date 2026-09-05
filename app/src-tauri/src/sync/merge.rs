@@ -187,6 +187,92 @@ mod tests {
                 .is_err()
         );
     }
+
+    #[tokio::test]
+    async fn upsert_snapshot_overwrite_clears_stale_embedding_chunks_and_vectors() {
+        let pool = pool().await;
+        sqlx::query("DROP TABLE IF EXISTS embedding_vec;")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE VIRTUAL TABLE embedding_vec USING vec0(
+                chunk_id INTEGER PRIMARY KEY,
+                embedding float[4] distance_metric=cosine,
+                +session_id TEXT,
+                +message_id TEXT,
+                +platform TEXT
+            );",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        let engine = MergeEngine::new(pool.clone(), None);
+        engine
+            .apply_bundle(
+                "generation",
+                "remote",
+                0,
+                &bundle(1, 10, MutationOperation::Upsert),
+                &anchor(1),
+            )
+            .await
+            .unwrap();
+        let session_id: String = sqlx::query_scalar("SELECT id FROM sessions")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO embedding_chunks
+             (message_id, session_id, platform, chunk_index, role, text, content_hash,
+              backend_id, model_id, dim, status, updated_at)
+             VALUES ('m1', ?, 'chat', 0, 'user', 'stale text', 'hash', 'local', 'model', 4,
+                     'ready', '2026-01-01T00:00:00Z')",
+        )
+        .bind(&session_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let chunk_id: i64 = sqlx::query_scalar("SELECT id FROM embedding_chunks")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let embedding: Vec<u8> = [1.0f32, 2.0, 3.0, 4.0]
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        sqlx::query(
+            "INSERT INTO embedding_vec(chunk_id, embedding, session_id, message_id, platform)
+             VALUES (?, ?, ?, 'm1', 'chat')",
+        )
+        .bind(chunk_id)
+        .bind(&embedding)
+        .bind(&session_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        engine
+            .apply_bundle(
+                "generation",
+                "remote",
+                1,
+                &bundle(2, 11, MutationOperation::Upsert),
+                &anchor(2),
+            )
+            .await
+            .unwrap();
+
+        let chunks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM embedding_chunks")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let vectors: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM embedding_vec")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!((chunks, vectors), (0, 0));
+    }
 }
 use crate::{
     error::{AppError, Result},
@@ -437,6 +523,28 @@ async fn upsert_snapshot_in(
     .fetch_optional(&mut **tx)
     .await?;
     let id = existing.unwrap_or_else(|| format!("sync-{}", uuid::Uuid::new_v4()));
+    // Mirror delete_by_key_in: an overwrite must drop the session's stale
+    // embedding chunks and vectors, or stale vectors keep matching search
+    // queries for messages that no longer exist.
+    let has_chunks_table: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'embedding_chunks')",
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .unwrap_or(false);
+
+    if has_chunks_table {
+        let chunk_ids: Vec<i64> =
+            sqlx::query_scalar("SELECT id FROM embedding_chunks WHERE session_id = ?")
+                .bind(&id)
+                .fetch_all(&mut **tx)
+                .await?;
+        crate::database::delete_embedding_vectors_in(&mut *tx, &chunk_ids).await?;
+        sqlx::query("DELETE FROM embedding_chunks WHERE session_id = ?")
+            .bind(&id)
+            .execute(&mut **tx)
+            .await?;
+    }
     sqlx::query(
         "INSERT INTO sessions (id, platform, platform_session_id, title, created_at, updated_at, imported_at, raw_data)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)

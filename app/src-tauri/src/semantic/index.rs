@@ -308,7 +308,30 @@ pub async fn mark_chunks_ready(
 
     let mut insert_ms = 0u128;
     let mut update_ms = 0u128;
+    let mut skipped_stale = 0usize;
     for (chunk_id, session_id, message_id, platform, bytes) in &prepared {
+        // Claim the chunk first: a concurrent snapshot overwrite may have
+        // deleted it, and inserting a vector for a missing chunk would leave
+        // an orphan row behind.
+        let update_started = std::time::Instant::now();
+        let claimed = sqlx::query(
+            "UPDATE embedding_chunks SET status = 'ready', error = NULL, dim = ?, updated_at = ? WHERE id = ? AND status = 'pending'",
+        )
+        .bind(identity.dimensions as i64)
+        .bind(&now)
+        .bind(chunk_id)
+        .execute(&mut *tx)
+        .await?;
+        update_ms += update_started.elapsed().as_millis();
+        if claimed.rows_affected() == 0 {
+            skipped_stale += 1;
+            tracing::debug!(
+                chunk_id = *chunk_id,
+                "chunk is no longer pending; dropping its vector"
+            );
+            continue;
+        }
+
         let insert_started = std::time::Instant::now();
         sqlx::query(
             "INSERT INTO embedding_vec(chunk_id, embedding, session_id, message_id, platform) VALUES (?, ?, ?, ?, ?)",
@@ -321,17 +344,6 @@ pub async fn mark_chunks_ready(
         .execute(&mut *tx)
         .await?;
         insert_ms += insert_started.elapsed().as_millis();
-
-        let update_started = std::time::Instant::now();
-        sqlx::query(
-            "UPDATE embedding_chunks SET status = 'ready', error = NULL, dim = ?, updated_at = ? WHERE id = ?",
-        )
-        .bind(identity.dimensions as i64)
-        .bind(&now)
-        .bind(chunk_id)
-        .execute(&mut *tx)
-        .await?;
-        update_ms += update_started.elapsed().as_millis();
     }
     let commit_started = std::time::Instant::now();
     tx.commit().await?;
@@ -340,6 +352,7 @@ pub async fn mark_chunks_ready(
     tracing::info!(
         batch_size = items.len(),
         existing_vectors = existing_ids.len(),
+        skipped_stale,
         prepare_ms,
         delete_ms,
         insert_ms,
@@ -1182,5 +1195,78 @@ mod tests {
             "target-session chunk must be recalled even when other sessions have higher similarity"
         );
         assert_eq!(hits[0].message_id, "msg-3");
+    }
+
+    #[tokio::test]
+    async fn mark_chunks_ready_skips_vectors_for_non_pending_chunks() {
+        connection::register_sqlite_vec();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::raw_sql(
+            "CREATE TABLE embedding_chunks (
+                id INTEGER PRIMARY KEY,
+                message_id TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                backend_id TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                dim INTEGER,
+                error TEXT,
+                status TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+             CREATE VIRTUAL TABLE embedding_vec USING vec0(
+                chunk_id INTEGER PRIMARY KEY,
+                embedding float[4] distance_metric=cosine,
+                +session_id TEXT,
+                +message_id TEXT,
+                +platform TEXT
+             );",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO embedding_chunks (id, message_id, session_id, backend_id, model_id, status, updated_at)
+             VALUES (1, 'm1', 's1', 'local', 'test', 'pending', 't'),
+                   (2, 'm2', 's1', 'local', 'test', 'ready', 't')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let identity = BackendIdentity {
+            backend: EmbeddingBackendKind::Local,
+            backend_id: "local".into(),
+            model_id: "test".into(),
+            dimensions: 4,
+        };
+        mark_chunks_ready(
+            &pool,
+            &identity,
+            &[
+                (1, "s1", "m1", "chatgpt", vec![0.1, 0.2, 0.3, 0.4]),
+                // Chunk 2 lost its 'pending' state (concurrent overwrite); its
+                // vector must be dropped instead of written as an orphan.
+                (2, "s1", "m2", "chatgpt", vec![0.5, 0.6, 0.7, 0.8]),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let vector_chunk_ids: Vec<i64> =
+            sqlx::query_scalar("SELECT chunk_id FROM embedding_vec ORDER BY chunk_id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(vector_chunk_ids, vec![1]);
+        let statuses: Vec<(i64, String)> =
+            sqlx::query_as("SELECT id, status FROM embedding_chunks ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(statuses, vec![(1, "ready".into()), (2, "ready".into())]);
     }
 }

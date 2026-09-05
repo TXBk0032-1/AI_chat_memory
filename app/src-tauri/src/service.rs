@@ -622,7 +622,8 @@ impl AppService {
                 device.device_id,
                 current.protection,
                 old_protector,
-            );
+            )
+            .with_semantic(Some(self.semantic.clone()));
             match engine
                 .rotate_generation_with_operation(
                     &new_generation,
@@ -1168,7 +1169,8 @@ impl AppService {
             device.device_id.clone(),
             remote_vault.protection,
             protector,
-        );
+        )
+        .with_semantic(Some(self.semantic.clone()));
         engine
             .run_once_with_generation_replay(SyncTrigger::Manual)
             .await?;
@@ -1237,7 +1239,8 @@ impl AppService {
             device.device_id.clone(),
             current.protection.clone(),
             protector.clone(),
-        );
+        )
+        .with_semantic(Some(self.semantic.clone()));
         if let Err(error) = old_engine.rewrite_generation(&new_generation).await {
             self.cleanup_unactivated_generation(backend.as_ref(), &old_generation, &new_generation)
                 .await;
@@ -1289,7 +1292,8 @@ impl AppService {
             device.device_id.clone(),
             current.protection,
             protector,
-        );
+        )
+        .with_semantic(Some(self.semantic.clone()));
         new_engine
             .run_once_with_generation_replay(SyncTrigger::Manual)
             .await?;
