@@ -1,6 +1,6 @@
 use super::super::{
     AppService, CloudSyncCommand, CloudSyncRuntime, CloudSyncScheduler, CloudSyncWorkerState,
-    VaultPassphrase, VaultVerification, classify_cloud_error, import_local_sessions,
+    ServiceRole, VaultPassphrase, VaultVerification, classify_cloud_error, import_local_sessions,
     map_cloud_error, prepare_cloud_sync_transition, validate_cloud_sync_update,
 };
 use crate::{
@@ -88,6 +88,7 @@ async fn service_with_local_session_fixture() -> (AppService, PathBuf) {
             pool: pool.clone(),
             settings,
             semantic,
+            role: ServiceRole::Desktop,
             api_status: Arc::new(RwLock::new(ApiStatus::Starting)),
             last_userscript_request_at: Arc::new(RwLock::new(None)),
             sync_store: SyncStore::new(pool),
@@ -975,6 +976,7 @@ async fn restart_reconciles_a_committed_generation_before_selecting_credentials(
         pool: service.pool.clone(),
         settings: reloaded_settings,
         semantic: service.semantic.clone(),
+        role: ServiceRole::Desktop,
         api_status: Arc::new(RwLock::new(ApiStatus::Starting)),
         last_userscript_request_at: Arc::new(RwLock::new(None)),
         sync_store: SyncStore::new(service.pool.clone()),

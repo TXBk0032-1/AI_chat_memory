@@ -235,11 +235,24 @@ fn current_epoch_millis() -> Result<i64> {
         .map_err(|_| AppError::InvalidData("system clock is outside the supported range".into()))
 }
 
+/// Which autonomous background responsibilities an [`AppService`] owns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceRole {
+    /// Desktop GUI: owns every self-scheduled background worker (semantic
+    /// indexing, cloud sync scheduling).
+    Desktop,
+    /// MCP stdio process: a read/query surface only; it must not spawn
+    /// autonomous workers that would fight the desktop process over the same
+    /// SQLite database and local embedding model.
+    McpStdio,
+}
+
 #[derive(Clone)]
 pub struct AppService {
     pool: SqlitePool,
     settings: Arc<SettingsStore>,
     semantic: Arc<SemanticEngine>,
+    role: ServiceRole,
     api_status: Arc<RwLock<ApiStatus>>,
     last_userscript_request_at: Arc<RwLock<Option<u64>>>,
     sync_store: SyncStore,
@@ -272,6 +285,25 @@ impl AppService {
         settings: Arc<SettingsStore>,
         data_dir: PathBuf,
     ) -> Result<Self> {
+        Self::build(pool, settings, data_dir, ServiceRole::Desktop).await
+    }
+
+    /// MCP stdio constructor: skips both self-scheduled workers; manual sync
+    /// requests are rejected in `sync_now_direct`.
+    pub async fn new_for_mcp_stdio(
+        pool: SqlitePool,
+        settings: Arc<SettingsStore>,
+        data_dir: PathBuf,
+    ) -> Result<Self> {
+        Self::build(pool, settings, data_dir, ServiceRole::McpStdio).await
+    }
+
+    async fn build(
+        pool: SqlitePool,
+        settings: Arc<SettingsStore>,
+        data_dir: PathBuf,
+        role: ServiceRole,
+    ) -> Result<Self> {
         let settings_value = settings.get().await;
         let embeddings =
             EmbeddingManager::from_settings(data_dir.clone(), settings_value.semantic_search)
@@ -289,7 +321,9 @@ impl AppService {
         )
         .await?;
         let semantic = Arc::new(SemanticEngine::new(pool.clone(), data_dir, embeddings));
-        semantic.start_worker();
+        if role == ServiceRole::Desktop {
+            semantic.start_worker();
+        }
         let sync_store = SyncStore::new(pool.clone());
         let credentials: Arc<dyn CredentialStore> =
             Arc::new(SystemCredentialStore::new("ai-chat-memory"));
@@ -298,6 +332,7 @@ impl AppService {
             pool,
             settings,
             semantic,
+            role,
             api_status: Arc::new(RwLock::new(ApiStatus::Starting)),
             last_userscript_request_at: Arc::new(RwLock::new(None)),
             sync_store,
@@ -307,7 +342,9 @@ impl AppService {
             cloud_sync_runtime: Arc::new(RwLock::new(CloudSyncRuntime::default())),
             shutdown: Arc::new(AtomicBool::new(false)),
         };
-        service.start_cloud_sync_worker(worker_receiver);
+        if role == ServiceRole::Desktop {
+            service.start_cloud_sync_worker(worker_receiver);
+        }
         Ok(service)
     }
 
@@ -1104,6 +1141,14 @@ impl AppService {
     }
 
     async fn sync_now_direct(&self) -> Result<CloudSyncStatus> {
+        // The MCP stdio process must not touch the cloud archive: it has no
+        // scheduled worker, and a manual sync here would race the desktop
+        // process over the same generation chain.
+        if self.role == ServiceRole::McpStdio {
+            return Err(AppError::Configuration(
+                "MCP stdio 进程不支持手动云同步：请在桌面应用中执行".into(),
+            ));
+        }
         self.ensure_writable()?;
         let _guard = self.sync_gate.lock().await;
         let settings = self.settings().await;

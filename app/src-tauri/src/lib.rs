@@ -210,6 +210,9 @@ pub async fn run_mcp_stdio() -> error::Result<()> {
     let working_dir = std::env::current_dir().ok();
     let settings = Arc::new(SettingsStore::load(data_dir.join("settings.json")).await?);
     let settings_value = settings.get().await;
+    // Fast-fail before opening the database: an opted-out MCP invocation must
+    // not pay for a full service bootstrap (SQLite open + embedding manager).
+    ensure_mcp_enabled(settings_value.mcp_enabled)?;
     let configured_dir = settings_value
         .data_directory
         .as_ref()
@@ -229,8 +232,7 @@ pub async fn run_mcp_stdio() -> error::Result<()> {
         elapsed_ms = started.elapsed().as_millis(),
         "stdio MCP database ready"
     );
-    let service = AppService::new(pool, settings, database_dir).await?;
-    ensure_mcp_enabled(service.settings().await.mcp_enabled)?;
+    let service = AppService::new_for_mcp_stdio(pool, settings, database_dir).await?;
 
     let running = mcp::server::ChatMemoryMcp::new(service)
         .serve(rmcp::transport::io::stdio())
