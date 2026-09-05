@@ -15,7 +15,7 @@ mod tests {
     use serde_json::json;
     use sqlx::sqlite::SqlitePoolOptions;
 
-    async fn pool() -> sqlx::SqlitePool {
+    async fn merge_pool() -> sqlx::SqlitePool {
         register_sqlite_vec();
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
@@ -101,7 +101,7 @@ mod tests {
 
     #[tokio::test]
     async fn newer_delete_wins_older_update_is_ignored_without_outbox_echo() {
-        let pool = pool().await;
+        let pool = merge_pool().await;
         let engine = MergeEngine::new(pool.clone(), None);
         assert_eq!(
             engine
@@ -156,41 +156,129 @@ mod tests {
         assert_eq!((sessions, outbox), (0, 0));
     }
 
-    #[tokio::test]
-    async fn equal_version_different_hash_is_rejected_and_duplicate_bundle_is_idempotent() {
-        let pool = pool().await;
-        let engine = MergeEngine::new(pool.clone(), None);
-        let first = bundle(1, 10, MutationOperation::Upsert);
-        engine
-            .apply_bundle("generation", "remote", 0, &first, &anchor(1))
-            .await
-            .unwrap();
-        assert_eq!(
-            engine
-                .apply_bundle("generation", "remote", 1, &first, &anchor(1))
-                .await
-                .unwrap()
-                .ignored,
-            1
-        );
-        let mut conflicting = bundle(2, 10, MutationOperation::Upsert);
+    fn equal_version_conflict(seq: i64, title: &str, hash: &str) -> DecodedBundle {
+        let mut conflicting = bundle(seq, 10, MutationOperation::Upsert);
         conflicting.contents.changes[0]
             .snapshot
             .as_mut()
             .unwrap()
-            .title = "conflict".into();
-        conflicting.contents.changes[0].content_hash = Some("ef".repeat(32));
-        assert!(
-            engine
-                .apply_bundle("generation", "remote", 1, &conflicting, &anchor(2))
-                .await
-                .is_err()
+            .title = title.into();
+        conflicting.contents.changes[0].content_hash = Some(hash.to_string());
+        conflicting
+    }
+
+    async fn session_title(pool: &sqlx::SqlitePool) -> String {
+        sqlx::query_scalar("SELECT title FROM sessions")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn remote_cursor(pool: &sqlx::SqlitePool) -> i64 {
+        sqlx::query_scalar(
+            "SELECT cursor_seq FROM sync_remote_cursors WHERE remote_device_id = 'remote'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn equal_version_conflict_resolves_deterministically_and_advances_cursor() {
+        let pool = merge_pool().await;
+        let engine = MergeEngine::new(pool.clone(), None);
+        engine
+            .apply_bundle(
+                "generation",
+                "remote",
+                0,
+                &equal_version_conflict(1, "smaller", &"aa".repeat(32)),
+                &anchor(1),
+            )
+            .await
+            .unwrap();
+        assert_eq!(session_title(&pool).await, "smaller");
+
+        // A redelivery carrying the identical (operation, content_hash) key
+        // under the same version triple is idempotent and must be ignored.
+        let outcome = engine
+            .apply_bundle(
+                "generation",
+                "remote",
+                1,
+                &equal_version_conflict(2, "dup", &"aa".repeat(32)),
+                &anchor(2),
+            )
+            .await
+            .unwrap();
+        assert_eq!((outcome.applied, outcome.ignored), (0, 1));
+        assert_eq!(session_title(&pool).await, "smaller");
+
+        // A lexicographically greater (hash, operation) key wins the conflict,
+        // overwrites the local snapshot and still advances the cursor.
+        let outcome = engine
+            .apply_bundle(
+                "generation",
+                "remote",
+                2,
+                &equal_version_conflict(3, "greater", &"ff".repeat(32)),
+                &anchor(3),
+            )
+            .await
+            .unwrap();
+        assert_eq!((outcome.applied, outcome.ignored), (1, 0));
+        assert_eq!(session_title(&pool).await, "greater");
+        assert_eq!(remote_cursor(&pool).await, 3);
+
+        // A smaller key loses the arbitration but must not poison the stream:
+        // the transaction still commits and the cursor moves past the bundle.
+        let outcome = engine
+            .apply_bundle(
+                "generation",
+                "remote",
+                3,
+                &equal_version_conflict(4, "lost", &"80".repeat(32)),
+                &anchor(4),
+            )
+            .await
+            .unwrap();
+        assert_eq!((outcome.applied, outcome.ignored), (0, 1));
+        assert_eq!(session_title(&pool).await, "greater");
+        assert_eq!(remote_cursor(&pool).await, 4);
+
+        // Symmetric inputs converge: a replica receiving the same conflicts in
+        // the opposite order ends up with the identical winning snapshot.
+        let mirror_pool = merge_pool().await;
+        let mirror = MergeEngine::new(mirror_pool.clone(), None);
+        mirror
+            .apply_bundle(
+                "generation",
+                "remote",
+                0,
+                &equal_version_conflict(1, "greater", &"ff".repeat(32)),
+                &anchor(1),
+            )
+            .await
+            .unwrap();
+        mirror
+            .apply_bundle(
+                "generation",
+                "remote",
+                1,
+                &equal_version_conflict(2, "smaller", &"aa".repeat(32)),
+                &anchor(2),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            session_title(&mirror_pool).await,
+            session_title(&pool).await
         );
     }
 
     #[tokio::test]
     async fn upsert_snapshot_overwrite_clears_stale_embedding_chunks_and_vectors() {
-        let pool = pool().await;
+        let pool = merge_pool().await;
         sqlx::query("DROP TABLE IF EXISTS embedding_vec;")
             .execute(&pool)
             .await
@@ -381,15 +469,30 @@ impl MergeEngine {
                         continue;
                     }
                     std::cmp::Ordering::Equal => {
-                        if existing_operation == change.operation
-                            && existing_hash == change.content_hash
-                        {
+                        // Deterministic total order over (content_hash,
+                        // operation): every replica facing the same pair of
+                        // conflicting equal-version changes must pick the same
+                        // winner so the stream converges without stalling the
+                        // cursor. None < Some keeps hashed upserts ahead of
+                        // unhashed deletes, biasing towards preserving content.
+                        let existing_key = (existing_hash, existing_operation);
+                        let incoming_key = (change.content_hash.clone(), change.operation.clone());
+                        if existing_key == incoming_key {
                             outcome.ignored += 1;
                             continue;
                         }
-                        return Err(AppError::InvalidData(
-                            "remote equal-version content conflict".into(),
-                        ));
+                        tracing::warn!(
+                            platform = %change.key.platform,
+                            session = %change.key.platform_session_id,
+                            version_device = %change.version.device_id,
+                            existing_hash = ?existing_key.0,
+                            incoming_hash = ?incoming_key.0,
+                            "equal-version content conflict; resolving with deterministic tie-break"
+                        );
+                        if incoming_key < existing_key {
+                            outcome.ignored += 1;
+                            continue;
+                        }
                     }
                     std::cmp::Ordering::Greater => {}
                 }
