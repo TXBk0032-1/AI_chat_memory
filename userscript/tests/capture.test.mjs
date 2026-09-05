@@ -34,6 +34,12 @@ function plain(value) {
     return JSON.parse(JSON.stringify(value));
 }
 
+test('metadata block declares @connect so GM_xmlhttpRequest survives strict managers', () => {
+    const head = readFileSync(userscriptPath, 'utf8').split(/\r?\n/).slice(0, 50).join('\n');
+    assert.match(head, /^\/\/\s*@connect\s+\*\s*$/m, 'the metadata block must whitelist cross-origin download hosts via @connect *');
+    assert.match(head, /^\/\/\s*@grant\s+GM_xmlhttpRequest\s*$/m, 'the ZIP download relies on GM_xmlhttpRequest');
+});
+
 test('redacts credentials while preserving DeepSeek protocol metadata', () => {
     const { api } = loadTestApi();
     const redacted = api.CaptureRedactor.redactExchange({

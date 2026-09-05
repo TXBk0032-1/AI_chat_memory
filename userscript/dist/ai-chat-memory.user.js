@@ -9,6 +9,7 @@
 // @match        https://kimi.com/*
 // @match        https://www.kimi.com/*
 // @run-at       document-start
+// @connect      *
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_deleteValue
