@@ -687,6 +687,11 @@ fn embed_single_batch(
         })
         .collect::<Vec<_>>();
 
+    let sep_id = loaded
+        .tokenizer
+        .token_to_id("[SEP]")
+        .ok_or_else(|| AppError::Configuration("tokenizer is missing [SEP] token".into()))?;
+
     let mut encodings = Vec::with_capacity(prepared.len());
     let mut max_len = 1usize;
     for text in &prepared {
@@ -694,15 +699,13 @@ fn embed_single_batch(
             .tokenizer
             .encode(text.as_str(), true)
             .map_err(|error| AppError::Configuration(format!("tokenize failed: {error}")))?;
-        let mut ids = encoding.get_ids().to_vec();
+        let ids = encoding.get_ids().to_vec();
         if ids.is_empty() {
             return Err(AppError::Configuration(
                 "tokenizer produced empty input".into(),
             ));
         }
-        if ids.len() > MAX_SEQUENCE_LEN {
-            ids.truncate(MAX_SEQUENCE_LEN);
-        }
+        let ids = truncate_with_sep(ids, MAX_SEQUENCE_LEN, sep_id);
         max_len = max_len.max(ids.len());
         encodings.push(ids);
     }
@@ -773,6 +776,19 @@ fn embed_single_batch(
 
 fn candle_err(error: candle_core::Error) -> AppError {
     AppError::Configuration(error.to_string())
+}
+
+/// Truncate a token id sequence to `max_len` while keeping the trailing
+/// `[SEP]` marker so the encoder still sees a well-formed `[CLS] ... [SEP]`
+/// input. Sequences within the limit are returned unchanged.
+fn truncate_with_sep(mut ids: Vec<u32>, max_len: usize, sep_id: u32) -> Vec<u32> {
+    if ids.len() > max_len {
+        ids.truncate(max_len);
+        if let Some(last) = ids.last_mut() {
+            *last = sep_id;
+        }
+    }
+    ids
 }
 
 #[cfg(test)]
@@ -939,5 +955,42 @@ mod tests {
             let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
             assert!((norm - 1.0).abs() < 5e-2, "unexpected norm {norm}");
         }
+    }
+
+    #[test]
+    fn truncation_preserves_cls_and_sep_at_the_limit() {
+        let ids = vec![101, 10, 11, 12, 13, 102];
+        assert_eq!(truncate_with_sep(ids, 4, 102), vec![101, 10, 11, 102]);
+    }
+
+    #[test]
+    fn truncation_does_not_change_short_input() {
+        let ids = vec![101, 10, 102];
+        assert_eq!(truncate_with_sep(ids.clone(), 4, 102), ids);
+    }
+
+    #[test]
+    fn truncation_does_not_change_input_exactly_at_limit() {
+        let ids = vec![101, 10, 11, 102];
+        assert_eq!(truncate_with_sep(ids.clone(), 4, 102), ids);
+    }
+
+    #[test]
+    fn truncation_of_oversized_input_keeps_length_cls_and_sep() {
+        let cls_id = 101u32;
+        let sep_id = 102u32;
+        let mut ids = vec![cls_id];
+        ids.extend((1000..1000 + 2 * MAX_SEQUENCE_LEN as u32).collect::<Vec<u32>>());
+        ids.push(sep_id);
+
+        let truncated = truncate_with_sep(ids, MAX_SEQUENCE_LEN, sep_id);
+        assert_eq!(truncated.len(), MAX_SEQUENCE_LEN);
+        assert_eq!(truncated.first(), Some(&cls_id));
+        assert_eq!(truncated.last(), Some(&sep_id));
+        assert_eq!(truncated[1], 1000);
+        assert_eq!(
+            truncated[MAX_SEQUENCE_LEN - 2],
+            1000 + MAX_SEQUENCE_LEN as u32 - 3
+        );
     }
 }
