@@ -164,7 +164,7 @@ impl HttpEmbeddingBackend {
             let response = cancellable(send_request(request), cancellation).await?;
             if !response.status().is_success() {
                 let status = response.status();
-                let body = response.text().await.unwrap_or_default();
+                let body = error_body(response, cancellation).await?;
                 return Err(AppError::Configuration(format!(
                     "ollama embeddings failed ({status}): {body}"
                 )));
@@ -190,7 +190,7 @@ impl HttpEmbeddingBackend {
         let response = cancellable(send_request(request), cancellation).await?;
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = error_body(response, cancellation).await?;
             return Err(AppError::Configuration(format!(
                 "ollama embed batch failed ({status}): {body}"
             )));
@@ -233,7 +233,7 @@ impl HttpEmbeddingBackend {
         let response = cancellable(send_request(request), cancellation).await?;
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = error_body(response, cancellation).await?;
             return Err(AppError::Configuration(format!(
                 "openai-compatible embeddings failed ({status}): {body}"
             )));
@@ -278,6 +278,21 @@ async fn parse_json<T: serde::de::DeserializeOwned>(response: reqwest::Response)
         .json()
         .await
         .map_err(|error| AppError::Configuration(error.to_string()))
+}
+
+/// Reads the body of a non-2xx response for the error message. The read races
+/// `cancellation` like every other network await: a cancelled task returns
+/// `Err(Cancelled)` instead of waiting on a slow error body until the client
+/// timeout. Body read failures degrade to an empty body, never to an error.
+async fn error_body(
+    response: reqwest::Response,
+    cancellation: Option<&CancellationToken>,
+) -> Result<String> {
+    cancellable(
+        async { Ok(response.text().await.unwrap_or_default()) },
+        cancellation,
+    )
+    .await
 }
 
 /// True when a configured api_key would travel over plaintext http to a
@@ -521,16 +536,90 @@ mod tests {
         );
     }
 
+    /// Reads from `socket` until the end of the HTTP request headers so the
+    /// client is known to be waiting on the response (never mid-connect).
+    async fn read_request_headers(socket: &mut tokio::net::TcpStream) {
+        use tokio::io::AsyncReadExt;
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 1024];
+        loop {
+            let read = socket.read(&mut chunk).await.unwrap();
+            if read == 0 {
+                break;
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+            if buffer.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+    }
+
+    /// Spawns a fixture that accepts one connection, reads the request
+    /// headers, writes `prefix` (possibly nothing) and then holds the socket
+    /// open without ever finishing the response until the task is aborted.
+    /// The returned receiver fires once the request headers have arrived.
+    fn spawn_hanging_server(
+        listener: tokio::net::TcpListener,
+        prefix: &'static str,
+    ) -> (
+        tokio::task::JoinHandle<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let (request_seen_tx, request_seen_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_request_headers(&mut socket).await;
+            if !prefix.is_empty() {
+                socket.write_all(prefix.as_bytes()).await.unwrap();
+                socket.flush().await.unwrap();
+            }
+            request_seen_tx.send(()).unwrap();
+            // Hold the socket (never answer) until the test aborts this task;
+            // the client side would otherwise stay pending up to its 60s timeout.
+            std::future::pending::<()>().await;
+            drop(socket);
+        });
+        (server, request_seen_rx)
+    }
+
+    /// Drives `request` (bounded by 250ms) concurrently with a canceller that
+    /// waits for the fixture's "request received" signal, optionally lingers
+    /// so the client has parsed whatever the fixture wrote, then cancels the
+    /// source. Returns the request outcome and whether the signal arrived
+    /// before the cancel was issued.
+    async fn cancel_after_request_seen<F>(
+        request: F,
+        request_seen: tokio::sync::oneshot::Receiver<()>,
+        linger: std::time::Duration,
+        source: &CancellationSource,
+    ) -> (
+        std::result::Result<F::Output, tokio::time::error::Elapsed>,
+        bool,
+    )
+    where
+        F: std::future::Future,
+    {
+        let bounded = tokio::time::timeout(std::time::Duration::from_millis(250), request);
+        let canceller = async {
+            let seen = request_seen.await.is_ok();
+            if !linger.is_zero() {
+                tokio::time::sleep(linger).await;
+            }
+            source.cancel_current();
+            seen
+        };
+        tokio::join!(bounded, canceller)
+    }
+
     #[tokio::test]
     async fn document_request_returns_cancelled_before_http_timeout() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        // Accept the connection but never answer: the reqwest future stays
-        // pending until its 60s timeout unless cancellation interrupts it.
-        let accepted = tokio::spawn(async move {
-            let (_socket, _) = listener.accept().await.unwrap();
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        });
+        // Accept the connection, read the request, but never answer: the
+        // reqwest future is in flight and stays pending until its 60s timeout
+        // unless cancellation interrupts it.
+        let (server, request_seen) = spawn_hanging_server(listener, "");
         let backend = HttpEmbeddingBackend::openai_compatible(
             EmbeddingBackendKind::OpenaiCompatible,
             remote_settings(&format!("http://{addr}/v1"), None),
@@ -539,17 +628,89 @@ mod tests {
         let source = CancellationSource::new();
         let token = source.token();
         let texts: [String; 1] = ["blocked".into()];
-        let request = backend.embed_documents(&texts, Some(&token));
-        tokio::pin!(request);
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        source.cancel_current();
-        let error = tokio::time::timeout(std::time::Duration::from_millis(250), request)
-            .await
+        let (result, cancelled_after_request_seen) = cancel_after_request_seen(
+            backend.embed_documents(&texts, Some(&token)),
+            request_seen,
+            std::time::Duration::ZERO,
+            &source,
+        )
+        .await;
+        assert!(
+            cancelled_after_request_seen,
+            "cancel must be issued only after the server accepted and read the request"
+        );
+        let error = result
             .expect("cancel must beat 60 second timeout")
             .unwrap_err();
         assert!(matches!(error, AppError::Cancelled(_)), "got {error:?}");
-        assert!(error.to_string().contains("远程编码已取消"));
-        accepted.abort();
+        assert!(error.to_string().contains(CANCELLED_MESSAGE));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn already_cancelled_token_short_circuits_without_connecting() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let backend = HttpEmbeddingBackend::openai_compatible(
+            EmbeddingBackendKind::OpenaiCompatible,
+            remote_settings(&format!("http://{addr}/v1"), None),
+        )
+        .unwrap();
+        let source = CancellationSource::new();
+        let token = source.token();
+        source.cancel_current();
+        let error = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            backend.embed_documents(&["never sent".into()], Some(&token)),
+        )
+        .await
+        .expect("pre-cancelled request must return immediately")
+        .unwrap_err();
+        assert!(matches!(error, AppError::Cancelled(_)), "got {error:?}");
+        // A pre-cancelled token must short-circuit before any connection is
+        // attempted, so the listener never sees a client.
+        let accepted =
+            tokio::time::timeout(std::time::Duration::from_millis(100), listener.accept()).await;
+        assert!(
+            accepted.is_err(),
+            "no connection may be opened for a pre-cancelled token"
+        );
+    }
+
+    #[tokio::test]
+    async fn error_response_with_hanging_body_returns_cancelled() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Status and headers arrive so `send()` resolves with a 500, but the
+        // announced body never does: reading the error body must still lose
+        // the race against cancellation instead of waiting for the 60s timeout.
+        let (server, request_seen) = spawn_hanging_server(
+            listener,
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: 100\r\n\r\n",
+        );
+        let backend = HttpEmbeddingBackend::openai_compatible(
+            EmbeddingBackendKind::OpenaiCompatible,
+            remote_settings(&format!("http://{addr}/v1"), None),
+        )
+        .unwrap();
+        let source = CancellationSource::new();
+        let token = source.token();
+        let texts: [String; 1] = ["hanging body".into()];
+        // Linger so the client has certainly parsed the 500 status line and is
+        // now blocked inside the body read, not still inside `send()`.
+        let (result, cancelled_after_request_seen) = cancel_after_request_seen(
+            backend.embed_documents(&texts, Some(&token)),
+            request_seen,
+            std::time::Duration::from_millis(50),
+            &source,
+        )
+        .await;
+        assert!(cancelled_after_request_seen);
+        let error = result
+            .expect("cancel must beat 60 second timeout while reading the error body")
+            .unwrap_err();
+        assert!(matches!(error, AppError::Cancelled(_)), "got {error:?}");
+        server.abort();
     }
 
     #[tokio::test]
@@ -557,22 +718,11 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            use tokio::io::AsyncWriteExt;
             let (mut socket, _) = listener.accept().await.unwrap();
             // Drain the request headers before answering so the client never
             // sees a reset while it is still writing.
-            let mut buffer = Vec::new();
-            let mut chunk = [0u8; 1024];
-            loop {
-                let read = socket.read(&mut chunk).await.unwrap();
-                if read == 0 {
-                    break;
-                }
-                buffer.extend_from_slice(&chunk[..read]);
-                if buffer.windows(4).any(|window| window == b"\r\n\r\n") {
-                    break;
-                }
-            }
+            read_request_headers(&mut socket).await;
             let body = r#"{"data":[{"index":0,"embedding":[0.1,0.2,0.3]}]}"#;
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
