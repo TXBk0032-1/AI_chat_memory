@@ -1772,7 +1772,7 @@
             let batchFailures = 0;
             let lastBatchError = '';
             for (let index = 0; index < batches.length; index++) {
-                if (this._isStopped()) return { state: 'stopped', sessions: accepted };
+                if (this._isStopped()) return { state: 'stopped', imported, skipped, sessions: accepted, failed };
                 const batch = batches[index];
                 this._progress(index + 1, batches.length, `推送到服务端 ${index + 1}/${batches.length}`);
                 let response = null;
@@ -1785,9 +1785,12 @@
                         signal: this.abortController?.signal
                     });
                 } catch (err) {
+                    // 传输异常里的 AbortError 属于用户停止而非导入失败：不计入 failed，直接带已接受批次返回。
+                    if (this._isStopped()) return { state: 'stopped', imported, skipped, sessions: accepted, failed };
                     transportError = err;
                 }
-                if (this._isStopped()) return { state: 'stopped', sessions: accepted };
+                // 响应成功返回即表示服务端已导入该批：先记入 accepted/imported 再判断停止，
+                // 否则停止落在响应之后会少报已成功的会话，导致后续重试队列重复导入。
                 if (!transportError && response?.ok) {
                     let data = {};
                     try { data = await response.json(); } catch { data = {}; }

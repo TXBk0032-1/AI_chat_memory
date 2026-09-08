@@ -782,18 +782,18 @@ test('buildImportBatches respects count and UTF-8 body limits', () => {
         { id: 'c', title: 'ok' },
     ];
 
-    const byCount = api.buildImportBatches('dеepseek', sessions, { maxItems: 2, maxBodyBytes: 1024 * 1024 });
+    const byCount = api.buildImportBatches('deepseek', sessions, { maxItems: 2, maxBodyBytes: 1024 * 1024 });
     assert.equal(byCount.oversized.length, 0);
     assert.deepEqual(plain(byCount.batches.map(batch => batch.map(item => item.id))), [['a', 'b'], ['c']], 'item count must cap a batch');
 
     // 20 个中文字符 = 60 UTF-8 字节：用 string.length 判定会严重低估，只有实测字节才会在此切分。
     const maxBodyBytes = 210;
-    assert.ok(encodedImportBytes('dеepseek', sessions.slice(0, 2)) <= maxBodyBytes, 'fixture: first two must fit');
-    assert.ok(encodedImportBytes('dеepseek', sessions) > maxBodyBytes, 'fixture: all three must exceed the limit');
-    const { batches, oversized } = api.buildImportBatches('dеepseek', sessions, { maxItems: 100, maxBodyBytes });
+    assert.ok(encodedImportBytes('deepseek', sessions.slice(0, 2)) <= maxBodyBytes, 'fixture: first two must fit');
+    assert.ok(encodedImportBytes('deepseek', sessions) > maxBodyBytes, 'fixture: all three must exceed the limit');
+    const { batches, oversized } = api.buildImportBatches('deepseek', sessions, { maxItems: 100, maxBodyBytes });
     assert.equal(oversized.length, 0);
     assert.ok(batches.length > 1, 'byte limit must force a split');
-    assert.ok(batches.every(batch => encodedImportBytes('dеepseek', batch) <= maxBodyBytes), 'every batch envelope must stay under the byte limit');
+    assert.ok(batches.every(batch => encodedImportBytes('deepseek', batch) <= maxBodyBytes), 'every batch envelope must stay under the byte limit');
     assert.deepEqual(plain(batches.flat().map(item => item.id)), ['a', 'b', 'c'], 'no session may be dropped or reordered');
 });
 
@@ -814,7 +814,7 @@ test('buildImportBatches moves a single oversized session to oversized and keeps
 test('fetchDetailsAndPush sends batches and keeps partial success when one batch fails', async () => {
     const { api } = loadTestApi();
     const adapter = {
-        platform: 'dеepseek', needsToken: false,
+        platform: 'deepseek', needsToken: false,
         fetchConversation: async id => ({ id, messages: [] })
     };
     const bodies = [];
@@ -847,7 +847,7 @@ test('fetchDetailsAndPush sends batches and keeps partial success when one batch
 
 test('fetchDetailsAndPush throws when every batch fails', async () => {
     const { api } = loadTestApi();
-    const adapter = { platform: 'dеepseek', needsToken: false, fetchConversation: async id => ({ id }) };
+    const adapter = { platform: 'deepseek', needsToken: false, fetchConversation: async id => ({ id }) };
     const bridge = { request: async () => ({ ok: false, status: 413, json: async () => ({}), text: async () => 'too large' }) };
     const coordinator = new api.SyncCoordinator({
         adapter, bridgeClient: bridge,
@@ -855,5 +855,93 @@ test('fetchDetailsAndPush throws when every batch fails', async () => {
         detailConcurrency: 1, detailDelayMs: 0
     });
     await assert.rejects(() => coordinator.fetchDetailsAndPush([{ id: 's1' }]), /413/);
+});
+
+const okImport = (imported, skipped = 0) => ({ ok: true, status: 200, json: async () => ({ imported, skipped }), text: async () => '{}' });
+const makePushCoordinator = (api, bridge, config = { importBatchMaxItems: 1, importBatchMaxBodyBytes: 4096 }) => new api.SyncCoordinator({
+    adapter: { platform: 'deepseek', needsToken: false, fetchConversation: async id => ({ id, messages: [] }) },
+    bridgeClient: bridge,
+    ui: { setStatus() {}, setProgress() {}, setSyncing() {} },
+    detailConcurrency: 1, detailDelayMs: 0,
+    config
+});
+
+test('fetchDetailsAndPush records a batch the server accepted even if stop() lands while the response is in flight', async () => {
+    const { api } = loadTestApi();
+    let coordinator;
+    let requests = 0;
+    const bridge = {
+        request: async () => {
+            requests++;
+            // The server has already imported the batch; the user hits stop before the response is handled.
+            coordinator.stop();
+            return okImport(1);
+        }
+    };
+    coordinator = makePushCoordinator(api, bridge);
+    const result = await coordinator.fetchDetailsAndPush([{ id: 's1' }, { id: 's2' }]);
+    assert.equal(result.state, 'stopped');
+    assert.equal(requests, 1, 'no further batch may be sent after stop');
+    assert.deepEqual(plain(result.sessions.map(s => s.id)), ['s1'], 'a batch accepted by the server must be reported as synced even when stopped right after');
+    assert.equal(result.imported, 1, 'imported must be accumulated for the accepted batch');
+});
+
+test('fetchDetailsAndPush treats a thrown transport error as an import-stage failure of that batch only', async () => {
+    const { api } = loadTestApi();
+    let requests = 0;
+    const bridge = {
+        request: async () => {
+            requests++;
+            if (requests === 1) throw new Error('network down');
+            return okImport(1);
+        }
+    };
+    const coordinator = makePushCoordinator(api, bridge);
+    const result = await coordinator.fetchDetailsAndPush([{ id: 's1' }, { id: 's2' }]);
+    assert.equal(requests, 2, 'the second batch must still be sent after a transport error');
+    assert.deepEqual(plain(result.failed.map(f => ({ id: f.id, stage: f.stage }))), [{ id: 's1', stage: 'import' }]);
+    assert.match(result.failed[0].error, /network down/);
+    assert.deepEqual(plain(result.sessions.map(s => s.id)), ['s2']);
+    assert.equal(result.imported, 1, 'imported counts only the batch that succeeded');
+});
+
+test('fetchDetailsAndPush reports a single oversized session without sending it and imports the rest', async () => {
+    const { api } = loadTestApi();
+    const bodies = [];
+    const bridge = { request: async (path, options = {}) => { bodies.push(options.body); return okImport(1); } };
+    const coordinator = makePushCoordinator(api, bridge, { importBatchMaxItems: 100, importBatchMaxBodyBytes: 200 });
+    const result = await coordinator.fetchDetailsAndPush([{ id: 'small1' }, { id: 'huge', title: 'x'.repeat(400) }, { id: 'small2' }]);
+    assert.deepEqual(plain(result.failed.map(f => ({ id: f.id, stage: f.stage }))), [{ id: 'huge', stage: 'oversized' }]);
+    assert.ok(bodies.every(body => !body.includes('"huge"')), 'the oversized session must never be sent');
+    const sent = bodies.map(body => JSON.parse(body).sessions.map(s => s.id));
+    assert.deepEqual(sent.flat(), ['small1', 'small2'], 'remaining sessions must be sent');
+    assert.equal(bodies.length, sent.length, 'request count equals the number of non-oversized batches');
+    assert.deepEqual(plain(result.sessions.map(s => s.id)), ['small1', 'small2']);
+    assert.equal(result.imported, bodies.length);
+});
+
+test('fetchDetailsAndPush stops between batches and keeps the first accepted batch', async () => {
+    const { api } = loadTestApi();
+    let coordinator;
+    let requests = 0;
+    let stopCalls = 0;
+    // The first batch's response is fully delivered; stop() lands while its body is being read,
+    // which is the last hook before the loop's between-batch stopped check.
+    const bridge = {
+        request: async () => {
+            requests++;
+            return {
+                ok: true, status: 200, text: async () => '{}',
+                json: async () => { stopCalls++; coordinator.stop(); return { imported: 1, skipped: 0 }; }
+            };
+        }
+    };
+    coordinator = makePushCoordinator(api, bridge);
+    const result = await coordinator.fetchDetailsAndPush([{ id: 's1' }, { id: 's2' }]);
+    assert.equal(result.state, 'stopped');
+    assert.deepEqual(plain(result.sessions.map(s => s.id)), ['s1']);
+    assert.equal(result.imported, 1);
+    assert.equal(requests, 1, 'only the first batch may reach the bridge');
+    assert.equal(stopCalls, 1);
 });
 
