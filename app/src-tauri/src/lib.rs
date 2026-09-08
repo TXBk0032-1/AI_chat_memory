@@ -12,6 +12,7 @@ mod logging;
 mod mcp;
 mod models;
 mod normalizer;
+mod safe_path;
 mod semantic;
 mod service;
 mod settings;
