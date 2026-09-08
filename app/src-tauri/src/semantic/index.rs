@@ -572,7 +572,9 @@ pub fn reciprocal_rank_fusion(
         *scores.entry(id.clone()).or_default() += 1.0 / (k + rank as f32 + 1.0);
     }
     let mut merged = scores.into_iter().collect::<Vec<_>>();
-    merged.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    // Total order on the score, then session id ascending, so equal scores
+    // never depend on HashMap iteration order.
+    merged.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     merged
 }
 
@@ -829,6 +831,73 @@ mod tests {
         let semantic = vec![("b".into(), 1.0), ("c".into(), 0.5)];
         let merged = reciprocal_rank_fusion(&keyword, &semantic, 60.0);
         assert_eq!(merged[0].0, "b");
+    }
+
+    #[test]
+    fn reciprocal_rank_fusion_breaks_equal_scores_by_session_id() {
+        let first = reciprocal_rank_fusion(
+            &[("b".into(), 1.0), ("a".into(), 0.5)],
+            &[("a".into(), 1.0), ("b".into(), 0.5)],
+            60.0,
+        );
+        assert_eq!(
+            first.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+
+        // 相反插入顺序构造同一同分集合，仍按 id 升序。
+        let reversed = reciprocal_rank_fusion(
+            &[("a".into(), 0.5), ("b".into(), 1.0)],
+            &[("b".into(), 0.5), ("a".into(), 1.0)],
+            60.0,
+        );
+        assert_eq!(
+            reversed
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+    }
+
+    #[test]
+    fn reciprocal_rank_fusion_is_deterministic_across_repeated_calls() {
+        // 两组两两同分：{a, d} 与 {b, c}；{a, d} 得分更高。
+        let keyword: Vec<(String, f32)> = vec![
+            ("d".into(), 1.0),
+            ("c".into(), 0.9),
+            ("b".into(), 0.8),
+            ("a".into(), 0.7),
+        ];
+        let semantic: Vec<(String, f32)> = vec![
+            ("a".into(), 1.0),
+            ("b".into(), 0.9),
+            ("c".into(), 0.8),
+            ("d".into(), 0.7),
+        ];
+        let expected = vec!["a", "d", "b", "c"];
+
+        let baseline = reciprocal_rank_fusion(&keyword, &semantic, 60.0);
+        assert_eq!(
+            baseline
+                .iter()
+                .map(|(id, _)| id.as_str())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        for _ in 0..50 {
+            let again = reciprocal_rank_fusion(&keyword, &semantic, 60.0);
+            assert_eq!(again, baseline, "repeated call changed result order");
+        }
+
+        // keyword/semantic lists reversed: same score set, result sequence must be identical.
+        let keyword_rev: Vec<(String, f32)> = keyword.iter().rev().cloned().collect();
+        let semantic_rev: Vec<(String, f32)> = semantic.iter().rev().cloned().collect();
+        let reversed = reciprocal_rank_fusion(&keyword_rev, &semantic_rev, 60.0);
+        assert_eq!(
+            reversed, baseline,
+            "reversed insertion order changed result"
+        );
     }
 
     #[tokio::test]
