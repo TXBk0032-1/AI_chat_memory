@@ -87,3 +87,4 @@ float8 = { path = "vendor/float8" }
 [dev-dependencies]
 aws-sigv4 = { version = "=1.5.1", default-features = false, features = ["sign-http", "http1"] }
 aws-smithy-http-client = { version = "=1.4.0", features = ["test-util"] }
+filetime = "=0.2.29"
