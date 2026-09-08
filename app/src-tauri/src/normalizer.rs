@@ -313,6 +313,8 @@ pub fn normalize_deepseek_export(raw: &Value) -> Result<NormalizedSession> {
             ("user", user.join("\n"))
         } else if !assistant.is_empty() {
             ("assistant", assistant.join("\n"))
+        } else if !thinking.is_empty() {
+            ("assistant", String::new())
         } else {
             continue;
         };
@@ -450,6 +452,66 @@ mod tests {
         assert_eq!(tool_calls[0]["result"], "ran cells");
         // 旧计数字段保留，便于既有消费者与导出对照。
         assert_eq!(message.metadata["tool_types"], json!(["CODE_INTERPRETER"]));
+    }
+
+    #[test]
+    fn preserves_thinking_only_deepseek_export_message() {
+        let session = normalize_deepseek_export(&json!({
+            "id": "conversation",
+            "mapping": {
+                "node": {
+                    "id": "node",
+                    "parent": null,
+                    "children": [],
+                    "message": {
+                        "inserted_at": 1780853706,
+                        "fragments": [{"type": "THINK", "content": "unfinished reasoning"}]
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.messages[0].role, "assistant");
+        assert_eq!(session.messages[0].content, "");
+        assert_eq!(
+            session.messages[0].metadata["thinking"],
+            "unfinished reasoning"
+        );
+        assert_eq!(session.messages[0].metadata["node_id"], "node");
+        // 纯思考消息的时间戳与节点关系元数据仍应保留。
+        assert_eq!(
+            session.messages[0].created_at.as_deref(),
+            Some("1780853706")
+        );
+        assert_eq!(session.messages[0].metadata["parent_node_id"], Value::Null);
+        assert_eq!(session.messages[0].metadata["children_node_ids"], json!([]));
+        assert_eq!(
+            session.messages[0].metadata["fragment_types"],
+            json!(["THINK"])
+        );
+    }
+
+    #[test]
+    fn skips_deepseek_export_nodes_without_any_text() {
+        let session = normalize_deepseek_export(&json!({
+            "id": "conversation",
+            "mapping": {
+                "empty": {
+                    "id": "empty",
+                    "message": {"fragments": []}
+                },
+                "tool_only": {
+                    "id": "tool_only",
+                    "message": {"fragments": [{"type": "SEARCH", "results": []}]}
+                },
+                "no_message": {
+                    "id": "no_message"
+                }
+            }
+        }))
+        .unwrap();
+        assert_eq!(session.messages.len(), 0);
     }
 
     #[test]
