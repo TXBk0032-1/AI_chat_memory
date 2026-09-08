@@ -1528,6 +1528,72 @@
         return { batches, oversized };
     }
 
+    // 持久化失败重试队列（审计 #27）：失败会话只进内存 failed[] 时，后端游标已被同批成功会话推进，
+    // 下一轮增量按 last_updated_at 过滤后永远看不到它。队列按平台隔离，只存列表级元数据，不存正文。
+    class SyncRetryStore {
+        constructor(platform, getValue, setValue) {
+            this.key = `sync_retry_queue_v1:${platform}`;
+            this.getValue = getValue || ((key, fallback) => GM_getValue(key, fallback));
+            this.setValue = setValue || ((key, value) => GM_setValue(key, value));
+        }
+
+        load() {
+            let value = null;
+            try { value = this.getValue(this.key, null); } catch (err) { console.warn(`读取重试队列 ${this.key} 失败:`, err); return {}; }
+            if (value === null || value === undefined) return {};
+            const valid = typeof value === 'object' && !Array.isArray(value)
+                && value.version === 1
+                && value.entries && typeof value.entries === 'object' && !Array.isArray(value.entries);
+            if (!valid) {
+                console.warn(`重试队列 ${this.key} 数据损坏或版本不符，回退为空队列`);
+                return {};
+            }
+            return value.entries;
+        }
+
+        save(entries) {
+            this.setValue(this.key, { version: 1, entries });
+        }
+
+        static stripSession(session) {
+            if (!session || typeof session !== 'object') return session;
+            const { _conversation, ...meta } = session;
+            void _conversation;
+            return meta;
+        }
+
+        upsert(session, stage, message, id) {
+            const entries = this.load();
+            const key = id ?? session?.id;
+            if (key === null || key === undefined) return;
+            const previous = entries[key];
+            entries[key] = {
+                id: key,
+                updated_at: session?.updated_at ?? null,
+                stage,
+                attempts: (Number(previous?.attempts) || 0) + 1,
+                message: String(message ?? '').slice(0, 500),
+                session: SyncRetryStore.stripSession(session)
+            };
+            this.save(entries);
+        }
+
+        remove(ids) {
+            const list = Array.isArray(ids) ? ids : [ids];
+            if (!list.length) return;
+            const entries = this.load();
+            let changed = false;
+            for (const id of list) {
+                if (id in entries) { delete entries[id]; changed = true; }
+            }
+            if (changed) this.save(entries);
+        }
+
+        sessions() {
+            return Object.values(this.load()).map(entry => entry?.session).filter(Boolean);
+        }
+    }
+
     class SyncCoordinator {
         constructor(options = {}) {
             this.adapter = options.adapter;
@@ -1543,6 +1609,10 @@
             this.exportPollDelayMs = Math.max(0, Number(options.exportPollDelayMs ?? 5000));
             this.stopped = false;
             this.abortController = null;
+            const storage = options.storage || {};
+            this.getValue = options.getValue || options.gmGet || storage.get || ((key, fallback) => GM_getValue(key, fallback));
+            this.setValue = options.setValue || options.gmSet || storage.set || ((key, value) => GM_setValue(key, value));
+            this.retryStore = options.retryStore || new SyncRetryStore(this.platform, this.getValue, this.setValue);
         }
 
         _status(text) {
@@ -1624,15 +1694,37 @@
         }
 
         async selectSessions(lastUpdatedAt) {
+            let candidates;
             if (!lastUpdatedAt) {
                 this._status('本地为空，全量拉取...');
-                return this.adapter.fetchAllSessions();
-            }
-            if (this.platform === 'deepseek' && (this.adapter.fetchSessionPage || this.adapter._xhr)) {
+                candidates = await this.adapter.fetchAllSessions();
+            } else if (this.platform === 'deepseek' && (this.adapter.fetchSessionPage || this.adapter._xhr)) {
                 this._status('增量拉取...');
-                return this.fetchSessionsIncremental(lastUpdatedAt);
+                candidates = await this.fetchSessionsIncremental(lastUpdatedAt);
+            } else {
+                candidates = await this.adapter.fetchAllSessions();
             }
-            return this.adapter.fetchAllSessions();
+            return this._mergeRetryCandidates(candidates);
+        }
+
+        // 候选 = 正常候选 ∪ 本平台重试队列，按稳定 id 去重；正常候选优先（列表元数据更新），
+        // 重试项不受 last_updated_at 游标过滤，保证失败会话在游标推进后仍会被重新同步。
+        _mergeRetryCandidates(candidates) {
+            const list = Array.isArray(candidates) ? [...candidates] : [];
+            let retries = [];
+            try { retries = this.retryStore?.sessions() || []; } catch (err) { console.warn('读取重试队列失败:', err); }
+            if (!retries.length) return list;
+            const seen = new Set(list.map(session => this._sessionId(session)).filter(id => id !== null && id !== undefined));
+            let appended = 0;
+            for (const session of retries) {
+                const id = this._sessionId(session);
+                if (id === null || id === undefined || seen.has(id)) continue;
+                seen.add(id);
+                list.push(session);
+                appended++;
+            }
+            if (appended) this._status(`合并 ${appended} 个待重试会话`);
+            return list;
         }
 
         _sessionId(session) {
@@ -1710,6 +1802,16 @@
             return data;
         }
 
+        _retryUpsert(session, id, stage, message) {
+            try { this.retryStore?.upsert(session, stage, message, id); } catch (err) { console.warn(`写入重试队列失败 (${id}):`, err); }
+        }
+
+        _retryRemove(ids) {
+            const list = ids.filter(id => id !== null && id !== undefined);
+            if (!list.length) return;
+            try { this.retryStore?.remove(list); } catch (err) { console.warn('移除重试队列条目失败:', err); }
+        }
+
         async fetchDetailsAndPush(sessions) {
             if (!sessions.length) {
                 this._status('✅ 无新会话需要同步');
@@ -1741,7 +1843,9 @@
                     }
                     if (lastErr) {
                         console.warn(`会话 ${id} 重试后仍失败:`, lastErr);
-                        failed.push({ id, session, stage: 'detail', error: String(lastErr?.message || lastErr) });
+                        const message = String(lastErr?.message || lastErr);
+                        failed.push({ id, session, stage: 'detail', error: message });
+                        this._retryUpsert(session, id, 'detail', message);
                     } else {
                         results.push({ ...session, _conversation: conversation });
                     }
@@ -1760,6 +1864,7 @@
                 maxItems: this.config.importBatchMaxItems,
                 maxBodyBytes
             });
+            // 超限会话重试也不会变小，不进入重试队列，只记录告警并计入 failed 返回。
             for (const session of oversized) {
                 const id = this._sessionId(session);
                 console.warn(`会话 ${id} 单体超过导入体积上限 ${maxBodyBytes} 字节，跳过`);
@@ -1797,6 +1902,8 @@
                     imported += Number(data?.imported) || 0;
                     skipped += Number(data?.skipped) || 0;
                     accepted.push(...batch);
+                    // 服务端 imported 与 skipped 都视为已确认：该批会话立即从重试队列移除并持久化。
+                    this._retryRemove(batch.map(session => this._sessionId(session)));
                     continue;
                 }
                 // 单批失败既不撤销已成功的批次，也不中断后续批次：只把该批会话记为 import 阶段失败。
@@ -1812,7 +1919,9 @@
                 lastBatchError = detail;
                 console.warn(`第 ${index + 1}/${batches.length} 批导入失败:`, detail);
                 for (const session of batch) {
-                    failed.push({ id: this._sessionId(session), session, stage: 'import', error: detail });
+                    const id = this._sessionId(session);
+                    failed.push({ id, session, stage: 'import', error: detail });
+                    this._retryUpsert(session, id, 'import', detail);
                 }
             }
 
@@ -2066,6 +2175,7 @@
         DeepSeekAdapter,
         DoubaoAdapter,
         KimiAdapter,
+        SyncRetryStore,
         SyncCoordinator,
         SyncPanel
     });

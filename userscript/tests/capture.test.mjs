@@ -945,3 +945,231 @@ test('fetchDetailsAndPush stops between batches and keeps the first accepted bat
     assert.equal(stopCalls, 1);
 });
 
+// ===== Persistent retry queue (audit #27): failed sessions must survive the cursor and a page refresh =====
+
+const RETRY_KEY = 'sync_retry_queue_v1:deepseek';
+
+// Incremental deepseek adapter whose list page is served by `pages` and whose detail fetch fails for ids in `failing`.
+const makeRetryAdapter = (api, pages, failing = new Set()) => ({
+    platform: 'deepseek', needsToken: false,
+    fetchSessionPage: async () => pages.shift() || { data: { biz_data: { chat_sessions: [], has_more: false } } },
+    _extractSessionsPage: api.DeepSeekAdapter.prototype._extractSessionsPage,
+    fetchConversation: async id => {
+        if (failing.has(id)) throw new Error(`detail boom ${id}`);
+        return { id, messages: [{ role: 'user', content: 'hello' }] };
+    }
+});
+const page = (sessions, hasMore = false) => ({ data: { biz_data: { chat_sessions: sessions, has_more: hasMore } } });
+const makeRetryBridge = (cursorRef, bodies) => ({
+    checkServer: async () => ({ state: 'connected', url: 'http://bridge' }),
+    request: async (path, options = {}) => {
+        if (path.includes('sync-status')) return { ok: true, status: 200, json: async () => ({ last_updated_at: cursorRef.value }), text: async () => '{}' };
+        bodies.push(options.body);
+        return okImport(JSON.parse(options.body).sessions.length);
+    }
+});
+const quietUi = { setStatus() {}, setProgress() {}, setSyncing() {} };
+
+test('SyncRetryStore keeps list-level metadata only, truncates messages, counts attempts, and removes ids', () => {
+    const { api } = loadTestApi();
+    const storage = new Map();
+    const store = new api.SyncRetryStore('deepseek', (key, fallback) => storage.has(key) ? storage.get(key) : fallback, (key, value) => storage.set(key, value));
+    assert.deepEqual(plain(store.load()), {}, 'an empty store loads as an empty entries object');
+    assert.deepEqual(plain(store.sessions()), []);
+
+    const session = { id: 'a', updated_at: 120, title: 'A', _conversation: { messages: [{ content: 'secret body' }] } };
+    store.upsert(session, 'detail', 'x'.repeat(700));
+    const saved = storage.get(RETRY_KEY);
+    assert.equal(saved.version, 1);
+    const entry = saved.entries.a;
+    assert.equal(entry.id, 'a');
+    assert.equal(entry.updated_at, 120);
+    assert.equal(entry.stage, 'detail');
+    assert.equal(entry.attempts, 1);
+    assert.equal(entry.message.length, 500, 'error message must be truncated to 500 chars');
+    assert.deepEqual(plain(entry.session), { id: 'a', updated_at: 120, title: 'A' }, 'the conversation body must never be persisted');
+    assert.equal(JSON.stringify(saved).includes('secret body'), false);
+
+    store.upsert({ id: 'a', updated_at: 120 }, 'import', 'again');
+    assert.equal(storage.get(RETRY_KEY).entries.a.attempts, 2, 'attempts increments on repeated failures');
+    assert.equal(storage.get(RETRY_KEY).entries.a.stage, 'import', 'the latest stage wins');
+
+    store.upsert({ id: 'b', updated_at: 5 }, 'detail', 'b failed');
+    assert.deepEqual(plain(store.sessions().map(s => s.id).sort()), ['a', 'b']);
+    store.remove(['a', 'missing']);
+    assert.deepEqual(plain(Object.keys(storage.get(RETRY_KEY).entries)), ['b'], 'remove persists immediately');
+});
+
+test('SyncRetryStore falls back to an empty retry queue when the stored value is corrupt', () => {
+    const { api } = loadTestApi();
+    const storage = new Map();
+    const getValue = (key, fallback) => storage.has(key) ? storage.get(key) : fallback;
+    const setValue = (key, value) => storage.set(key, value);
+    for (const corrupt of ['garbage', 42, null, { version: 2, entries: { a: {} } }, { version: 1, entries: 'nope' }, { version: 1 }, [1, 2]]) {
+        storage.set(RETRY_KEY, corrupt);
+        const store = new api.SyncRetryStore('deepseek', getValue, setValue);
+        assert.deepEqual(plain(store.load()), {}, `corrupt value ${JSON.stringify(corrupt)} must load as empty`);
+        assert.deepEqual(plain(store.sessions()), []);
+    }
+    const store = new api.SyncRetryStore('deepseek', getValue, setValue);
+    store.upsert({ id: 'a', updated_at: 1 }, 'detail', 'boom');
+    assert.deepEqual(Object.keys(storage.get(RETRY_KEY).entries), ['a'], 'a corrupt value is replaced by a fresh v1 queue on the next write');
+    assert.equal(storage.get(RETRY_KEY).version, 1);
+});
+
+test('retry queue persists a detail failure to GM storage and a reloaded coordinator still selects it past the cursor', async () => {
+    const { api, values: storage } = loadTestApi();
+    const bodies = [];
+    const cursor = { value: 100 };
+    const failing = new Set(['failed-a']);
+    const first = new api.SyncCoordinator({
+        adapter: makeRetryAdapter(api, [page([{ id: 'ok-b', updated_at: 150 }, { id: 'failed-a', updated_at: 120 }])], failing),
+        bridgeClient: makeRetryBridge(cursor, bodies), ui: quietUi, detailConcurrency: 1, detailDelayMs: 0
+    });
+    const result = await first.sync(false);
+    assert.equal(result.imported, 1);
+    assert.deepEqual(plain(result.failed.map(f => ({ id: f.id, stage: f.stage }))), [{ id: 'failed-a', stage: 'detail' }]);
+    assert.deepEqual(JSON.parse(bodies[0]).sessions.map(s => s.id), ['ok-b']);
+
+    const saved = storage.get(RETRY_KEY);
+    assert.equal(saved?.version, 1, 'the retry queue must be persisted via the default GM storage');
+    assert.equal(saved.entries['failed-a'].attempts, 1);
+    assert.equal(saved.entries['failed-a'].stage, 'detail');
+    assert.deepEqual(plain(saved.entries['failed-a'].session), { id: 'failed-a', updated_at: 120 });
+    assert.equal(Object.keys(saved.entries).length, 1, 'the successful session must not be queued');
+
+    // Page refresh: a brand-new coordinator over the same GM storage; the server cursor advanced to B (200 > 120),
+    // so the list page no longer surfaces A.
+    const reloaded = new api.SyncCoordinator({
+        adapter: makeRetryAdapter(api, [page([{ id: 'ok-b', updated_at: 150 }])], failing),
+        bridgeClient: makeRetryBridge(cursor, bodies), ui: quietUi, detailConcurrency: 1, detailDelayMs: 0
+    });
+    const retried = await reloaded.selectSessions('200');
+    assert.deepEqual(plain(retried.map(item => item.id)), ['failed-a']);
+    assert.equal(storage.get(RETRY_KEY).entries['failed-a'].attempts, 1);
+});
+
+test('cursor advances past failures yet later syncs keep retrying the queued session until the server accepts it', async () => {
+    const { api, values: storage } = loadTestApi();
+    const bodies = [];
+    const cursor = { value: 100 };
+    const failing = new Set(['failed-a']);
+    const pages = [page([{ id: 'ok-b', updated_at: 150 }, { id: 'failed-a', updated_at: 120 }])];
+    const make = () => new api.SyncCoordinator({
+        adapter: makeRetryAdapter(api, pages, failing),
+        bridgeClient: makeRetryBridge(cursor, bodies), ui: quietUi, detailConcurrency: 1, detailDelayMs: 0
+    });
+    await make().sync(false);
+    assert.deepEqual(Object.keys(storage.get(RETRY_KEY).entries), ['failed-a']);
+
+    // Round 2: backend cursor moved to B; the list page is empty beyond the cursor, so the queued A is the only
+    // candidate. It fails again -> attempts 2. (Every candidate failing keeps the pre-existing "all detail fetches
+    // failed" error result; what matters here is that A was still selected and stays queued.)
+    cursor.value = 150;
+    pages.push(page([{ id: 'ok-b', updated_at: 150 }]));
+    const second = await make().sync(false);
+    assert.equal(second.state, 'error');
+    assert.match(String(second.error?.message), /detail boom failed-a/);
+    assert.equal(storage.get(RETRY_KEY).entries['failed-a'].attempts, 2);
+    assert.equal(bodies.length, 1, 'nothing new to push in round 2');
+
+    // Round 3: A recovers; it is pushed and removed from the queue.
+    failing.clear();
+    pages.push(page([{ id: 'ok-b', updated_at: 150 }]));
+    const third = await make().sync(false);
+    assert.equal(third.imported, 1);
+    assert.deepEqual(JSON.parse(bodies[1]).sessions.map(s => s.id), ['failed-a']);
+    assert.deepEqual(plain(storage.get(RETRY_KEY).entries), {}, 'an accepted session leaves the retry queue');
+
+    // Round 4: nothing pending anymore.
+    pages.push(page([{ id: 'ok-b', updated_at: 150 }]));
+    const fourth = await make().sync(false);
+    assert.equal(fourth.imported, 0);
+    assert.equal(bodies.length, 2);
+});
+
+test('retry queue records import-stage batch failures, skips oversized sessions, and removes accepted or skipped ones', async () => {
+    const { api, values: storage } = loadTestApi();
+    let requests = 0;
+    const bridge = {
+        request: async (path, options = {}) => {
+            requests++;
+            const ids = JSON.parse(options.body).sessions.map(s => s.id);
+            if (ids.includes('http-fail')) return { ok: false, status: 500, json: async () => ({}), text: async () => 'server exploded ' + 'y'.repeat(600) };
+            if (ids.includes('skipped-only')) return okImport(0, 1);
+            return okImport(ids.length);
+        }
+    };
+    const coordinator = makePushCoordinator(api, bridge, { importBatchMaxItems: 1, importBatchMaxBodyBytes: 200 });
+    // Pre-seed the queue so the successful/skipped sessions prove removal.
+    coordinator.retryStore.upsert({ id: 'ok', updated_at: 1 }, 'detail', 'earlier');
+    coordinator.retryStore.upsert({ id: 'skipped-only', updated_at: 1 }, 'import', 'earlier');
+    const result = await coordinator.fetchDetailsAndPush([
+        { id: 'ok', updated_at: 1 }, { id: 'http-fail', updated_at: 2 }, { id: 'skipped-only', updated_at: 3 }, { id: 'huge', title: 'x'.repeat(400) }
+    ]);
+    assert.equal(requests, 3, 'the oversized session is never sent');
+    assert.deepEqual(plain(result.failed.map(f => ({ id: f.id, stage: f.stage }))).sort((a, b) => a.id.localeCompare(b.id)), [
+        { id: 'http-fail', stage: 'import' }, { id: 'huge', stage: 'oversized' }
+    ]);
+    const entries = storage.get(RETRY_KEY).entries;
+    assert.deepEqual(Object.keys(entries), ['http-fail'], 'only the HTTP-failed session is queued; oversized is not, accepted/skipped are removed');
+    assert.equal(entries['http-fail'].stage, 'import');
+    assert.equal(entries['http-fail'].attempts, 1);
+    assert.equal(entries['http-fail'].message.length, 500);
+    assert.match(entries['http-fail'].message, /500/);
+    assert.deepEqual(plain(entries['http-fail'].session), { id: 'http-fail', updated_at: 2 }, 'the fetched conversation must not be persisted');
+});
+
+test('selectSessions merges retry entries with normal candidates, dedupes by id, and prefers the fresher list metadata', async () => {
+    const { api } = loadTestApi();
+    const storage = new Map();
+    const getValue = (key, fallback) => storage.has(key) ? storage.get(key) : fallback;
+    const setValue = (key, value) => storage.set(key, value);
+    const store = new api.SyncRetryStore('deepseek', getValue, setValue);
+    store.upsert({ id: 'dup', updated_at: 120, title: 'stale' }, 'detail', 'boom');
+    store.upsert({ id: 'only-retry', updated_at: 50 }, 'import', 'boom');
+
+    const coordinator = new api.SyncCoordinator({
+        adapter: makeRetryAdapter(api, [page([{ id: 'dup', updated_at: 300, title: 'fresh' }, { id: 'new', updated_at: 250 }])]),
+        bridgeClient: {}, ui: quietUi, getValue, setValue
+    });
+    const selected = await coordinator.selectSessions('200');
+    assert.deepEqual(plain(selected.map(s => s.id)), ['dup', 'new', 'only-retry'], 'normal candidates first, then queued sessions not already present');
+    assert.equal(selected[0].title, 'fresh', 'the normal candidate keeps its newer list metadata');
+    assert.equal(selected.filter(s => s.id === 'dup').length, 1);
+
+    // The full (no cursor) path merges too and stays idempotent.
+    const full = new api.SyncCoordinator({
+        adapter: { platform: 'deepseek', fetchAllSessions: async () => [{ id: 'dup', updated_at: 300, title: 'fresh' }] },
+        bridgeClient: {}, ui: quietUi, getValue, setValue
+    });
+    assert.deepEqual(plain((await full.selectSessions(null)).map(s => s.id)), ['dup', 'only-retry']);
+});
+
+test('platform retry isolation: a deepseek retry queue never leaks into a kimi coordinator and vice versa', async () => {
+    const { api, values: storage } = loadTestApi();
+    const kimiKey = 'sync_retry_queue_v1:kimi';
+    const cursor = { value: 100 };
+    const bodies = [];
+    const failing = new Set(['failed-a']);
+    const deepseek = new api.SyncCoordinator({
+        adapter: makeRetryAdapter(api, [page([{ id: 'failed-a', updated_at: 120 }, { id: 'ok-b', updated_at: 150 }])], failing),
+        bridgeClient: makeRetryBridge(cursor, bodies), ui: quietUi, detailConcurrency: 1, detailDelayMs: 0
+    });
+    await deepseek.sync(false);
+    assert.deepEqual(Object.keys(storage.get(RETRY_KEY).entries), ['failed-a']);
+    assert.equal(storage.has(kimiKey), false, 'a deepseek failure must not create a kimi queue');
+
+    const kimi = new api.SyncCoordinator({
+        adapter: { platform: 'kimi', fetchAllSessions: async () => [{ id: 'kimi-1' }] },
+        bridgeClient: makeRetryBridge(cursor, bodies), ui: quietUi
+    });
+    assert.deepEqual(plain((await kimi.selectSessions('200')).map(s => s.id)), ['kimi-1'], 'kimi selection ignores the deepseek queue');
+    assert.equal(storage.has(kimiKey), false);
+
+    kimi.retryStore.upsert({ id: 'kimi-failed' }, 'detail', 'boom');
+    assert.deepEqual(Object.keys(storage.get(kimiKey).entries), ['kimi-failed']);
+    assert.deepEqual(Object.keys(storage.get(RETRY_KEY).entries), ['failed-a'], 'the deepseek queue is untouched by kimi writes');
+    assert.deepEqual(plain((await deepseek.selectSessions('200')).map(s => s.id)), ['failed-a'], 'deepseek selection ignores the kimi queue');
+});
+
