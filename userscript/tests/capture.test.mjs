@@ -771,3 +771,89 @@ test('session list and detail fetches forward the abort signal to the transport'
     assert.equal(signals[0], controller.signal, 'detail fetch must forward the abort signal');
 });
 
+const encodedImportBytes = (platform, batch) =>
+    new TextEncoder().encode(JSON.stringify({ platform, sessions: batch })).byteLength;
+
+test('buildImportBatches respects count and UTF-8 body limits', () => {
+    const { api } = loadTestApi();
+    const sessions = [
+        { id: 'a', title: '你'.repeat(20) },
+        { id: 'b', title: '好'.repeat(20) },
+        { id: 'c', title: 'ok' },
+    ];
+
+    const byCount = api.buildImportBatches('dеepseek', sessions, { maxItems: 2, maxBodyBytes: 1024 * 1024 });
+    assert.equal(byCount.oversized.length, 0);
+    assert.deepEqual(plain(byCount.batches.map(batch => batch.map(item => item.id))), [['a', 'b'], ['c']], 'item count must cap a batch');
+
+    // 20 个中文字符 = 60 UTF-8 字节：用 string.length 判定会严重低估，只有实测字节才会在此切分。
+    const maxBodyBytes = 210;
+    assert.ok(encodedImportBytes('dеepseek', sessions.slice(0, 2)) <= maxBodyBytes, 'fixture: first two must fit');
+    assert.ok(encodedImportBytes('dеepseek', sessions) > maxBodyBytes, 'fixture: all three must exceed the limit');
+    const { batches, oversized } = api.buildImportBatches('dеepseek', sessions, { maxItems: 100, maxBodyBytes });
+    assert.equal(oversized.length, 0);
+    assert.ok(batches.length > 1, 'byte limit must force a split');
+    assert.ok(batches.every(batch => encodedImportBytes('dеepseek', batch) <= maxBodyBytes), 'every batch envelope must stay under the byte limit');
+    assert.deepEqual(plain(batches.flat().map(item => item.id)), ['a', 'b', 'c'], 'no session may be dropped or reordered');
+});
+
+test('buildImportBatches moves a single oversized session to oversized and keeps batching the rest', () => {
+    const { api } = loadTestApi();
+    const sessions = [
+        { id: 'small1', title: 'x' },
+        { id: 'huge', title: '测'.repeat(500) },
+        { id: 'small2', title: 'y' },
+    ];
+    const maxBodyBytes = 200;
+    const { batches, oversized } = api.buildImportBatches('p', sessions, { maxItems: 100, maxBodyBytes });
+    assert.deepEqual(plain(oversized.map(item => item.id)), ['huge'], 'the session that cannot fit alone must be reported, not sent');
+    assert.deepEqual(plain(batches.flat().map(item => item.id)), ['small1', 'small2'], 'remaining sessions must still be batched');
+    assert.ok(batches.every(batch => encodedImportBytes('p', batch) <= maxBodyBytes));
+});
+
+test('fetchDetailsAndPush sends batches and keeps partial success when one batch fails', async () => {
+    const { api } = loadTestApi();
+    const adapter = {
+        platform: 'dеepseek', needsToken: false,
+        fetchConversation: async id => ({ id, messages: [] })
+    };
+    const bodies = [];
+    const bridge = {
+        request: async (path, options = {}) => {
+            bodies.push(options.body);
+            if (bodies.length === 2) {
+                return { ok: false, status: 413, json: async () => ({}), text: async () => 'payload too large' };
+            }
+            return { ok: true, status: 200, json: async () => ({ imported: 2, skipped: 1 }), text: async () => '{}' };
+        }
+    };
+    const maxBodyBytes = 4096;
+    const coordinator = new api.SyncCoordinator({
+        adapter, bridgeClient: bridge,
+        ui: { setStatus() {}, setProgress() {}, setSyncing() {} },
+        detailConcurrency: 1, detailDelayMs: 0,
+        config: { importBatchMaxItems: 2, importBatchMaxBodyBytes: maxBodyBytes }
+    });
+
+    const result = await coordinator.fetchDetailsAndPush([{ id: 's1' }, { id: 's2' }, { id: 's3' }]);
+
+    assert.equal(bodies.length, 2, 'three sessions with maxItems=2 must become exactly two requests');
+    assert.ok(bodies.every(body => new TextEncoder().encode(body).byteLength <= maxBodyBytes), 'no request body may exceed the configured limit');
+    assert.deepEqual(plain(result.sessions.map(s => s.id)), ['s1', 's2'], 'only sessions accepted by an ok batch count as synced');
+    assert.equal(result.imported, 2, 'imported must accumulate from the successful batch only');
+    assert.equal(result.skipped, 1);
+    assert.deepEqual(plain(result.failed.map(f => ({ id: f.id, stage: f.stage }))), [{ id: 's3', stage: 'import' }], 'the failed batch must be reported with the import stage');
+});
+
+test('fetchDetailsAndPush throws when every batch fails', async () => {
+    const { api } = loadTestApi();
+    const adapter = { platform: 'dеepseek', needsToken: false, fetchConversation: async id => ({ id }) };
+    const bridge = { request: async () => ({ ok: false, status: 413, json: async () => ({}), text: async () => 'too large' }) };
+    const coordinator = new api.SyncCoordinator({
+        adapter, bridgeClient: bridge,
+        ui: { setStatus() {}, setProgress() {}, setSyncing() {} },
+        detailConcurrency: 1, detailDelayMs: 0
+    });
+    await assert.rejects(() => coordinator.fetchDetailsAndPush([{ id: 's1' }]), /413/);
+});
+

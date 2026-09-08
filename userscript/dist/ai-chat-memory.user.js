@@ -39,7 +39,10 @@
         maxCompletionExchanges: 128,
         maxFileExchanges: 128,
         maxOtherExchanges: 64,
-        maxUnassignedExchanges: 64
+        maxUnassignedExchanges: 64,
+        // 导入分批：后端 /sessions/import 的 body 限制为 20 MiB，留 1 MiB 余量，避免 413 击穿整轮同步。
+        importBatchMaxItems: 100,
+        importBatchMaxBodyBytes: 19 * 1024 * 1024
     });
 
     const JsonTools = Object.freeze({
@@ -1487,9 +1490,48 @@
         }
     }
 
+    // 导入请求体按「完整 envelope 的 UTF-8 字节数」判定，不能用字符串 length：
+    // 中文与 emoji 单字符占 3-4 字节，用 length 判定会低估体积，再次撞上后端 20 MiB 限制。
+    function encodeImportBody(platform, sessions) {
+        const body = JSON.stringify({ platform, sessions });
+        const bytes = typeof TextEncoder === 'function' ? new TextEncoder().encode(body).byteLength : body.length;
+        return { body, bytes };
+    }
+
+    // 纯函数：把会话切成既不超过条目数、也不超过字节上限的批次。
+    // 单个会话连同 envelope 就超限的进入 oversized，不发送必然失败的请求。
+    function buildImportBatches(platform, sessions, options = {}) {
+        const list = Array.isArray(sessions) ? sessions : [];
+        const maxItems = Math.max(1, Number(options.maxItems) || RuntimeConfig.importBatchMaxItems);
+        const maxBodyBytes = Math.max(1, Number(options.maxBodyBytes) || RuntimeConfig.importBatchMaxBodyBytes);
+        const batches = [];
+        const oversized = [];
+        let current = [];
+        for (const session of list) {
+            if (encodeImportBody(platform, [session]).bytes > maxBodyBytes) {
+                oversized.push(session);
+                continue;
+            }
+            if (current.length >= maxItems) {
+                batches.push(current);
+                current = [];
+            }
+            current.push(session);
+            // 追加后实测整个 envelope：超限就回退该候选、封批，候选另起一批（单独成批必定合规）。
+            if (encodeImportBody(platform, current).bytes > maxBodyBytes) {
+                current.pop();
+                if (current.length) batches.push(current);
+                current = [session];
+            }
+        }
+        if (current.length) batches.push(current);
+        return { batches, oversized };
+    }
+
     class SyncCoordinator {
         constructor(options = {}) {
             this.adapter = options.adapter;
+            this.config = { ...RuntimeConfig, ...(options.config || {}) };
             this.platform = options.platform || this.adapter?.platform || PLATFORM;
             this.bridge = options.bridgeClient || options.bridge || null;
             this.ui = options.ui || null;
@@ -1699,7 +1741,7 @@
                     }
                     if (lastErr) {
                         console.warn(`会话 ${id} 重试后仍失败:`, lastErr);
-                        failed.push({ id, session, error: String(lastErr?.message || lastErr) });
+                        failed.push({ id, session, stage: 'detail', error: String(lastErr?.message || lastErr) });
                     } else {
                         results.push({ ...session, _conversation: conversation });
                     }
@@ -1713,18 +1755,72 @@
                 throw new Error(`全部 ${failed.length} 个会话获取详情失败: ${failed[0].error}`);
             }
 
-            this._progress(1, 1, '推送到服务端...');
-            const response = await this.bridge.request('/sessions/import', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ platform: this.platform, sessions: results }),
-                signal: this.abortController?.signal
+            const maxBodyBytes = Math.max(1, Number(this.config.importBatchMaxBodyBytes) || RuntimeConfig.importBatchMaxBodyBytes);
+            const { batches, oversized } = buildImportBatches(this.platform, results, {
+                maxItems: this.config.importBatchMaxItems,
+                maxBodyBytes
             });
-            if (!response.ok) throw new Error(`导入失败 ${response.status}: ${await response.text()}`);
-            const data = await response.json();
+            for (const session of oversized) {
+                const id = this._sessionId(session);
+                console.warn(`会话 ${id} 单体超过导入体积上限 ${maxBodyBytes} 字节，跳过`);
+                failed.push({ id, session, stage: 'oversized', error: `会话体积超过导入上限 ${maxBodyBytes} 字节` });
+            }
+
+            const accepted = [];
+            let imported = 0;
+            let skipped = 0;
+            let batchFailures = 0;
+            let lastBatchError = '';
+            for (let index = 0; index < batches.length; index++) {
+                if (this._isStopped()) return { state: 'stopped', sessions: accepted };
+                const batch = batches[index];
+                this._progress(index + 1, batches.length, `推送到服务端 ${index + 1}/${batches.length}`);
+                let response = null;
+                let transportError = null;
+                try {
+                    response = await this.bridge.request('/sessions/import', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: encodeImportBody(this.platform, batch).body,
+                        signal: this.abortController?.signal
+                    });
+                } catch (err) {
+                    transportError = err;
+                }
+                if (this._isStopped()) return { state: 'stopped', sessions: accepted };
+                if (!transportError && response?.ok) {
+                    let data = {};
+                    try { data = await response.json(); } catch { data = {}; }
+                    imported += Number(data?.imported) || 0;
+                    skipped += Number(data?.skipped) || 0;
+                    accepted.push(...batch);
+                    continue;
+                }
+                // 单批失败既不撤销已成功的批次，也不中断后续批次：只把该批会话记为 import 阶段失败。
+                let detail;
+                if (transportError) {
+                    detail = String(transportError?.message || transportError);
+                } else {
+                    let text = '';
+                    try { text = await response.text(); } catch { text = ''; }
+                    detail = `导入失败 ${response?.status}: ${text}`;
+                }
+                batchFailures++;
+                lastBatchError = detail;
+                console.warn(`第 ${index + 1}/${batches.length} 批导入失败:`, detail);
+                for (const session of batch) {
+                    failed.push({ id: this._sessionId(session), session, stage: 'import', error: detail });
+                }
+            }
+
+            // 所有批次都失败时保持既有的「完全失败即抛错」行为，供 UI 显示错误。
+            if (batches.length && batchFailures === batches.length) {
+                throw new Error(lastBatchError);
+            }
+
             const failMsg = failed.length ? `, 失败 ${failed.length} 个` : '';
-            this._status(`✅ 导入 ${data.imported} 个, 跳过 ${data.skipped} 个${failMsg}`);
-            return { ...data, sessions: results, failed };
+            this._status(`✅ 导入 ${imported} 个, 跳过 ${skipped} 个${failMsg}`);
+            return { imported, skipped, sessions: accepted, failed };
         }
 
         async sync(fullSync = false) {
@@ -1953,6 +2049,7 @@
 
     const testApi = Object.freeze({
         RuntimeConfig,
+        buildImportBatches,
         JsonTools,
         CaptureRedactor,
         SseParser,
