@@ -638,14 +638,19 @@ mod tests {
         let (store, root, _credentials) = test_store().await;
         let fresh = root.join("settings.json.tmp-fresh");
         let stale = root.join("settings.json.tmp-stale");
+        let future = root.join("settings.json.tmp-future");
         let other = root.join("other.tmp-stale");
-        for file in [&fresh, &stale, &other] {
+        for file in [&fresh, &stale, &future, &other] {
             tokio::fs::write(file, b"{}").await.unwrap();
         }
         let six_minutes_ago = filetime::FileTime::from_system_time(
             std::time::SystemTime::now() - std::time::Duration::from_secs(6 * 60),
         );
+        let one_hour_ahead = filetime::FileTime::from_system_time(
+            std::time::SystemTime::now() + std::time::Duration::from_secs(60 * 60),
+        );
         filetime::set_file_mtime(&stale, six_minutes_ago).unwrap();
+        filetime::set_file_mtime(&future, one_hour_ahead).unwrap();
         filetime::set_file_mtime(&other, six_minutes_ago).unwrap();
 
         let mut value = store.current();
@@ -659,6 +664,10 @@ mod tests {
         assert!(
             !stale.exists(),
             "a stale settings temporary must be removed"
+        );
+        assert!(
+            future.exists(),
+            "a temporary with a future mtime (clock skew) must be kept"
         );
         assert!(
             other.exists(),

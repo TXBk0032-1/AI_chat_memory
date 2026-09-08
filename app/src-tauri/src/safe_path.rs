@@ -11,9 +11,13 @@ const NON_DISK_PREFIX: &str = "禁止使用网络共享、命名空间或非标�
 const PARENT_DIR: &str = "路径包含非法目录遍历字符 (..)";
 const NOT_ABSOLUTE: &str = "路径必须为绝对路径";
 const NO_EXISTING_ANCESTOR: &str = "路径没有可解析的已存在祖先";
+#[cfg(target_os = "windows")]
+const COLON_IN_COMPONENT: &str = "路径组件包含非法字符 ':'";
 
 /// Lexically normalize `path`: drop `.`, reject `..`, reject non-disk prefixes
-/// (UNC, `\\?\`, `\\.\`) on Windows and require an absolute result.
+/// (UNC, `\\?\`, `\\.\`) and `:` inside ordinary components (embedded drive
+/// letters, NTFS alternate data streams) on Windows, and require an absolute
+/// result.
 fn lexically_normalize(path: &Path) -> Result<PathBuf, String> {
     let mut normalized = PathBuf::new();
     for component in path.components() {
@@ -30,7 +34,16 @@ fn lexically_normalize(path: &Path) -> Result<PathBuf, String> {
             Component::RootDir => normalized.push(component),
             Component::CurDir => {}
             Component::ParentDir => return Err(PARENT_DIR.into()),
-            Component::Normal(name) => normalized.push(name),
+            Component::Normal(name) => {
+                // `D:\a\C:\b.md` yields `Normal("C:")` and `file.md:stream`
+                // names an NTFS alternate data stream. Reject explicitly
+                // instead of relying on `PathBuf::push` resetting the buffer.
+                #[cfg(target_os = "windows")]
+                if name.to_string_lossy().contains(':') {
+                    return Err(COLON_IN_COMPONENT.into());
+                }
+                normalized.push(name)
+            }
         }
     }
     if !normalized.is_absolute() {
@@ -40,15 +53,22 @@ fn lexically_normalize(path: &Path) -> Result<PathBuf, String> {
 }
 
 /// Turn a `\\?\C:\...` verbatim disk path (as returned by `canonicalize`) back
-/// into the plain `C:\...` form. Other prefixes are returned unchanged.
+/// into the plain `C:\...` form; a plain `C:\...` path passes through
+/// unchanged. Any other prefix fails closed with [`NON_DISK_PREFIX`]: a mapped
+/// network drive such as `Z:\` canonicalizes to `\\?\UNC\server\share\...`,
+/// which would otherwise bypass every protected-directory comparison and leak
+/// a verbatim UNC path to callers (e.g. into `settings.json`). Mapped network
+/// drives are therefore deliberately not usable as export / data-directory
+/// targets, matching the lexical rule that rejects UNC and namespace prefixes.
 #[cfg(target_os = "windows")]
-fn strip_verbatim_prefix(path: &Path) -> PathBuf {
+fn strip_verbatim_prefix(path: &Path) -> Result<PathBuf, String> {
     let mut components = path.components();
     let Some(Component::Prefix(prefix)) = components.next() else {
-        return path.to_path_buf();
+        return Err(NON_DISK_PREFIX.into());
     };
-    let std::path::Prefix::VerbatimDisk(letter) = prefix.kind() else {
-        return path.to_path_buf();
+    let letter = match prefix.kind() {
+        std::path::Prefix::VerbatimDisk(letter) | std::path::Prefix::Disk(letter) => letter,
+        _ => return Err(NON_DISK_PREFIX.into()),
     };
     let mut plain = PathBuf::from(format!("{}:\\", letter as char));
     for component in components {
@@ -56,12 +76,12 @@ fn strip_verbatim_prefix(path: &Path) -> PathBuf {
             plain.push(name);
         }
     }
-    plain
+    Ok(plain)
 }
 
 #[cfg(not(target_os = "windows"))]
-fn strip_verbatim_prefix(path: &Path) -> PathBuf {
-    path.to_path_buf()
+fn strip_verbatim_prefix(path: &Path) -> Result<PathBuf, String> {
+    Ok(path.to_path_buf())
 }
 
 /// Lexically normalize `path` (reject relative paths, `..`, UNC / device
@@ -84,7 +104,7 @@ pub(crate) fn resolve_for_validation(path: &Path) -> Result<PathBuf, String> {
     }
     let canonical =
         std::fs::canonicalize(ancestor).map_err(|error| format!("无法解析目标路径：{error}"))?;
-    let mut resolved = strip_verbatim_prefix(&canonical);
+    let mut resolved = strip_verbatim_prefix(&canonical)?;
     for component in tail.into_iter().rev() {
         resolved.push(component);
     }
@@ -338,6 +358,79 @@ mod tests {
         assert!(resolve_for_validation(Path::new(r"\\evil.com\share\doc.md")).is_err());
         assert!(resolve_for_validation(Path::new(r"\\?\C:\Windows\evil.md")).is_err());
         assert!(resolve_for_validation(Path::new(r"\\.\COM1")).is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn strip_verbatim_prefix_fails_closed_on_non_disk_canonical_prefixes() {
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"\\?\UNC\server\share\x.md")),
+            Err(NON_DISK_PREFIX.to_string())
+        );
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"\\server\share\x.md")),
+            Err(NON_DISK_PREFIX.to_string())
+        );
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"\\.\COM1")),
+            Err(NON_DISK_PREFIX.to_string())
+        );
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"\\?\C:\x")),
+            Ok(PathBuf::from(r"C:\x"))
+        );
+        assert_eq!(
+            strip_verbatim_prefix(Path::new(r"C:\x")),
+            Ok(PathBuf::from(r"C:\x"))
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn mapped_network_drive_is_rejected_when_present() {
+        let Some(mapped) = ('D'..='Z')
+            .map(|letter| format!("{letter}:\\"))
+            .find(|drive| {
+                std::fs::canonicalize(drive).is_ok_and(|canonical| {
+                    !matches!(
+                        canonical.components().next(),
+                        Some(Component::Prefix(prefix))
+                            if matches!(prefix.kind(), std::path::Prefix::VerbatimDisk(_))
+                    )
+                })
+            })
+        else {
+            eprintln!("skip: no drive on this machine canonicalizes to a non-disk prefix");
+            return;
+        };
+        let target = Path::new(&mapped).join("acm").join("file.md");
+        assert_eq!(
+            resolve_for_validation(&target),
+            Err(NON_DISK_PREFIX.to_string())
+        );
+        assert!(validate_writable_destination(&target).is_err());
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn rejects_colon_inside_normal_components() {
+        assert_eq!(
+            lexically_normalize(Path::new(r"D:\a\C:\b.md")),
+            Err(COLON_IN_COMPONENT.to_string())
+        );
+        assert_eq!(
+            lexically_normalize(Path::new(r"C:\x\file.md:stream")),
+            Err(COLON_IN_COMPONENT.to_string())
+        );
+        assert_eq!(
+            resolve_for_validation(Path::new(r"D:\a\C:\b.md")),
+            Err(COLON_IN_COMPONENT.to_string())
+        );
+        assert_eq!(
+            resolve_for_validation(Path::new(r"C:\x\file.md:stream")),
+            Err(COLON_IN_COMPONENT.to_string())
+        );
+        assert!(lexically_normalize(Path::new(r"C:\x\file.md")).is_ok());
     }
 
     #[cfg(target_os = "windows")]
