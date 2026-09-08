@@ -9,6 +9,10 @@ use tokio::sync::{Mutex, Notify, RwLock};
 /// quarantined as 'error' and removed from the pending queue head.
 const MAX_CHUNK_FAILURES: usize = 3;
 
+/// Text embedded after a whole-batch failure to tell a poison chunk apart
+/// from a backend outage. It is never written to any table.
+const EMBEDDING_HEALTH_CANARY: &str = "semantic canary";
+
 use super::index;
 use crate::{
     embedding::EmbeddingManager,
@@ -648,9 +652,9 @@ impl SemanticEngine {
 
     /// Bumps the failure counter for each poison chunk and quarantines it as
     /// 'error' once the budget is exhausted, so the pending queue head can
-    /// move on. Chunks are only counted when a sibling in the same batch
-    /// succeeded — a whole-batch failure is a service-level outage and never
-    /// burns a chunk's budget.
+    /// move on. Chunks are only counted when the backend is known healthy —
+    /// a sibling in the same batch succeeded, or the health canary embedded
+    /// after a whole-batch failure. A backend outage never burns a budget.
     async fn record_chunk_failures(&self, failures: &[(i64, AppError)]) {
         for (chunk_id, error) in failures {
             let attempts = {
@@ -683,6 +687,12 @@ impl SemanticEngine {
                 }
             }
         }
+    }
+
+    /// True while `chunk_id` still holds an unexhausted failure budget, i.e.
+    /// it has failed at least once but has not been quarantined yet.
+    fn chunk_failure_is_active(&self, chunk_id: i64) -> bool {
+        self.chunk_failures.lock().unwrap().contains_key(&chunk_id)
     }
 
     async fn drain_pending_inner(&self) -> Result<()> {
@@ -819,8 +829,41 @@ impl SemanticEngine {
                             }
                         }
                         if survivors.is_empty() {
-                            tracing::warn!(%error, pending = pending.len(), "semantic embedding failed for the whole batch; scheduling self retry");
-                            return Err(error);
+                            // Nothing in the batch embeds. A health canary
+                            // separates "every chunk here is poison" (backend
+                            // healthy, burn each chunk's budget) from a
+                            // backend outage (canary fails too, blame nobody).
+                            // The canary vector is discarded and never stored.
+                            let canary = [EMBEDDING_HEALTH_CANARY.to_owned()];
+                            match backend.embed_documents(&canary, Some(&cancellation)).await {
+                                Ok(vectors) if vectors.len() == 1 => {
+                                    self.record_chunk_failures(&failures).await;
+                                    if failures
+                                        .iter()
+                                        .any(|(id, _)| self.chunk_failure_is_active(*id))
+                                    {
+                                        tracing::warn!(%error, pending = pending.len(), "semantic embedding failed for the whole batch while backend is healthy; chunk failure recorded, scheduling self retry");
+                                        return Err(error);
+                                    }
+                                    // Every chunk in this batch has been
+                                    // quarantined: keep draining so the queue
+                                    // head is no longer blocked.
+                                    tracing::info!(
+                                        quarantined = failures.len(),
+                                        "whole poison batch quarantined; continuing drain"
+                                    );
+                                    continue;
+                                }
+                                Ok(_) => {
+                                    return Err(AppError::InvalidData(
+                                        "embedding canary returned no vector".into(),
+                                    ));
+                                }
+                                Err(canary_error) => {
+                                    tracing::warn!(%canary_error, %error, pending = pending.len(), "embedding canary failed; treating batch failure as backend outage, scheduling self retry");
+                                    return Err(error);
+                                }
+                            }
                         }
                         self.record_chunk_failures(&failures).await;
                         tracing::info!(
@@ -1334,31 +1377,132 @@ mod tests {
 
         // First drain: the batch containing the poison chunk fails, the probe
         // rescues both healthy chunks and burns the poison chunk's first
-        // failure credit. The trailing lone-poison re-fetch surfaces as Err
-        // (service-level) so the worker self-heal timer takes over.
+        // failure credit. The trailing lone-poison re-fetch fails again; the
+        // health canary succeeds, so a second credit is burned and the drain
+        // surfaces Err so the worker self-heal timer retries.
         engine.drain_pending().await.unwrap_err();
         assert_eq!(chunk_state(&pool, 2).await.0, "ready");
         assert_eq!(chunk_state(&pool, 3).await.0, "ready");
         assert_eq!(chunk_state(&pool, 1).await.0, "pending");
+        assert!(engine.chunk_failure_is_active(1));
 
-        // Second drain: the poison chunk is alone now, so its failure looks
-        // like a service-level outage and must NOT burn another credit.
-        engine.drain_pending().await.unwrap_err();
-        assert_eq!(chunk_state(&pool, 1).await.0, "pending");
-
-        // A healthy sibling re-arriving burns the remaining credits and then
-        // quarantines the poison chunk as 'error', unblocking the queue.
-        insert_drain_chunk(&pool, 4, "healthy text three").await;
-        engine.drain_pending().await.unwrap_err();
-        assert_eq!(chunk_state(&pool, 1).await.0, "pending");
-        assert_eq!(chunk_state(&pool, 4).await.0, "ready");
-
-        insert_drain_chunk(&pool, 5, "healthy text four").await;
+        // Second drain: the poison chunk is alone; the canary proves the
+        // backend is healthy, the last credit is burned and the chunk is
+        // quarantined as 'error'. The drain then continues, finds the queue
+        // empty and returns Ok — no healthy sibling is needed to unblock it.
         engine.drain_pending().await.unwrap();
         let (status, error) = chunk_state(&pool, 1).await;
         assert_eq!(status, "error");
         assert!(error.unwrap().contains("poison batch exploded"));
-        assert_eq!(chunk_state(&pool, 5).await.0, "ready");
+        assert!(!engine.chunk_failure_is_active(1));
+
+        // Later arrivals are indexed normally behind the quarantined chunk.
+        insert_drain_chunk(&pool, 4, "healthy text three").await;
+        engine.drain_pending().await.unwrap();
+        assert_eq!(chunk_state(&pool, 4).await.0, "ready");
+    }
+
+    #[tokio::test]
+    async fn lone_poison_chunk_is_quarantined_after_three_content_failures() {
+        let pool = drain_test_pool().await;
+        insert_drain_chunk(&pool, 1, "poison text").await;
+        let settings = SemanticSearchSettings {
+            enabled: true,
+            backend: EmbeddingBackendKind::Local,
+            ..SemanticSearchSettings::default()
+        };
+        let manager = EmbeddingManager::from_backend_for_test(
+            std::env::temp_dir(),
+            settings,
+            Arc::new(PoisonBackend {
+                embed_calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        let engine = SemanticEngine::new(pool.clone(), std::env::temp_dir(), manager);
+
+        // The poison chunk is the only queue head. The batch and the probe both
+        // fail, but the canary embeds fine, so each drain burns one credit and
+        // hands off to the self-heal timer until the budget is exhausted.
+        engine.drain_pending().await.unwrap_err();
+        assert_eq!(chunk_state(&pool, 1).await.0, "pending");
+        assert!(engine.chunk_failure_is_active(1));
+
+        engine.drain_pending().await.unwrap_err();
+        assert_eq!(chunk_state(&pool, 1).await.0, "pending");
+        assert!(engine.chunk_failure_is_active(1));
+
+        // Third failure quarantines the chunk; the drain continues to an empty
+        // queue and returns Ok instead of Err.
+        engine.drain_pending().await.unwrap();
+        let (status, error) = chunk_state(&pool, 1).await;
+        assert_eq!(status, "error");
+        assert!(error.unwrap().contains("poison batch exploded"));
+        assert!(!engine.chunk_failure_is_active(1));
+    }
+
+    /// Fails every embedding request, including the health canary: a
+    /// service-level outage that must never blame a chunk.
+    struct OutageBackend;
+
+    #[async_trait]
+    impl EmbeddingBackend for OutageBackend {
+        fn identity(&self) -> BackendIdentity {
+            BackendIdentity {
+                backend: EmbeddingBackendKind::Local,
+                backend_id: "local".into(),
+                model_id: "test".into(),
+                dimensions: 8,
+            }
+        }
+
+        async fn embed_documents(
+            &self,
+            _texts: &[String],
+            _cancellation: Option<&CancellationToken>,
+        ) -> Result<Vec<Vec<f32>>> {
+            Err(AppError::Configuration("backend outage".into()))
+        }
+
+        async fn embed_queries(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            Ok(vec![vec![0.0; 8]; texts.len()])
+        }
+
+        async fn healthcheck(&self) -> Result<EmbeddingHealth> {
+            Ok(EmbeddingHealth {
+                ok: false,
+                backend: EmbeddingBackendKind::Local,
+                model_id: "test".into(),
+                dimensions: Some(8),
+                message: "outage".into(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn backend_outage_canary_does_not_consume_chunk_failure_budget() {
+        let pool = drain_test_pool().await;
+        insert_drain_chunk(&pool, 1, "healthy text one").await;
+        let settings = SemanticSearchSettings {
+            enabled: true,
+            backend: EmbeddingBackendKind::Local,
+            ..SemanticSearchSettings::default()
+        };
+        let manager = EmbeddingManager::from_backend_for_test(
+            std::env::temp_dir(),
+            settings,
+            Arc::new(OutageBackend),
+        );
+        let engine = SemanticEngine::new(pool.clone(), std::env::temp_dir(), manager);
+
+        // More drains than MAX_CHUNK_FAILURES: the canary fails too, so the
+        // chunk keeps its full budget and stays pending for the retry timer.
+        for _ in 0..MAX_CHUNK_FAILURES {
+            let error = engine.drain_pending().await.unwrap_err();
+            assert!(error.to_string().contains("backend outage"));
+            assert_eq!(chunk_state(&pool, 1).await.0, "pending");
+            assert!(!engine.chunk_failure_is_active(1));
+        }
+        assert!(engine.chunk_failures.lock().unwrap().is_empty());
     }
 
     /// Honors the caller-supplied cancellation token for document embedding
