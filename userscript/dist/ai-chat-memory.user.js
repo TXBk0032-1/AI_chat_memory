@@ -1709,8 +1709,11 @@
 
         // 候选 = 正常候选 ∪ 本平台重试队列，按稳定 id 去重；正常候选优先（列表元数据更新），
         // 重试项不受 last_updated_at 游标过滤，保证失败会话在游标推进后仍会被重新同步。
+        // 同时在 this._lastRetryIds 记录哪些候选仅来自重试队列，供 fetchDetailsAndPush 区分「新鲜候选全部失败」
+        // 与「纯重试轮次再次失败」：前者仍抛错，后者只告警，避免一个永久失败的会话让每轮同步都显示错误。
         _mergeRetryCandidates(candidates) {
             const list = Array.isArray(candidates) ? [...candidates] : [];
+            this._lastRetryIds = new Set();
             let retries = [];
             try { retries = this.retryStore?.sessions() || []; } catch (err) { console.warn('读取重试队列失败:', err); }
             if (!retries.length) return list;
@@ -1720,6 +1723,7 @@
                 const id = this._sessionId(session);
                 if (id === null || id === undefined || seen.has(id)) continue;
                 seen.add(id);
+                this._lastRetryIds.add(id);
                 list.push(session);
                 appended++;
             }
@@ -1817,6 +1821,9 @@
                 this._status('✅ 无新会话需要同步');
                 return { imported: 0, skipped: 0, sessions: [] };
             }
+            // 直接调用（未经 selectSessions）时没有重试来源信息，retryIds 为空，保持「全部失败即抛错」。
+            const retryIds = this._lastRetryIds instanceof Set ? this._lastRetryIds : new Set();
+            this._lastRetryIds = null;
             const queue = [...sessions];
             const results = [];
             const failed = [];
@@ -1841,6 +1848,8 @@
                             if (attempt === 0) console.warn(`会话 ${id} 获取失败，重试一次:`, err);
                         }
                     }
+                    // 用户停止导致的中断不是会话失败：不计入 failed 也不写入重试队列，下轮由正常候选或已有队列项覆盖。
+                    if (lastErr && this._isStopped()) break;
                     if (lastErr) {
                         console.warn(`会话 ${id} 重试后仍失败:`, lastErr);
                         const message = String(lastErr?.message || lastErr);
@@ -1856,7 +1865,10 @@
             if (this._isStopped()) return { state: 'stopped', sessions: results };
 
             if (!results.length && failed.length > 0) {
-                throw new Error(`全部 ${failed.length} 个会话获取详情失败: ${failed[0].error}`);
+                const retryOnly = failed.every(item => retryIds.has(item.id));
+                if (!retryOnly) throw new Error(`全部 ${failed.length} 个会话获取详情失败: ${failed[0].error}`);
+                this._status(`⚠️ ${failed.length} 个历史失败会话仍未同步`);
+                return { imported: 0, skipped: 0, sessions: [], failed };
             }
 
             const maxBodyBytes = Math.max(1, Number(this.config.importBatchMaxBodyBytes) || RuntimeConfig.importBatchMaxBodyBytes);
@@ -1870,6 +1882,8 @@
                 console.warn(`会话 ${id} 单体超过导入体积上限 ${maxBodyBytes} 字节，跳过`);
                 failed.push({ id, session, stage: 'oversized', error: `会话体积超过导入上限 ${maxBodyBytes} 字节` });
             }
+            // 若其此前因 detail/import 失败已在队列中，则出队，避免每轮重复抓详情再丢弃。
+            this._retryRemove(oversized.map(session => this._sessionId(session)));
 
             const accepted = [];
             let imported = 0;
@@ -1940,6 +1954,7 @@
             if (this.syncing) return { state: 'already_syncing' };
             this.syncing = true;
             this.stopped = false;
+            this._lastRetryIds = null;
             this.abortController = typeof AbortController === 'function' ? new AbortController() : null;
             let connection;
             try {

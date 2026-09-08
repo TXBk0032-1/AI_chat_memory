@@ -1063,15 +1063,22 @@ test('cursor advances past failures yet later syncs keep retrying the queued ses
     assert.deepEqual(Object.keys(storage.get(RETRY_KEY).entries), ['failed-a']);
 
     // Round 2: backend cursor moved to B; the list page is empty beyond the cursor, so the queued A is the only
-    // candidate. It fails again -> attempts 2. (Every candidate failing keeps the pre-existing "all detail fetches
-    // failed" error result; what matters here is that A was still selected and stays queued.)
+    // candidate. It fails again -> attempts 2. A retry-only round must NOT surface as a sync error (before the
+    // queue existed the session was silently dropped, so an error every round would be a new regression).
     cursor.value = 150;
     pages.push(page([{ id: 'ok-b', updated_at: 150 }]));
-    const second = await make().sync(false);
-    assert.equal(second.state, 'error');
-    assert.match(String(second.error?.message), /detail boom failed-a/);
+    const statuses = [];
+    const second = await new api.SyncCoordinator({
+        adapter: makeRetryAdapter(api, pages, failing),
+        bridgeClient: makeRetryBridge(cursor, bodies), ui: { setStatus: text => statuses.push(text), setProgress() {}, setSyncing() {} },
+        detailConcurrency: 1, detailDelayMs: 0
+    }).sync(false);
+    assert.notEqual(second.state, 'error', 'a round consisting only of queued retries must not be reported as an error');
+    assert.equal(second.imported, 0);
+    assert.deepEqual(plain(second.failed.map(f => ({ id: f.id, stage: f.stage }))), [{ id: 'failed-a', stage: 'detail' }]);
     assert.equal(storage.get(RETRY_KEY).entries['failed-a'].attempts, 2);
     assert.equal(bodies.length, 1, 'nothing new to push in round 2');
+    assert.ok(statuses.includes('⚠️ 1 个历史失败会话仍未同步'), `status must warn about the still-failing queued session, got: ${JSON.stringify(statuses)}`);
 
     // Round 3: A recovers; it is pushed and removed from the queue.
     failing.clear();
@@ -1173,3 +1180,50 @@ test('platform retry isolation: a deepseek retry queue never leaks into a kimi c
     assert.deepEqual(plain((await deepseek.selectSessions('200')).map(s => s.id)), ['failed-a'], 'deepseek selection ignores the kimi queue');
 });
 
+test('fetchDetailsAndPush still throws when every fresh (non-queued) candidate fails to fetch details', async () => {
+    const { api } = loadTestApi();
+    const cursor = { value: 100 };
+    const bodies = [];
+    const coordinator = new api.SyncCoordinator({
+        adapter: makeRetryAdapter(api, [page([{ id: 'failed-a', updated_at: 120 }])], new Set(['failed-a'])),
+        bridgeClient: makeRetryBridge(cursor, bodies), ui: quietUi, detailConcurrency: 1, detailDelayMs: 0
+    });
+    const result = await coordinator.sync(false);
+    assert.equal(result.state, 'error', 'a fresh candidate failing completely keeps the pre-existing error result');
+    assert.match(String(result.error?.message), /detail boom failed-a/);
+    await assert.rejects(() => coordinator.fetchDetailsAndPush([{ id: 'failed-a', updated_at: 120 }]), /detail boom failed-a/,
+        'direct fetchDetailsAndPush calls have no retry ids and keep throwing');
+});
+
+test('a queued session that turns out oversized is removed from the retry queue instead of being refetched every round', async () => {
+    const { api, values: storage } = loadTestApi();
+    const bodies = [];
+    const bridge = { request: async (path, options = {}) => { bodies.push(options.body); return okImport(1); } };
+    const coordinator = makePushCoordinator(api, bridge, { importBatchMaxItems: 100, importBatchMaxBodyBytes: 200 });
+    // It failed at the import stage earlier (e.g. a 500) and was queued; now its detail fetch succeeds but it is too big.
+    coordinator.retryStore.upsert({ id: 'huge', title: 'x'.repeat(400) }, 'import', 'earlier');
+    coordinator.retryStore.upsert({ id: 'other', updated_at: 1 }, 'detail', 'earlier');
+    const result = await coordinator.fetchDetailsAndPush([{ id: 'small' }, { id: 'huge', title: 'x'.repeat(400) }]);
+    assert.deepEqual(plain(result.failed.map(f => ({ id: f.id, stage: f.stage }))), [{ id: 'huge', stage: 'oversized' }]);
+    assert.ok(bodies.every(body => !body.includes('"huge"')), 'the oversized session must never be sent');
+    assert.deepEqual(Object.keys(storage.get(RETRY_KEY).entries), ['other'], 'the oversized session must leave the queue; unrelated entries stay');
+});
+
+test('stop() during a detail fetch neither queues the aborted session nor reports it as a detail failure', async () => {
+    const { api, values: storage } = loadTestApi();
+    let coordinator;
+    let detailCalls = 0;
+    const adapter = {
+        platform: 'deepseek', needsToken: false,
+        fetchConversation: async () => { detailCalls++; coordinator.stop(); throw new Error('Aborted'); }
+    };
+    coordinator = new api.SyncCoordinator({
+        adapter, bridgeClient: { request: async () => okImport(1) }, ui: quietUi, detailConcurrency: 1, detailDelayMs: 0
+    });
+    const result = await coordinator.fetchDetailsAndPush([{ id: 's1' }, { id: 's2' }]);
+    assert.equal(result.state, 'stopped');
+    assert.equal(detailCalls, 1, 'no retry attempt and no second session after stop');
+    assert.deepEqual(plain(result.sessions), []);
+    assert.equal(storage.has(RETRY_KEY) ? Object.keys(storage.get(RETRY_KEY).entries).length : 0, 0,
+        'a user stop must not be persisted as a detail failure');
+});
