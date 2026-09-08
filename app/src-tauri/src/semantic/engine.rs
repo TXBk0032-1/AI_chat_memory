@@ -695,6 +695,26 @@ impl SemanticEngine {
         self.chunk_failures.lock().unwrap().contains_key(&chunk_id)
     }
 
+    /// Publishes the `cancelled` stage for a batch whose embed was aborted by
+    /// the user. Shared by the whole-batch path, the single-chunk probe loop
+    /// and the health canary so all three report the same event.
+    async fn publish_cancelled_progress(&self, pending_chunks: usize) {
+        self.publish_reindex_progress(
+            ReindexProgress {
+                stage: "cancelled".into(),
+                total_sessions: 0,
+                processed_sessions: 0,
+                total_chunks: 0,
+                ready_chunks: 0,
+                pending_chunks: pending_chunks as i64,
+                fraction: 0.0,
+                message: "索引编码已取消".into(),
+            },
+            None,
+        )
+        .await;
+    }
+
     async fn drain_pending_inner(&self) -> Result<()> {
         // One cancellation generation per drain: a cancel issued before this
         // point does not touch this work, one issued during it aborts the
@@ -782,20 +802,7 @@ impl SemanticEngine {
                         // the drain.
                         if matches!(error, AppError::Cancelled(_)) {
                             tracing::info!(%error, pending = pending.len(), "semantic embedding cancelled");
-                            self.publish_reindex_progress(
-                                ReindexProgress {
-                                    stage: "cancelled".into(),
-                                    total_sessions: 0,
-                                    processed_sessions: 0,
-                                    total_chunks: 0,
-                                    ready_chunks: 0,
-                                    pending_chunks: pending.len() as i64,
-                                    fraction: 0.0,
-                                    message: "索引编码已取消".into(),
-                                },
-                                None,
-                            )
-                            .await;
+                            self.publish_cancelled_progress(pending.len()).await;
                             break 'fetch;
                         }
                         // Probe the batch chunk-by-chunk: a single poison chunk
@@ -825,7 +832,21 @@ impl SemanticEngine {
                                         ),
                                     ));
                                 }
-                                Err(single_error) => failures.push((item.id, single_error)),
+                                Err(single_error) => {
+                                    // A cancel is not a poison verdict. Stop the
+                                    // whole drain here: nothing is recorded
+                                    // against any chunk and the survivors
+                                    // collected so far are simply not stored —
+                                    // they remain pending and the next drain
+                                    // re-embeds them, which is cheaper than
+                                    // risking a wrong quarantine.
+                                    if matches!(single_error, AppError::Cancelled(_)) {
+                                        tracing::info!(%single_error, pending = pending.len(), "semantic embedding cancelled during single-chunk probe");
+                                        self.publish_cancelled_progress(pending.len()).await;
+                                        break 'fetch;
+                                    }
+                                    failures.push((item.id, single_error));
+                                }
                             }
                         }
                         if survivors.is_empty() {
@@ -858,6 +879,15 @@ impl SemanticEngine {
                                     return Err(AppError::InvalidData(
                                         "embedding canary returned no vector".into(),
                                     ));
+                                }
+                                Err(AppError::Cancelled(cancel_error)) => {
+                                    // The user cancelled while the canary was in
+                                    // flight: not an outage, so do not hand off
+                                    // to the worker self-heal timer or surface
+                                    // the original batch error.
+                                    tracing::info!(%cancel_error, pending = pending.len(), "semantic embedding cancelled during health canary");
+                                    self.publish_cancelled_progress(pending.len()).await;
+                                    break 'fetch;
                                 }
                                 Err(canary_error) => {
                                     tracing::warn!(%canary_error, %error, pending = pending.len(), "embedding canary failed; treating batch failure as backend outage, scheduling self retry");
@@ -1720,6 +1750,228 @@ mod tests {
         engine.drain_pending().await.unwrap();
         assert_eq!(embed_calls.load(Ordering::SeqCst), 2);
         assert_eq!(chunk_state(&pool, 1).await.0, "ready");
+    }
+
+    /// Fails every multi-text batch with an ordinary transient error so the
+    /// drain falls into the single-chunk probe loop, then cancels the current
+    /// generation from inside the second single-text probe and reports
+    /// `AppError::Cancelled`. Later calls honor the (now cancelled) token.
+    struct ProbeCancelBackend {
+        embed_calls: Arc<AtomicUsize>,
+        single_calls: Arc<AtomicUsize>,
+        source: Arc<std::sync::OnceLock<CancellationSource>>,
+    }
+
+    #[async_trait]
+    impl EmbeddingBackend for ProbeCancelBackend {
+        fn identity(&self) -> BackendIdentity {
+            BackendIdentity {
+                backend: EmbeddingBackendKind::Local,
+                backend_id: "local".into(),
+                model_id: "test".into(),
+                dimensions: 8,
+            }
+        }
+
+        async fn embed_documents(
+            &self,
+            texts: &[String],
+            cancellation: Option<&CancellationToken>,
+        ) -> Result<Vec<Vec<f32>>> {
+            self.embed_calls.fetch_add(1, Ordering::SeqCst);
+            let token = cancellation.expect("drain must pass a background token");
+            if token.is_cancelled() {
+                return Err(AppError::Cancelled("cancelled by test".into()));
+            }
+            if texts.len() > 1 {
+                return Err(AppError::Configuration("batch exploded".into()));
+            }
+            let single = self.single_calls.fetch_add(1, Ordering::SeqCst);
+            if single == 1 {
+                self.source
+                    .get()
+                    .expect("test must install the manager's cancellation source")
+                    .cancel_current();
+                return Err(AppError::Cancelled("cancelled mid-probe".into()));
+            }
+            Ok(vec![vec![0.0; 8]; texts.len()])
+        }
+
+        async fn embed_queries(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            Ok(vec![vec![0.0; 8]; texts.len()])
+        }
+
+        async fn healthcheck(&self) -> Result<EmbeddingHealth> {
+            Ok(EmbeddingHealth {
+                ok: true,
+                backend: EmbeddingBackendKind::Local,
+                model_id: "test".into(),
+                dimensions: Some(8),
+                message: "ok".into(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_during_probe_loop_does_not_burn_chunk_budget() {
+        let pool = drain_test_pool().await;
+        insert_drain_chunk(&pool, 1, "text one").await;
+        insert_drain_chunk(&pool, 2, "text two").await;
+        insert_drain_chunk(&pool, 3, "text three").await;
+        let settings = SemanticSearchSettings {
+            enabled: true,
+            backend: EmbeddingBackendKind::Local,
+            ..SemanticSearchSettings::default()
+        };
+        let embed_calls = Arc::new(AtomicUsize::new(0));
+        let single_calls = Arc::new(AtomicUsize::new(0));
+        let source_slot = Arc::new(std::sync::OnceLock::new());
+        let manager = EmbeddingManager::from_backend_for_test(
+            std::env::temp_dir(),
+            settings,
+            Arc::new(ProbeCancelBackend {
+                embed_calls: embed_calls.clone(),
+                single_calls: single_calls.clone(),
+                source: source_slot.clone(),
+            }),
+        );
+        source_slot
+            .set(manager.cancellation_source())
+            .ok()
+            .expect("cancellation source installed once");
+        let engine = SemanticEngine::new(pool.clone(), std::env::temp_dir(), manager);
+
+        // Batch fails (transient) -> probe: chunk 1 embeds, chunk 2 is
+        // cancelled mid-probe. A cancel is not a poison verdict: the drain
+        // must stop right there without probing chunk 3, without counting
+        // any chunk against its failure budget, and must return Ok.
+        engine
+            .drain_pending()
+            .await
+            .expect("user cancellation during the probe loop must not surface as a backend error");
+        assert_eq!(
+            single_calls.load(Ordering::SeqCst),
+            2,
+            "probe loop must stop at the cancelled chunk instead of probing the rest"
+        );
+        for chunk_id in 1..=3 {
+            let (status, error) = chunk_state(&pool, chunk_id).await;
+            assert_ne!(
+                status, "error",
+                "chunk {chunk_id} must not be quarantined by a cancel (error={error:?})"
+            );
+            assert!(
+                matches!(status.as_str(), "pending" | "ready"),
+                "chunk {chunk_id} has unexpected status {status}"
+            );
+            assert!(
+                !engine.chunk_failure_is_active(chunk_id),
+                "chunk {chunk_id} must not hold an active failure after a cancel"
+            );
+        }
+        assert!(
+            engine.chunk_failures.lock().unwrap().is_empty(),
+            "a cancelled probe must not count against any chunk's poison budget"
+        );
+    }
+
+    /// Fails every content text with an ordinary transient error and cancels
+    /// the current generation from inside the health-canary embed, reporting
+    /// `AppError::Cancelled` for it. Later calls honor the cancelled token.
+    struct CanaryCancelBackend {
+        canary_calls: Arc<AtomicUsize>,
+        source: Arc<std::sync::OnceLock<CancellationSource>>,
+    }
+
+    #[async_trait]
+    impl EmbeddingBackend for CanaryCancelBackend {
+        fn identity(&self) -> BackendIdentity {
+            BackendIdentity {
+                backend: EmbeddingBackendKind::Local,
+                backend_id: "local".into(),
+                model_id: "test".into(),
+                dimensions: 8,
+            }
+        }
+
+        async fn embed_documents(
+            &self,
+            texts: &[String],
+            cancellation: Option<&CancellationToken>,
+        ) -> Result<Vec<Vec<f32>>> {
+            let token = cancellation.expect("drain must pass a background token");
+            if token.is_cancelled() {
+                return Err(AppError::Cancelled("cancelled by test".into()));
+            }
+            if texts.len() == 1 && texts[0] == EMBEDDING_HEALTH_CANARY {
+                self.canary_calls.fetch_add(1, Ordering::SeqCst);
+                self.source
+                    .get()
+                    .expect("test must install the manager's cancellation source")
+                    .cancel_current();
+                return Err(AppError::Cancelled("cancelled mid-canary".into()));
+            }
+            Err(AppError::Configuration("content embed failed".into()))
+        }
+
+        async fn embed_queries(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            Ok(vec![vec![0.0; 8]; texts.len()])
+        }
+
+        async fn healthcheck(&self) -> Result<EmbeddingHealth> {
+            Ok(EmbeddingHealth {
+                ok: true,
+                backend: EmbeddingBackendKind::Local,
+                model_id: "test".into(),
+                dimensions: Some(8),
+                message: "ok".into(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_during_canary_breaks_instead_of_scheduling_retry() {
+        let pool = drain_test_pool().await;
+        insert_drain_chunk(&pool, 1, "text one").await;
+        let settings = SemanticSearchSettings {
+            enabled: true,
+            backend: EmbeddingBackendKind::Local,
+            ..SemanticSearchSettings::default()
+        };
+        let canary_calls = Arc::new(AtomicUsize::new(0));
+        let source_slot = Arc::new(std::sync::OnceLock::new());
+        let manager = EmbeddingManager::from_backend_for_test(
+            std::env::temp_dir(),
+            settings,
+            Arc::new(CanaryCancelBackend {
+                canary_calls: canary_calls.clone(),
+                source: source_slot.clone(),
+            }),
+        );
+        source_slot
+            .set(manager.cancellation_source())
+            .ok()
+            .expect("cancellation source installed once");
+        let engine = SemanticEngine::new(pool.clone(), std::env::temp_dir(), manager);
+
+        // Batch fails, probe fails, canary is cancelled. A cancelled canary is
+        // a user cancel, not an outage: the drain must return Ok (no 5s
+        // self-heal retry), leave the chunk pending and record no failure.
+        let result = engine.drain_pending().await;
+        assert!(
+            result.is_ok(),
+            "cancelled canary must break the drain, not schedule a retry: {result:?}"
+        );
+        assert_eq!(canary_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(chunk_state(&pool, 1).await.0, "pending");
+        assert!(
+            engine.chunk_failures.lock().unwrap().is_empty(),
+            "a cancelled canary must not count against the chunk's poison budget"
+        );
+        assert!(
+            engine.last_error.read().await.is_none(),
+            "a cancelled canary must not surface the original batch error as last_error"
+        );
     }
 
     /// Tracks warm_up calls and flips to ready after the first warm-up.
