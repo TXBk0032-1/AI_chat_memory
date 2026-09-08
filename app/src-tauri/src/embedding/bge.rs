@@ -6,13 +6,14 @@ use futures::StreamExt;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use tokenizers::Tokenizer;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
 use super::local::DownloadProgressCallback;
-use super::{BackendIdentity, EmbeddingBackend, ensure_dimensions};
+use super::{
+    BackendIdentity, CancellationSource, CancellationToken, EmbeddingBackend, ensure_dimensions,
+};
 use crate::{
     error::{AppError, Result},
     models::{
@@ -41,7 +42,9 @@ pub struct LocalBgeBackend {
     state: Arc<std::sync::Mutex<Option<LoadedModel>>>,
     runtime_device: Arc<std::sync::Mutex<String>>,
     runtime_dtype: Arc<std::sync::Mutex<String>>,
-    cancel_flag: Arc<AtomicBool>,
+    /// Shared cancellation source; model download takes a token per attempt
+    /// so a cancel only aborts downloads already in flight.
+    cancellation: CancellationSource,
 }
 
 struct LoadedModel {
@@ -67,7 +70,7 @@ impl LocalBgeBackend {
         model_id: String,
         model_dir: PathBuf,
         settings: &LocalEmbeddingSettings,
-        cancel_flag: Arc<AtomicBool>,
+        cancellation: CancellationSource,
     ) -> Result<Self> {
         tokio::fs::create_dir_all(&model_dir)
             .await
@@ -83,7 +86,7 @@ impl LocalBgeBackend {
             state: Arc::new(std::sync::Mutex::new(None)),
             runtime_device: Arc::new(std::sync::Mutex::new("unloaded".into())),
             runtime_dtype: Arc::new(std::sync::Mutex::new("unloaded".into())),
-            cancel_flag,
+            cancellation,
         })
     }
 
@@ -131,11 +134,14 @@ impl LocalBgeBackend {
             }
             return Ok(());
         }
+        // Take the token at download start: a cancel issued before this call
+        // does not affect it, one issued during the download aborts it.
+        let cancellation = self.cancellation.token();
         download_model(
             &self.model_id,
             &self.model_dir,
             on_progress,
-            Some(self.cancel_flag.clone()),
+            Some(&cancellation),
         )
         .await
     }
@@ -203,18 +209,23 @@ impl LocalBgeBackend {
         Ok(())
     }
 
-    async fn embed(&self, texts: &[String], is_query: bool) -> Result<Vec<Vec<f32>>> {
+    async fn embed(
+        &self,
+        texts: &[String],
+        is_query: bool,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
-        if self.cancel_flag.load(Ordering::SeqCst) {
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
             return Err(AppError::Cancelled("本地编码已取消".into()));
         }
         self.ensure_loaded().await?;
         let dimensions = self.dimensions;
         let state = self.state.clone();
         let texts = texts.to_vec();
-        let cancel_flag = self.cancel_flag.clone();
+        let cancellation = cancellation.cloned();
         run_model_task(move || {
             let mut guard = state
                 .lock()
@@ -222,7 +233,7 @@ impl LocalBgeBackend {
             let loaded = guard
                 .as_mut()
                 .ok_or_else(|| AppError::Configuration("local model not loaded".into()))?;
-            embed_texts(loaded, &texts, is_query, dimensions, &cancel_flag)
+            embed_texts(loaded, &texts, is_query, dimensions, cancellation.as_ref())
         })
         .await
     }
@@ -301,12 +312,17 @@ impl EmbeddingBackend for LocalBgeBackend {
         Some(self.runtime_dtype_label())
     }
 
-    async fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        self.embed(texts, false).await
+    async fn embed_documents(
+        &self,
+        texts: &[String],
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Vec<Vec<f32>>> {
+        self.embed(texts, false, cancellation).await
     }
 
     async fn embed_queries(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        self.embed(texts, true).await
+        // Interactive queries are never gated by background cancellation.
+        self.embed(texts, true, None).await
     }
 
     async fn healthcheck(&self) -> Result<EmbeddingHealth> {
@@ -349,12 +365,12 @@ async fn download_model(
     model_id: &str,
     model_dir: &Path,
     on_progress: Option<DownloadProgressCallback>,
-    cancel_flag: Option<Arc<AtomicBool>>,
+    cancellation: Option<&CancellationToken>,
 ) -> Result<()> {
     tokio::fs::create_dir_all(model_dir)
         .await
         .map_err(|error| AppError::Configuration(error.to_string()))?;
-    check_cancelled(cancel_flag.as_ref(), "模型下载已取消")?;
+    check_cancelled(cancellation, "模型下载已取消")?;
 
     if let Some(on_progress) = &on_progress {
         on_progress(ModelDownloadProgress {
@@ -377,7 +393,7 @@ async fn download_model(
     let file_count = MODEL_FILES.len();
 
     for (file_index, file) in MODEL_FILES.iter().enumerate() {
-        check_cancelled(cancel_flag.as_ref(), "模型下载已取消")?;
+        check_cancelled(cancellation, "模型下载已取消")?;
         let url = format!("https://huggingface.co/{model_id}/resolve/main/{file}");
         let response =
             client.get(&url).send().await.map_err(|error| {
@@ -399,7 +415,7 @@ async fn download_model(
         let mut downloaded_bytes = 0u64;
 
         while let Some(chunk) = stream.next().await {
-            if let Err(error) = check_cancelled(cancel_flag.as_ref(), "模型下载已取消") {
+            if let Err(error) = check_cancelled(cancellation, "模型下载已取消") {
                 drop(output);
                 let _ = tokio::fs::remove_file(&temporary).await;
                 return Err(error);
@@ -439,7 +455,7 @@ async fn download_model(
             .await
             .map_err(|error| AppError::Configuration(error.to_string()))?;
         drop(output);
-        check_cancelled(cancel_flag.as_ref(), "模型下载已取消")?;
+        check_cancelled(cancellation, "模型下载已取消")?;
         if destination.exists() {
             let _ = tokio::fs::remove_file(&destination).await;
         }
@@ -463,8 +479,8 @@ async fn download_model(
     Ok(())
 }
 
-fn check_cancelled(cancel_flag: Option<&Arc<AtomicBool>>, message: &str) -> Result<()> {
-    if cancel_flag.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+fn check_cancelled(cancellation: Option<&CancellationToken>, message: &str) -> Result<()> {
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
         Err(AppError::Cancelled(message.into()))
     } else {
         Ok(())
@@ -610,8 +626,7 @@ fn try_load(
 }
 
 fn warmup_model(loaded: &mut LoadedModel, dimensions: usize) -> Result<()> {
-    let dummy_cancel = AtomicBool::new(false);
-    let vectors = embed_texts(loaded, &["warmup".into()], false, dimensions, &dummy_cancel)?;
+    let vectors = embed_texts(loaded, &["warmup".into()], false, dimensions, None)?;
     if vectors.len() != 1 || vectors[0].len() != dimensions {
         return Err(AppError::Configuration(
             "bge warmup returned unexpected shape".into(),
@@ -639,14 +654,14 @@ fn embed_texts(
     texts: &[String],
     is_query: bool,
     dimensions: usize,
-    cancel_flag: &AtomicBool,
+    cancellation: Option<&CancellationToken>,
 ) -> Result<Vec<Vec<f32>>> {
     if texts.is_empty() {
         return Ok(Vec::new());
     }
     let mut all_vectors = Vec::with_capacity(texts.len());
     for chunk in texts.chunks(sub_batch_size(loaded)) {
-        if cancel_flag.load(Ordering::SeqCst) {
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
             return Err(AppError::Cancelled("本地编码已取消".into()));
         }
         let batch_vectors = embed_single_batch(loaded, chunk, is_query, dimensions)?;
@@ -784,7 +799,7 @@ mod tests {
             "fixture/bge-model".into(),
             dir.clone(),
             &LocalEmbeddingSettings::default(),
-            Arc::new(AtomicBool::new(false)),
+            CancellationSource::new(),
         )
         .await
         .unwrap();
@@ -813,7 +828,7 @@ mod tests {
             "fixture/bge-model".into(),
             model_dir.clone(),
             &LocalEmbeddingSettings::default(),
-            Arc::new(AtomicBool::new(false)),
+            CancellationSource::new(),
         )
         .await
         .unwrap();
@@ -861,7 +876,7 @@ mod tests {
             "fixture/bge-m3".into(),
             dir.clone(),
             &LocalEmbeddingSettings::default(),
-            Arc::new(AtomicBool::new(false)),
+            CancellationSource::new(),
         )
         .await;
 
@@ -904,15 +919,18 @@ mod tests {
             "BAAI/bge-small-zh-v1.5".into(),
             model_dir,
             &settings,
-            Arc::new(AtomicBool::new(false)),
+            CancellationSource::new(),
         )
         .await
         .expect("open bge backend");
         let vectors = backend
-            .embed_documents(&[
-                "这是一段用于中文语义搜索的测试消息".into(),
-                "Rust Candle GPU embedding".into(),
-            ])
+            .embed_documents(
+                &[
+                    "这是一段用于中文语义搜索的测试消息".into(),
+                    "Rust Candle GPU embedding".into(),
+                ],
+                None,
+            )
             .await
             .expect("embed bge documents");
         assert_eq!(vectors.len(), 2);

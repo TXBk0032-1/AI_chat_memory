@@ -3,7 +3,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{BackendIdentity, EmbeddingBackend, ensure_dimensions};
+use super::{BackendIdentity, CancellationToken, EmbeddingBackend, ensure_dimensions};
 use crate::{
     error::{AppError, Result},
     models::{EmbeddingBackendKind, EmbeddingHealth, RemoteEmbeddingSettings},
@@ -310,7 +310,13 @@ impl EmbeddingBackend for HttpEmbeddingBackend {
         }
     }
 
-    async fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    // Cancellation is accepted for trait parity; wiring it into the in-flight
+    // request (select!) is a follow-up task.
+    async fn embed_documents(
+        &self,
+        texts: &[String],
+        _cancellation: Option<&CancellationToken>,
+    ) -> Result<Vec<Vec<f32>>> {
         self.embed(texts, false).await
     }
 
