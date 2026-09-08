@@ -1,6 +1,6 @@
 use sqlx::{
     SqlitePool,
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 use std::path::Path;
 use std::sync::Once;
@@ -37,24 +37,21 @@ pub async fn connect(path: &Path) -> Result<SqlitePool> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
+    // WAL + moderate sync is a better default for large embedding rebuilds.
+    // `synchronous` and `temp_store` are connection-local, so they live on the
+    // connect options: every connection the pool opens inherits them, instead
+    // of only whichever connection happened to run a one-off PRAGMA.
     let options = SqliteConnectOptions::new()
         .filename(path)
         .create_if_missing(true)
         .foreign_keys(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
+        .pragma("temp_store", "MEMORY")
         .busy_timeout(Duration::from_secs(5));
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
         .connect_with(options)
-        .await?;
-    // WAL + moderate sync is a better default for large embedding rebuilds.
-    sqlx::query("PRAGMA journal_mode = WAL;")
-        .execute(&pool)
-        .await?;
-    sqlx::query("PRAGMA synchronous = NORMAL;")
-        .execute(&pool)
-        .await?;
-    sqlx::query("PRAGMA temp_store = MEMORY;")
-        .execute(&pool)
         .await?;
     // Schema version fast path: initialize_schema walks a long chain of
     // CREATE/ALTER/ensure checks which costs ~0.5s on a cold filesystem. The
@@ -826,6 +823,40 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn every_pooled_connection_inherits_connection_pragmas() {
+        let dir = schema_gate_dir("pool-pragmas").await;
+        let pool = connect(&dir.join("db.sqlite")).await.unwrap();
+
+        // Hold all five connections at once so each one is a distinct SQLite
+        // handle; connection-local PRAGMAs must be present on every one.
+        let mut held = Vec::new();
+        for _ in 0..5 {
+            held.push(pool.acquire().await.unwrap());
+        }
+        for (index, connection) in held.iter_mut().enumerate() {
+            let synchronous: i64 = sqlx::query_scalar("PRAGMA synchronous")
+                .fetch_one(&mut **connection)
+                .await
+                .unwrap();
+            let temp_store: i64 = sqlx::query_scalar("PRAGMA temp_store")
+                .fetch_one(&mut **connection)
+                .await
+                .unwrap();
+            assert_eq!(synchronous, 1, "connection {index}: synchronous != NORMAL");
+            assert_eq!(temp_store, 2, "connection {index}: temp_store != MEMORY");
+        }
+        drop(held);
+
+        let journal: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(journal.to_ascii_lowercase(), "wal");
         pool.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     }
