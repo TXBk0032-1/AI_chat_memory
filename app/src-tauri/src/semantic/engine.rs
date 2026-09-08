@@ -909,7 +909,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use crate::{
-        embedding::{BackendIdentity, CancellationToken, EmbeddingBackend},
+        embedding::{BackendIdentity, CancellationSource, CancellationToken, EmbeddingBackend},
         error::Result,
         models::{EmbeddingBackendKind, EmbeddingHealth, SemanticSearchSettings},
     };
@@ -1457,7 +1457,7 @@ mod tests {
         assert_eq!(query_calls.load(Ordering::SeqCst), 1);
 
         engine.drain_pending().await.unwrap();
-        assert!(embed_calls.load(Ordering::SeqCst) >= 1);
+        assert_eq!(embed_calls.load(Ordering::SeqCst), 1);
         let identity = engine.embeddings.read().await.identity();
         assert_eq!(
             index::count_chunks(&pool, &identity, "ready")
@@ -1465,6 +1465,117 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    /// Simulates a user cancel that lands while a document embed is in
+    /// flight: the first `embed_documents` call cancels the current generation
+    /// through the manager's own `CancellationSource` (shared via `OnceLock`
+    /// because the backend is built before the manager) and then reports
+    /// `AppError::Cancelled`, exactly as the local backends do when they
+    /// observe a cancelled token mid-batch. Later calls honor the token.
+    struct InFlightCancelBackend {
+        embed_calls: Arc<AtomicUsize>,
+        source: Arc<std::sync::OnceLock<CancellationSource>>,
+    }
+
+    #[async_trait]
+    impl EmbeddingBackend for InFlightCancelBackend {
+        fn identity(&self) -> BackendIdentity {
+            BackendIdentity {
+                backend: EmbeddingBackendKind::Local,
+                backend_id: "local".into(),
+                model_id: "test".into(),
+                dimensions: 8,
+            }
+        }
+
+        async fn embed_documents(
+            &self,
+            texts: &[String],
+            cancellation: Option<&CancellationToken>,
+        ) -> Result<Vec<Vec<f32>>> {
+            let call = self.embed_calls.fetch_add(1, Ordering::SeqCst);
+            let token = cancellation.expect("drain must pass a background token");
+            if call == 0 {
+                assert!(
+                    !token.is_cancelled(),
+                    "token handed to the first embed must start live"
+                );
+                self.source
+                    .get()
+                    .expect("test must install the manager's cancellation source")
+                    .cancel_current();
+                assert!(
+                    token.is_cancelled(),
+                    "cancelling the current generation must invalidate the in-flight token"
+                );
+                return Err(AppError::Cancelled("cancelled mid-embed".into()));
+            }
+            if token.is_cancelled() {
+                return Err(AppError::Cancelled("cancelled by test".into()));
+            }
+            Ok(vec![vec![0.0; 8]; texts.len()])
+        }
+
+        async fn embed_queries(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            Ok(vec![vec![0.0; 8]; texts.len()])
+        }
+
+        async fn healthcheck(&self) -> Result<EmbeddingHealth> {
+            Ok(EmbeddingHealth {
+                ok: true,
+                backend: EmbeddingBackendKind::Local,
+                model_id: "test".into(),
+                dimensions: Some(8),
+                message: "ok".into(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn in_flight_cancel_stops_drain_and_keeps_chunk_pending() {
+        let pool = drain_test_pool().await;
+        insert_drain_chunk(&pool, 1, "text one").await;
+        let settings = SemanticSearchSettings {
+            enabled: true,
+            backend: EmbeddingBackendKind::Local,
+            ..SemanticSearchSettings::default()
+        };
+        let embed_calls = Arc::new(AtomicUsize::new(0));
+        let source_slot = Arc::new(std::sync::OnceLock::new());
+        let manager = EmbeddingManager::from_backend_for_test(
+            std::env::temp_dir(),
+            settings,
+            Arc::new(InFlightCancelBackend {
+                embed_calls: embed_calls.clone(),
+                source: source_slot.clone(),
+            }),
+        );
+        source_slot
+            .set(manager.cancellation_source())
+            .ok()
+            .expect("cancellation source installed once");
+        let engine = SemanticEngine::new(pool.clone(), std::env::temp_dir(), manager);
+
+        // First drain: the embed is cancelled mid-flight. The Cancelled branch
+        // breaks out of the fetch loop and returns Ok — no single-chunk probe,
+        // no poison accounting, chunk stays pending for the next drain.
+        engine.drain_pending().await.unwrap();
+        assert_eq!(
+            embed_calls.load(Ordering::SeqCst),
+            1,
+            "Cancelled must break the drain without probing or retrying"
+        );
+        assert_eq!(chunk_state(&pool, 1).await.0, "pending");
+        assert!(
+            engine.chunk_failures.lock().unwrap().is_empty(),
+            "a cancelled embed must not count against the chunk's poison budget"
+        );
+
+        // Second drain: a fresh generation token is live, so the chunk embeds.
+        engine.drain_pending().await.unwrap();
+        assert_eq!(embed_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(chunk_state(&pool, 1).await.0, "ready");
     }
 
     /// Tracks warm_up calls and flips to ready after the first warm-up.
