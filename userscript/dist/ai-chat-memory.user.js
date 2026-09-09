@@ -1492,36 +1492,68 @@
 
     // 导入请求体按「完整 envelope 的 UTF-8 字节数」判定，不能用字符串 length：
     // 中文与 emoji 单字符占 3-4 字节，用 length 判定会低估体积，再次撞上后端 20 MiB 限制。
+    function utf8ByteLength(text) {
+        return typeof TextEncoder === 'function' ? new TextEncoder().encode(text).byteLength : text.length;
+    }
+
     function encodeImportBody(platform, sessions) {
         const body = JSON.stringify({ platform, sessions });
-        const bytes = typeof TextEncoder === 'function' ? new TextEncoder().encode(body).byteLength : body.length;
-        return { body, bytes };
+        return { body, bytes: utf8ByteLength(body) };
+    }
+
+    // envelope 前后缀字节数：JSON.stringify({ platform, sessions: [] }) 已含空数组的 "[]" 两个字节，
+    // 会话逐个填入 [] 内部，因此总字节 = 该前后缀 + Σ(单会话 JSON 字节) + (n-1) 个逗号，与整体序列化逐字节相等。
+    function importEnvelopePrefixBytes(platform) {
+        return utf8ByteLength(JSON.stringify({ platform, sessions: [] }));
+    }
+
+    // 单会话在数组中的序列化字节数；undefined/函数等数组元素会被 JSON.stringify 写成 null（4 字节）。
+    function importSessionBytes(session) {
+        const text = JSON.stringify(session);
+        return text === undefined ? 4 : utf8ByteLength(text);
+    }
+
+    // 线性算术版 encodeImportBody(...).bytes，每个会话只编码一次，供分批与等价性测试使用。
+    function estimateImportBodyBytes(platform, sessions) {
+        const list = Array.isArray(sessions) ? sessions : [];
+        let bytes = importEnvelopePrefixBytes(platform);
+        for (const session of list) bytes += importSessionBytes(session);
+        return bytes + Math.max(0, list.length - 1);
     }
 
     // 纯函数：把会话切成既不超过条目数、也不超过字节上限的批次。
     // 单个会话连同 envelope 就超限的进入 oversized，不发送必然失败的请求。
+    // 体积按前后缀 + 逐会话字节累加计算（O(n)），不再每追加一个会话就重新序列化整批（O(n·batch)，
+    // 1000 个 40KB 会话曾冻结主线程十余秒）。
     function buildImportBatches(platform, sessions, options = {}) {
         const list = Array.isArray(sessions) ? sessions : [];
         const maxItems = Math.max(1, Number(options.maxItems) || RuntimeConfig.importBatchMaxItems);
         const maxBodyBytes = Math.max(1, Number(options.maxBodyBytes) || RuntimeConfig.importBatchMaxBodyBytes);
+        const prefixBytes = importEnvelopePrefixBytes(platform);
         const batches = [];
         const oversized = [];
         let current = [];
+        let currentBytes = prefixBytes;
         for (const session of list) {
-            if (encodeImportBody(platform, [session]).bytes > maxBodyBytes) {
+            const itemBytes = importSessionBytes(session);
+            if (prefixBytes + itemBytes > maxBodyBytes) {
                 oversized.push(session);
                 continue;
             }
             if (current.length >= maxItems) {
                 batches.push(current);
                 current = [];
+                currentBytes = prefixBytes;
             }
-            current.push(session);
-            // 追加后实测整个 envelope：超限就回退该候选、封批，候选另起一批（单独成批必定合规）。
-            if (encodeImportBody(platform, current).bytes > maxBodyBytes) {
-                current.pop();
+            // 非首个元素前多一个逗号；超限就封当前批，候选另起一批（单独成批已在上方确认合规）。
+            const nextBytes = currentBytes + itemBytes + (current.length ? 1 : 0);
+            if (nextBytes > maxBodyBytes) {
                 if (current.length) batches.push(current);
                 current = [session];
+                currentBytes = prefixBytes + itemBytes;
+            } else {
+                current.push(session);
+                currentBytes = nextBytes;
             }
         }
         if (current.length) batches.push(current);
@@ -1591,6 +1623,15 @@
 
         sessions() {
             return Object.values(this.load()).map(entry => entry?.session).filter(Boolean);
+        }
+
+        // 参与下一轮候选的条目：oversized 只是持久痕迹，重试也不会变小，不再重复抓详情。
+        // 它若作为新鲜候选再次出现且体积合规，正常导入后由 remove 出队（自愈）。
+        retryable() {
+            return Object.values(this.load())
+                .filter(entry => entry && entry.stage !== 'oversized')
+                .map(entry => entry.session)
+                .filter(Boolean);
         }
     }
 
@@ -1715,7 +1756,7 @@
             const list = Array.isArray(candidates) ? [...candidates] : [];
             this._lastRetryIds = new Set();
             let retries = [];
-            try { retries = this.retryStore?.sessions() || []; } catch (err) { console.warn('读取重试队列失败:', err); }
+            try { retries = this.retryStore?.retryable() || []; } catch (err) { console.warn('读取重试队列失败:', err); }
             if (!retries.length) return list;
             const seen = new Set(list.map(session => this._sessionId(session)).filter(id => id !== null && id !== undefined));
             let appended = 0;
@@ -1872,26 +1913,46 @@
             }
 
             const maxBodyBytes = Math.max(1, Number(this.config.importBatchMaxBodyBytes) || RuntimeConfig.importBatchMaxBodyBytes);
-            const { batches, oversized } = buildImportBatches(this.platform, results, {
+            // 来自重试队列的会话各自单独成批：一个后端永久拒绝的「毒丸」会话若与他人同批，会让整批每轮一起失败、
+            // 一起重新入队，永远出不去。新鲜候选仍按条目数/字节上限正常分批。
+            const fresh = results.filter(session => !retryIds.has(this._sessionId(session)));
+            const retrying = results.filter(session => retryIds.has(this._sessionId(session)));
+            const { batches, oversized } = buildImportBatches(this.platform, fresh, {
                 maxItems: this.config.importBatchMaxItems,
                 maxBodyBytes
             });
-            // 超限会话重试也不会变小，不进入重试队列，只记录告警并计入 failed 返回。
+            for (const session of retrying) {
+                const single = buildImportBatches(this.platform, [session], { maxItems: 1, maxBodyBytes });
+                batches.push(...single.batches);
+                oversized.push(...single.oversized);
+            }
+            // 规格 5.2：超限会话计入失败结果并写入持久重试队列（stage 'oversized' 作为持久痕迹）；
+            // 该阶段不参与下一轮候选（见 SyncRetryStore.retryable），避免每轮重复抓详情再丢弃。
             for (const session of oversized) {
                 const id = this._sessionId(session);
+                const message = `会话体积超过导入上限 ${maxBodyBytes} 字节`;
                 console.warn(`会话 ${id} 单体超过导入体积上限 ${maxBodyBytes} 字节，跳过`);
-                failed.push({ id, session, stage: 'oversized', error: `会话体积超过导入上限 ${maxBodyBytes} 字节` });
+                failed.push({ id, session, stage: 'oversized', error: message });
+                this._retryUpsert(session, id, 'oversized', message);
             }
-            // 若其此前因 detail/import 失败已在队列中，则出队，避免每轮重复抓详情再丢弃。
-            this._retryRemove(oversized.map(session => this._sessionId(session)));
 
             const accepted = [];
             let imported = 0;
             let skipped = 0;
             let batchFailures = 0;
             let lastBatchError = '';
+            // 用户停止时，已被选中却尚未被服务端确认的会话必须留在持久队列：前面的批次已让后端游标推进到
+            // 本轮 max(updated_at)，剩余会话在下一轮增量里将永远选不到。规格 5.3「只有被确认才移除」的对偶。
+            const queueUnpushed = fromIndex => {
+                for (const batch of batches.slice(fromIndex)) {
+                    for (const session of batch) this._retryUpsert(session, this._sessionId(session), 'import', '用户停止');
+                }
+            };
             for (let index = 0; index < batches.length; index++) {
-                if (this._isStopped()) return { state: 'stopped', imported, skipped, sessions: accepted, failed };
+                if (this._isStopped()) {
+                    queueUnpushed(index);
+                    return { state: 'stopped', imported, skipped, sessions: accepted, failed };
+                }
                 const batch = batches[index];
                 this._progress(index + 1, batches.length, `推送到服务端 ${index + 1}/${batches.length}`);
                 let response = null;
@@ -1904,8 +1965,11 @@
                         signal: this.abortController?.signal
                     });
                 } catch (err) {
-                    // 传输异常里的 AbortError 属于用户停止而非导入失败：不计入 failed，直接带已接受批次返回。
-                    if (this._isStopped()) return { state: 'stopped', imported, skipped, sessions: accepted, failed };
+                    // 传输异常里的 AbortError 属于用户停止而非导入失败：不计入 failed，但当前批及其后批次全部入队后再返回。
+                    if (this._isStopped()) {
+                        queueUnpushed(index);
+                        return { state: 'stopped', imported, skipped, sessions: accepted, failed };
+                    }
                     transportError = err;
                 }
                 // 响应成功返回即表示服务端已导入该批：先记入 accepted/imported 再判断停止，
@@ -2177,6 +2241,7 @@
     const testApi = Object.freeze({
         RuntimeConfig,
         buildImportBatches,
+        estimateImportBodyBytes,
         JsonTools,
         CaptureRedactor,
         SseParser,

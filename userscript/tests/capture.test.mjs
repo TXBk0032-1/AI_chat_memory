@@ -1095,7 +1095,7 @@ test('cursor advances past failures yet later syncs keep retrying the queued ses
     assert.equal(bodies.length, 2);
 });
 
-test('retry queue records import-stage batch failures, skips oversized sessions, and removes accepted or skipped ones', async () => {
+test('retry queue records import-stage batch failures, queues oversized sessions under their own stage, and removes accepted or skipped ones', async () => {
     const { api, values: storage } = loadTestApi();
     let requests = 0;
     const bridge = {
@@ -1119,7 +1119,9 @@ test('retry queue records import-stage batch failures, skips oversized sessions,
         { id: 'http-fail', stage: 'import' }, { id: 'huge', stage: 'oversized' }
     ]);
     const entries = storage.get(RETRY_KEY).entries;
-    assert.deepEqual(Object.keys(entries), ['http-fail'], 'only the HTTP-failed session is queued; oversized is not, accepted/skipped are removed');
+    assert.deepEqual(Object.keys(entries).sort(), ['http-fail', 'huge'], 'the HTTP-failed and the oversized session are queued; accepted/skipped are removed');
+    assert.equal(entries.huge.stage, 'oversized', 'spec 5.2: an oversized session leaves a persistent trace in the retry queue');
+    assert.equal(entries.huge.attempts, 1);
     assert.equal(entries['http-fail'].stage, 'import');
     assert.equal(entries['http-fail'].attempts, 1);
     assert.equal(entries['http-fail'].message.length, 500);
@@ -1195,18 +1197,32 @@ test('fetchDetailsAndPush still throws when every fresh (non-queued) candidate f
         'direct fetchDetailsAndPush calls have no retry ids and keep throwing');
 });
 
-test('a queued session that turns out oversized is removed from the retry queue instead of being refetched every round', async () => {
+test('a queued session that turns out oversized is kept under stage oversized, excluded from the next selection, and self-heals once it fits', async () => {
     const { api, values: storage } = loadTestApi();
     const bodies = [];
     const bridge = { request: async (path, options = {}) => { bodies.push(options.body); return okImport(1); } };
     const coordinator = makePushCoordinator(api, bridge, { importBatchMaxItems: 100, importBatchMaxBodyBytes: 200 });
+    coordinator.adapter.fetchAllSessions = async () => [];
     // It failed at the import stage earlier (e.g. a 500) and was queued; now its detail fetch succeeds but it is too big.
     coordinator.retryStore.upsert({ id: 'huge', title: 'x'.repeat(400) }, 'import', 'earlier');
     coordinator.retryStore.upsert({ id: 'other', updated_at: 1 }, 'detail', 'earlier');
     const result = await coordinator.fetchDetailsAndPush([{ id: 'small' }, { id: 'huge', title: 'x'.repeat(400) }]);
     assert.deepEqual(plain(result.failed.map(f => ({ id: f.id, stage: f.stage }))), [{ id: 'huge', stage: 'oversized' }]);
     assert.ok(bodies.every(body => !body.includes('"huge"')), 'the oversized session must never be sent');
-    assert.deepEqual(Object.keys(storage.get(RETRY_KEY).entries), ['other'], 'the oversized session must leave the queue; unrelated entries stay');
+    const entries = storage.get(RETRY_KEY).entries;
+    assert.deepEqual(Object.keys(entries).sort(), ['huge', 'other'], 'spec 5.2: the oversized session stays queued as a persistent trace; unrelated entries stay');
+    assert.equal(entries.huge.stage, 'oversized');
+    assert.equal(entries.huge.attempts, 2, 'the earlier import failure plus this oversized round');
+    assert.deepEqual(plain(coordinator.retryStore.retryable().map(s => s.id)), ['other'], 'retryable() filters out oversized entries');
+
+    // Next round: the oversized entry is not a candidate, so no detail fetch is wasted on it every round.
+    const next = await coordinator.selectSessions(null);
+    assert.deepEqual(plain(next.map(s => s.id)), ['other'], 'oversized queue entries must not be merged into the candidates');
+
+    // Self-heal: it reappears as a fresh candidate that now fits -> imported normally and removed from the queue.
+    const healed = await coordinator.fetchDetailsAndPush([{ id: 'huge', title: 'small now' }]);
+    assert.deepEqual(plain(healed.sessions.map(s => s.id)), ['huge']);
+    assert.deepEqual(Object.keys(storage.get(RETRY_KEY).entries), ['other'], 'an accepted session leaves the queue whatever its previous stage');
 });
 
 test('stop() during a detail fetch neither queues the aborted session nor reports it as a detail failure', async () => {
@@ -1226,4 +1242,148 @@ test('stop() during a detail fetch neither queues the aborted session nor report
     assert.deepEqual(plain(result.sessions), []);
     assert.equal(storage.has(RETRY_KEY) ? Object.keys(storage.get(RETRY_KEY).entries).length : 0, 0,
         'a user stop must not be persisted as a detail failure');
+});
+
+// ===== Batch review fixes: stop must not lose selected sessions, poison sessions must not sink whole batches =====
+
+test('stop() thrown as AbortError from the second batch queues every unpushed session so the advanced cursor cannot hide them', async () => {
+    const { api, values: storage } = loadTestApi();
+    let coordinator;
+    let requests = 0;
+    const bridge = {
+        request: async () => {
+            requests++;
+            if (requests === 2) {
+                // The user hits stop while the second request is in flight: the bridge surfaces the abort.
+                coordinator.stop();
+                throw new DOMException('aborted', 'AbortError');
+            }
+            return okImport(1);
+        }
+    };
+    coordinator = makePushCoordinator(api, bridge);
+    const result = await coordinator.fetchDetailsAndPush([
+        { id: 'newest', updated_at: 300 }, { id: 'mid', updated_at: 250 }, { id: 'old', updated_at: 200 }
+    ]);
+    assert.equal(result.state, 'stopped');
+    assert.equal(requests, 2, 'no further batch may be sent after stop');
+    assert.deepEqual(plain(result.sessions.map(s => s.id)), ['newest'], 'only the batch the server accepted counts as synced');
+    assert.equal(result.imported, 1);
+    // The server cursor now sits at 300; mid/old are below it and would never be selected again without the queue.
+    const entries = storage.get(RETRY_KEY)?.entries || {};
+    assert.deepEqual(Object.keys(entries).sort(), ['mid', 'old'], 'the aborted batch and every batch after it must be queued');
+    assert.ok(Object.values(entries).every(entry => entry.stage === 'import'), 'queued under the import stage');
+    assert.deepEqual(plain(entries.mid.session), { id: 'mid', updated_at: 250 }, 'only list-level metadata is persisted');
+    assert.deepEqual(plain(entries.old.session), { id: 'old', updated_at: 200 });
+});
+
+test('stop() landing between batches queues the sessions that were never pushed', async () => {
+    const { api, values: storage } = loadTestApi();
+    let coordinator;
+    let requests = 0;
+    const bridge = {
+        request: async () => {
+            requests++;
+            return {
+                ok: true, status: 200, text: async () => '{}',
+                json: async () => { coordinator.stop(); return { imported: 1, skipped: 0 }; }
+            };
+        }
+    };
+    coordinator = makePushCoordinator(api, bridge);
+    const result = await coordinator.fetchDetailsAndPush([{ id: 's1', updated_at: 3 }, { id: 's2', updated_at: 2 }, { id: 's3', updated_at: 1 }]);
+    assert.equal(result.state, 'stopped');
+    assert.equal(requests, 1, 'only the first batch may reach the bridge');
+    assert.deepEqual(plain(result.sessions.map(s => s.id)), ['s1']);
+    const entries = storage.get(RETRY_KEY)?.entries || {};
+    assert.deepEqual(Object.keys(entries).sort(), ['s2', 's3'], 'both unpushed sessions must be queued');
+    assert.ok(Object.values(entries).every(entry => entry.stage === 'import'));
+});
+
+test('a poison session from the retry queue is pushed alone so the other queued session still succeeds and dequeues', async () => {
+    const { api, values: storage } = loadTestApi();
+    const bodies = [];
+    const bridge = {
+        request: async (path, options = {}) => {
+            bodies.push(options.body);
+            if (options.body.includes('"poison"')) {
+                return { ok: false, status: 400, json: async () => ({}), text: async () => 'platform session id is empty' };
+            }
+            return okImport(JSON.parse(options.body).sessions.length);
+        }
+    };
+    const coordinator = makePushCoordinator(api, bridge, { importBatchMaxItems: 100, importBatchMaxBodyBytes: 4096 });
+    coordinator.adapter.fetchAllSessions = async () => [];
+    coordinator.retryStore.upsert({ id: 'poison', updated_at: 1 }, 'import', 'earlier');
+    coordinator.retryStore.upsert({ id: 'good', updated_at: 2 }, 'import', 'earlier');
+
+    const selected = await coordinator.selectSessions(null);
+    assert.deepEqual(plain(selected.map(s => s.id)).sort(), ['good', 'poison'], 'fixture: both come from the queue, no fresh candidates');
+    const result = await coordinator.fetchDetailsAndPush(selected);
+
+    assert.equal(bodies.length, 2, 'queued sessions must be pushed one per request');
+    assert.ok(bodies.every(body => JSON.parse(body).sessions.length === 1));
+    assert.deepEqual(plain(result.sessions.map(s => s.id)), ['good'], 'the good queued session must not be sunk by the poison one');
+    assert.deepEqual(plain(result.failed.map(f => ({ id: f.id, stage: f.stage }))), [{ id: 'poison', stage: 'import' }]);
+    const entries = storage.get(RETRY_KEY).entries;
+    assert.deepEqual(Object.keys(entries), ['poison'], 'good leaves the queue, poison stays');
+    assert.equal(entries.poison.attempts, 2);
+    assert.match(entries.poison.message, /400/);
+});
+
+test('fresh candidates still share batches while queued retries are isolated one per request', async () => {
+    const { api } = loadTestApi();
+    const bodies = [];
+    const bridge = { request: async (path, options = {}) => { bodies.push(JSON.parse(options.body).sessions.map(s => s.id)); return okImport(1); } };
+    const coordinator = makePushCoordinator(api, bridge, { importBatchMaxItems: 100, importBatchMaxBodyBytes: 4096 });
+    coordinator.adapter.fetchAllSessions = async () => [{ id: 'f1', updated_at: 9 }, { id: 'f2', updated_at: 8 }];
+    coordinator.retryStore.upsert({ id: 'r1', updated_at: 1 }, 'import', 'earlier');
+    coordinator.retryStore.upsert({ id: 'r2', updated_at: 2 }, 'detail', 'earlier');
+    const selected = await coordinator.selectSessions(null);
+    const result = await coordinator.fetchDetailsAndPush(selected);
+    assert.deepEqual(plain(bodies), [['f1', 'f2'], ['r1'], ['r2']], 'fresh sessions batch together; each retry is its own batch');
+    assert.deepEqual(plain(result.sessions.map(s => s.id)), ['f1', 'f2', 'r1', 'r2']);
+});
+
+// ===== Batch review fix: buildImportBatches must size batches in O(n), not re-serialize the batch per session =====
+
+test('estimateImportBodyBytes equals the encoded envelope byte-for-byte for fixed and pseudo-random sessions', () => {
+    const { api } = loadTestApi();
+    assert.equal(typeof api.estimateImportBodyBytes, 'function', 'the linear byte estimator must be exposed for equivalence testing');
+    const cjkPlatform = '平台\u{1F600}';
+    const fixtures = [
+        ['p', []],
+        ['p', [{ id: 'a' }]],
+        [cjkPlatform, [{ id: 'a', title: '你好' }, { id: 'b', title: '\u{1F600}'.repeat(3), nested: { list: [1, 'x', null, true] } }]],
+        [undefined, [{ id: 'a' }, { id: 'b' }]],
+        ['k', [{ id: 'q', text: 'quote " backslash \\ newline \n tab \t nul \0 ctrl \x1f bom \uFEFF' }, undefined, { id: 'u', u: undefined, f() {}, d: new Date(0) }]],
+    ];
+    for (const [platform, sessions] of fixtures) {
+        assert.equal(api.estimateImportBodyBytes(platform, sessions), encodedImportBytes(platform, sessions), `fixture ${JSON.stringify(platform)} / ${sessions.length} sessions`);
+    }
+
+    // Deterministic pseudo-random sessions mixing 1/2/3/4-byte UTF-8 code points and JSON-escaped characters.
+    let seed = 20260908;
+    const rand = n => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
+    const alphabet = ['a', 'Z', '"', '\\', '\n', 'é', '中', '文', '\u{1F600}', '\u{1F4A9}', ' ', '', ' '];
+    const randomText = () => Array.from({ length: rand(40) }, () => alphabet[rand(alphabet.length)]).join('');
+    for (let round = 0; round < 25; round++) {
+        const platform = randomText();
+        const sessions = Array.from({ length: rand(12) }, (_, index) => ({
+            id: `s${index}`, title: randomText(), updated_at: rand(100000), tags: [randomText(), rand(3)], _conversation: { messages: [{ content: randomText() }] }
+        }));
+        assert.equal(api.estimateImportBodyBytes(platform, sessions), encodedImportBytes(platform, sessions), `random round ${round}`);
+        const maxBodyBytes = 120 + rand(400);
+        const { batches, oversized } = api.buildImportBatches(platform, sessions, { maxItems: 100, maxBodyBytes });
+        assert.deepEqual(plain([...batches.flat(), ...oversized].map(s => s.id).sort()), plain(sessions.map(s => s.id).sort()), 'no session may be lost');
+        for (const [index, batch] of batches.entries()) {
+            assert.ok(encodedImportBytes(platform, batch) <= maxBodyBytes, `round ${round} batch ${index} must fit`);
+            assert.equal(api.estimateImportBodyBytes(platform, batch), encodedImportBytes(platform, batch));
+            // Greedy tightness: the batch was closed only because the next batch's first session could not be appended.
+            if (index + 1 < batches.length) {
+                assert.ok(encodedImportBytes(platform, [...batch, batches[index + 1][0]]) > maxBodyBytes, `round ${round} batch ${index} closed too early`);
+            }
+        }
+        for (const session of oversized) assert.ok(encodedImportBytes(platform, [session]) > maxBodyBytes);
+    }
 });
