@@ -16,10 +16,12 @@ import DOMPurify from 'dompurify'
  * it would strip the label text. HTML elements inside the foreignObject
  * (div/span/p wrappers) are outside the svg profile's tag allowlist and are
  * stripped, but their text is hoisted up and kept (KEEP_CONTENT), so labels
- * render as plain text inside the foreignObject. `role`, `dominant-baseline`
- * and the `title` attribute (kept for mermaid's tooltip mechanism, which
- * reads `title="..."` off node groups) are outside the svg profile's
- * attribute allowlist and must be re-added explicitly. Executable content is
+ * render as plain text inside the foreignObject. `role` and the `title`
+ * attribute (kept for mermaid's tooltip mechanism, which reads `title="..."`
+ * off node groups) are outside the svg profile's attribute allowlist and
+ * must be re-added explicitly; `dominant-baseline` is already in that
+ * allowlist, but stays listed here to mirror the strict-mode DOMPurify
+ * configuration in mermaid.core.mjs that the input already passed through. Executable content is
  * still forbidden: `script` tags, event-handler attributes (`onload`,
  * `onclick`, `onerror`, `onmouseover`, and any other `on*` attribute not in
  * the allowlist) and `javascript:` URIs are removed; DOMPurify's default
