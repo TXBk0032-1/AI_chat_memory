@@ -1,3 +1,8 @@
+// jsdom (not the default node env) so the real sanitizer used by the
+// renderer can parse SVG; document.querySelectorAll is stubbed per test to
+// keep the existing mock-element fixtures.
+/** @vitest-environment jsdom */
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { normalizeMermaidSource, useMermaidRenderer } from './useMermaidRenderer'
 
@@ -148,5 +153,44 @@ describe('Mermaid rendering', () => {
     expect(mermaid.render).toHaveBeenCalledTimes(1)
     expect(element.innerHTML).toBe('<svg>once</svg>')
     expect(element.dataset.rendered).toBe('true')
+  })
+
+  it('sanitizes malicious SVG in the app render path before writing innerHTML', async () => {
+    const element = diagram()
+    mermaid.render.mockResolvedValueOnce({
+      svg: '<svg onload="alert(1)"><script>alert(1)</script><foreignObject><div>html</div></foreignObject><a href="javascript:alert(1)">x</a><g onclick="steal()"><text>safe text</text></g></svg>',
+    })
+    vi.stubGlobal('document', { querySelectorAll: vi.fn(() => [element]) })
+
+    const renderer = useMermaidRenderer(() => 'dark')
+    await renderer.renderMermaidDiagrams()
+
+    const html = element.innerHTML as string
+    expect(html).toContain('<svg')
+    expect(html).toContain('safe text')
+    expect(html).not.toMatch(/<script|onload|onclick|javascript:|foreignObject/i)
+    expect(element.dataset.rendered).toBe('true')
+  })
+
+  it('sanitizes malicious SVG in the export render path before writing innerHTML', async () => {
+    const exportElement = diagram()
+    const appElement = diagram('graph TD\nB-->C')
+    mermaid.render
+      .mockResolvedValueOnce({
+        svg: '<svg onload="alert(1)"><script>alert(1)</script><foreignObject><div>html</div></foreignObject><a href="javascript:alert(1)">x</a><g onclick="steal()"><text>export safe</text></g></svg>',
+      })
+      .mockResolvedValueOnce({ svg: '<svg>app</svg>' })
+    const root = { querySelectorAll: vi.fn(() => [exportElement]) } as unknown as HTMLElement
+
+    const renderer = useMermaidRenderer(() => 'dark')
+    await renderer.renderExportMermaidDiagrams(root)
+    vi.stubGlobal('document', { querySelectorAll: vi.fn(() => [appElement]) })
+    await renderer.renderMermaidDiagrams()
+
+    const html = exportElement.innerHTML as string
+    expect(html).toContain('<svg')
+    expect(html).toContain('export safe')
+    expect(html).not.toMatch(/<script|onload|onclick|javascript:|foreignObject/i)
+    expect(exportElement.dataset.rendered).toBe('true')
   })
 })
