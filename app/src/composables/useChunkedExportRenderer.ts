@@ -71,7 +71,10 @@ export function useChunkedExportRenderer(
         })
       }
       index += batch.length
-      if (items.length) rendered.value.push(...items)
+      // A restart may have landed while the last item of this batch was still
+      // rendering; appending now would write the whole old batch into the
+      // generation's freshly cleared array, so re-check before committing.
+      if (items.length && currentGeneration === generation) rendered.value.push(...items)
       if (index >= messages.length) {
         // Resolve only after the final batch has been flushed through the DOM
         // by a nextTick, so callers awaiting `whenReady()` see the whole

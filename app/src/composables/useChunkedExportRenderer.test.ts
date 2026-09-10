@@ -201,6 +201,38 @@ describe('useChunkedExportRenderer', () => {
     expect(rendered.value).toEqual([])
   })
 
+  it('does not write a completed batch into a restarted generation', () => {
+    // Batch-tail race: the final frame's items are all rendered, and a
+    // restart lands while the loop still holds the finished batch — after the
+    // per-item guard has passed but before the batch is appended. The whole
+    // old batch must be dropped, leaving the array exactly as the new
+    // generation defines it.
+    const first = makeMessages(8, 'first')
+    const second = makeMessages(3, 'second')
+    let source = { messages: first, references: new Map<number, Reference>(), includeThinking: false }
+    const render = vi.fn((value: string, _message: Message, _references: Map<number, Reference>, _query: string) => {
+      // Restart exactly when the last item of the final batch finishes.
+      if (value === 'content first-7') {
+        source = { messages: second, references: new Map<number, Reference>(), includeThinking: false }
+        restart()
+      }
+      return `<p>${value}</p>`
+    })
+    const { rendered, restart } = useChunkedExportRenderer(() => source, render)
+
+    restart()
+    runFrame()
+    // The restart inside the render callback already cleared the array; the
+    // old generation's completed batch must not be appended after that.
+    expect(rendered.value).toEqual([])
+
+    // The new generation's frame renders exactly its own messages — the
+    // final array holds no duplicates and no stale first-generation items.
+    runFrame()
+    expect(rendered.value.map((item) => item.message.id)).toEqual(['second-0', 'second-1', 'second-2'])
+    expect(runFrame()).toBe(false)
+  })
+
   it('renders thinking only when included and the metadata value is a string', () => {
     const references = new Map<number, Reference>([[1, { cite_index: 1, url: 'https://example.com', title: 'Example', summary: '' }]])
     const messages = makeMessages(3)

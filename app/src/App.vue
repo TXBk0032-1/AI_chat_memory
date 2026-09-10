@@ -408,6 +408,21 @@ async function localizeExportImages(root: HTMLElement) {
   }))
 }
 
+// The export document renders its markdown frame by frame; every export path
+// must hold at this barrier until the document reports its final DOM, so
+// Mermaid rendering, image capture and PDF printing never race a partially
+// built document.
+async function readyExportRoot(): Promise<HTMLElement> {
+  await nextTick()
+  const document = exportDocumentRef.value
+  if (!document) throw new Error(t('export.documentNotReady'))
+  await document.whenReady()
+  await nextTick()
+  const root = document.getElement()
+  if (!root) throw new Error(t('export.documentNotReady'))
+  return root
+}
+
 async function prepareExportPreview() {
   if (!selected.value || !showExportDialog.value) return
   const generation = ++exportPreviewGeneration
@@ -419,9 +434,7 @@ async function prepareExportPreview() {
     if (messages.length !== selectedExportSeqs.value.length) throw new Error(t('export.selectedMessagesIncomplete'))
     exportRenderModel.value = createExportModel(messages)
     exportRenderMessages.value = messages
-    await nextTick()
-    const root = exportDocumentRef.value?.getElement()
-    if (!root) throw new Error(t('export.documentNotReady'))
+    const root = await readyExportRoot()
     await renderExportMermaidDiagrams(root)
     await nextTick()
     await localizeExportImages(root)
@@ -445,9 +458,7 @@ async function prepareExportPreview() {
 }
 
 async function renderExportImage(format: 'png' | 'jpeg'): Promise<string> {
-  await nextTick()
-  const root = exportDocumentRef.value?.getElement()
-  if (!root) throw new Error(t('export.documentNotReady'))
+  const root = await readyExportRoot()
   await renderExportMermaidDiagrams(root)
   await nextTick()
   await localizeExportImages(root)
@@ -494,9 +505,7 @@ async function exportSelectedConversation() {
     } else if (format === 'pdf') {
       exportRenderModel.value = model
       exportRenderMessages.value = messages
-      await nextTick()
-      const root = exportDocumentRef.value?.getElement()
-      if (!root) throw new Error(t('export.documentNotReady'))
+      const root = await readyExportRoot()
       await renderExportMermaidDiagrams(root)
       await nextTick()
       await localizeExportImages(root)
