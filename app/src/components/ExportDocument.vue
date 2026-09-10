@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { onBeforeUnmount, ref, watch } from 'vue'
 import type { Message, Reference } from '../conversation'
-import { renderMarkdown } from '../markdown'
 import { translate as t } from '../i18n'
+import { useChunkedExportRenderer } from '../composables/useChunkedExportRenderer'
 
 const props = defineProps<{
   title: string
@@ -17,19 +17,26 @@ const props = defineProps<{
 }>()
 
 const root = ref<HTMLElement | null>(null)
-const rendered = computed(() => props.messages.map((message) => ({
-  message,
-  content: renderMarkdown(message.content, message, props.references, ''),
-  thinking: props.includeThinking && typeof message.metadata?.thinking === 'string'
-    ? renderMarkdown(message.metadata.thinking, message, props.references, '')
-    : '',
-})))
+
+// Rendering every message's markdown synchronously blocks the UI thread for
+// large exports; the chunked renderer spreads it across animation frames and
+// lets export flows await `whenReady()` before touching the document.
+const { rendered, restart, whenReady, cancel } = useChunkedExportRenderer(
+  () => ({ messages: props.messages, references: props.references, includeThinking: props.includeThinking }),
+)
+
+watch(() => [props.messages, props.references, props.includeThinking], restart, { immediate: true, deep: false })
+
+onBeforeUnmount(cancel)
 
 function roleLabel(role: string) {
   return role.toUpperCase()
 }
 
-defineExpose({ getElement: () => root.value })
+defineExpose({
+  getElement: () => root.value,
+  whenReady,
+})
 </script>
 
 <template>
