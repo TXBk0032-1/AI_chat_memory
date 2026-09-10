@@ -158,7 +158,7 @@ describe('Mermaid rendering', () => {
   it('sanitizes malicious SVG in the app render path before writing innerHTML', async () => {
     const element = diagram()
     mermaid.render.mockResolvedValueOnce({
-      svg: '<svg onload="alert(1)"><script>alert(1)</script><foreignObject><div>html</div></foreignObject><a href="javascript:alert(1)">x</a><g onclick="steal()"><text>safe text</text></g></svg>',
+      svg: '<svg onload="alert(1)"><script>alert(1)</script><foreignObject><div>html label</div></foreignObject><a href="javascript:alert(1)">x</a><g onclick="steal()"><text>safe text</text></g></svg>',
     })
     vi.stubGlobal('document', { querySelectorAll: vi.fn(() => [element]) })
 
@@ -168,7 +168,14 @@ describe('Mermaid rendering', () => {
     const html = element.innerHTML as string
     expect(html).toContain('<svg')
     expect(html).toContain('safe text')
-    expect(html).not.toMatch(/<script|onload|onclick|javascript:|foreignObject/i)
+    expect(html).not.toContain('<script')
+    expect(html).not.toContain('onload=')
+    expect(html).not.toContain('onclick=')
+    expect(html).not.toContain('javascript:')
+    // foreignObject is legitimate mermaid output (node labels); it must be
+    // preserved — with its safe text — while its dangerous payload is not.
+    expect(html).toContain('<foreignObject')
+    expect(html).toContain('html label')
     expect(element.dataset.rendered).toBe('true')
   })
 
@@ -177,7 +184,7 @@ describe('Mermaid rendering', () => {
     const appElement = diagram('graph TD\nB-->C')
     mermaid.render
       .mockResolvedValueOnce({
-        svg: '<svg onload="alert(1)"><script>alert(1)</script><foreignObject><div>html</div></foreignObject><a href="javascript:alert(1)">x</a><g onclick="steal()"><text>export safe</text></g></svg>',
+        svg: '<svg onload="alert(1)"><script>alert(1)</script><foreignObject><div>html label</div></foreignObject><a href="javascript:alert(1)">x</a><g onclick="steal()"><text>export safe</text></g></svg>',
       })
       .mockResolvedValueOnce({ svg: '<svg>app</svg>' })
     const root = { querySelectorAll: vi.fn(() => [exportElement]) } as unknown as HTMLElement
@@ -190,7 +197,12 @@ describe('Mermaid rendering', () => {
     const html = exportElement.innerHTML as string
     expect(html).toContain('<svg')
     expect(html).toContain('export safe')
-    expect(html).not.toMatch(/<script|onload|onclick|javascript:|foreignObject/i)
+    expect(html).not.toContain('<script')
+    expect(html).not.toContain('onload=')
+    expect(html).not.toContain('onclick=')
+    expect(html).not.toContain('javascript:')
+    expect(html).toContain('<foreignObject')
+    expect(html).toContain('html label')
     expect(exportElement.dataset.rendered).toBe('true')
   })
 })
