@@ -13,7 +13,7 @@ if (-not (Test-Path -LiteralPath $Pipeline)) {
     throw "Local CI pipeline not found: $Pipeline"
 }
 
-$changes = @(git -C $Root status --porcelain --untracked-files=all)
+$changes = @(git -C $Root -c core.quotepath=false status --porcelain --untracked-files=all)
 if ($LASTEXITCODE -ne 0) {
     throw "Unable to inspect the Git working tree"
 }

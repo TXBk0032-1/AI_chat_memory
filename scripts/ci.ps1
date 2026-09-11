@@ -273,24 +273,14 @@ if ($Stage -in "test", "release") {
 }
 
 $frontendPaths = @(
-    "app/src",
-    "app/tests",
-    "app/index.html",
-    "app/package.json",
-    "app/package-lock.json",
-    "app/tsconfig.json",
-    "app/tsconfig.node.json",
-    "app/vite.config.ts"
+    "app",
+    ":(exclude)app/src-tauri"
 )
 $rustPaths = @(
     "app/src-tauri",
     "rust-toolchain.toml",
     "userscript",
-    "scripts/tests",
-    "scripts/ci-cache-helper.ps1",
-    "scripts/build-windows-installers.ps1",
-    "scripts/build-dev-portable.ps1",
-    "scripts/verify-portable-archive.ps1"
+    "scripts"
 )
 
 $frontendFingerprint = Get-InputFingerprint -RepoRoot $Root -Paths $frontendPaths
@@ -385,10 +375,12 @@ if ($Stage -eq "release") {
                 $env:PSModulePath = $previousModulePath
             }
         }
+        $builtCommit = ((& git -C $Root rev-parse HEAD 2>$null) -join " ").Trim()
         Save-ReleaseCache -CacheDir $CacheDir `
             -FrontendFingerprint $frontendFingerprint `
             -RustFingerprint $rustFingerprint `
-            -Version $packageVersion
+            -Version $packageVersion `
+            -Commit $builtCommit
     }
 }
 
