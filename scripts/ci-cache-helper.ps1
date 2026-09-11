@@ -9,39 +9,70 @@ function Get-InputFingerprint {
         [Parameter(Mandatory)][string[]]$Paths
     )
 
-    # 1. 获取跟踪文件的 git blob hash
-    $entries = @(git -C $RepoRoot ls-files -s -- $Paths 2>$null)
+    # 1. 获取跟踪文件的 git blob hash (禁用 quotepath 避免非 ASCII 字符被转义为八进制)
+    $entries = @(git -C $RepoRoot -c core.quotepath=false ls-files -s -- $Paths 2>$null)
 
     # 2. 检查工作区修改与未跟踪文件
-    $dirty = @(git -C $RepoRoot status --porcelain -uall -- $Paths 2>$null)
+    $dirty = @(git -C $RepoRoot -c core.quotepath=false status --porcelain -uall -- $Paths 2>$null)
     if ($dirty.Count -gt 0) {
         $dirtyMap = @{}
         foreach ($line in $dirty) {
             if ($line.Length -lt 4) { continue }
             $statusCode = $line.Substring(0, 2).Trim()
-            $filePath = $line.Substring(3).Trim()
-            if ($filePath.StartsWith('"') -and $filePath.EndsWith('"')) {
-                $filePath = $filePath.Substring(1, $filePath.Length - 2)
+            $rawPath = $line.Substring(3).Trim()
+
+            # 处理重命名或复制场景: "orig -> dest"
+            $targetPath = $rawPath
+            $oldPath = $null
+            if ($rawPath.Contains(' -> ')) {
+                $arrowIndex = $rawPath.IndexOf(' -> ')
+                $oldPart = $rawPath.Substring(0, $arrowIndex).Trim()
+                $newPart = $rawPath.Substring($arrowIndex + 4).Trim()
+                if ($oldPart.StartsWith('"') -and $oldPart.EndsWith('"') -and $oldPart.Length -ge 2) {
+                    $oldPart = $oldPart.Substring(1, $oldPart.Length - 2)
+                }
+                if ($newPart.StartsWith('"') -and $newPart.EndsWith('"') -and $newPart.Length -ge 2) {
+                    $newPart = $newPart.Substring(1, $newPart.Length - 2)
+                }
+                $oldPath = $oldPart
+                $targetPath = $newPart
+            } else {
+                if ($targetPath.StartsWith('"') -and $targetPath.EndsWith('"') -and $targetPath.Length -ge 2) {
+                    $targetPath = $targetPath.Substring(1, $targetPath.Length - 2)
+                }
             }
-            $fullPath = Join-Path $RepoRoot $filePath
-            if (Test-Path -LiteralPath $fullPath -PathType Leaf) {
+
+            $mapKey = if ($oldPath) { "$oldPath -> $targetPath" } else { $targetPath }
+            $fullPath = Join-Path $RepoRoot $targetPath
+            $isLeaf = $false
+            try {
+                $isLeaf = Test-Path -LiteralPath $fullPath -PathType Leaf -ErrorAction SilentlyContinue
+            } catch {
+                $isLeaf = $false
+            }
+
+            if ($isLeaf) {
                 $hash = (git -C $RepoRoot hash-object -- $fullPath 2>$null)
                 if (-not $hash) {
-                    $stream = [System.IO.File]::OpenRead($fullPath)
                     try {
-                        $shaCalc = [System.Security.Cryptography.SHA256]::Create()
+                        $stream = [System.IO.FileStream]::new($fullPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
                         try {
-                            $hash = [BitConverter]::ToString($shaCalc.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+                            $shaCalc = [System.Security.Cryptography.SHA256]::Create()
+                            try {
+                                $hash = [BitConverter]::ToString($shaCalc.ComputeHash($stream)).Replace('-', '').ToLowerInvariant()
+                            } finally {
+                                $shaCalc.Dispose()
+                            }
                         } finally {
-                            $shaCalc.Dispose()
+                            $stream.Dispose()
                         }
-                    } finally {
-                        $stream.Dispose()
+                    } catch {
+                        $hash = "UNREADABLE"
                     }
                 }
-                $dirtyMap[$filePath] = "$statusCode $hash"
+                $dirtyMap[$mapKey] = "$statusCode $hash"
             } else {
-                $dirtyMap[$filePath] = "DELETED"
+                $dirtyMap[$mapKey] = "$statusCode DELETED"
             }
         }
         $dirtyLines = @($dirtyMap.Keys | Sort-Object | ForEach-Object { "$($_):$($dirtyMap[$_])" })
@@ -223,6 +254,16 @@ function Test-ReleaseCacheValid {
         return $false
     }
 
+    $manifestPath = Join-Path $ArtifactsDirectory "manifest.json"
+    $manifest = $null
+    if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+        try {
+            $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding utf8 | ConvertFrom-Json
+        } catch {
+            return $false
+        }
+    }
+
     $releaseCacheFile = Join-Path $CacheDir "release.json"
     if (Test-Path -LiteralPath $releaseCacheFile -PathType Leaf) {
         try {
@@ -230,26 +271,28 @@ function Test-ReleaseCacheValid {
             if ($rc.frontend_fingerprint -eq $FrontendFingerprint -and
                 $rc.rust_fingerprint -eq $RustFingerprint -and
                 $rc.version -eq $ExpectedVersion) {
+                if ($rc.commit -and $manifest -and $manifest.commit -and ($manifest.commit -ne $rc.commit)) {
+                    return $false
+                }
                 return $true
             }
+            return $false
         } catch {
             return $false
         }
     }
 
-    # 回退机制：若 release.json 尚不存在但已有产物清单中的 commit 与当前 HEAD 一致且工作区干净
-    $manifestPath = Join-Path $ArtifactsDirectory "manifest.json"
-    if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+    # Fallback: only if release.json does not exist, but existing manifest matches clean HEAD commit
+    if ($manifest) {
         try {
-            $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding utf8 | ConvertFrom-Json
             $currentCommit = ((& git -C $RepoRoot rev-parse HEAD 2>$null) -join " ").Trim()
-            $cleanTree = (@(git -C $RepoRoot status --porcelain --untracked-files=all 2>$null).Count -eq 0)
+            $cleanTree = (@(git -C $RepoRoot -c core.quotepath=false status --porcelain --untracked-files=all 2>$null).Count -eq 0)
             if ($currentCommit -and $manifest.commit -eq $currentCommit -and $cleanTree) {
-                # 记录缓存以备后续快速校验
                 Save-ReleaseCache -CacheDir $CacheDir `
                     -FrontendFingerprint $FrontendFingerprint `
                     -RustFingerprint $RustFingerprint `
-                    -Version $ExpectedVersion
+                    -Version $ExpectedVersion `
+                    -Commit $currentCommit
                 return $true
             }
         } catch {
@@ -265,7 +308,8 @@ function Save-ReleaseCache {
         [Parameter(Mandatory)][string]$CacheDir,
         [Parameter(Mandatory)][string]$FrontendFingerprint,
         [Parameter(Mandatory)][string]$RustFingerprint,
-        [Parameter(Mandatory)][string]$Version
+        [Parameter(Mandatory)][string]$Version,
+        [string]$Commit
     )
 
     New-Item -ItemType Directory -Force -Path $CacheDir | Out-Null
@@ -274,6 +318,7 @@ function Save-ReleaseCache {
         frontend_fingerprint = $FrontendFingerprint
         rust_fingerprint = $RustFingerprint
         version = $Version
+        commit = $Commit
         updated_at_utc = [DateTime]::UtcNow.ToString("o")
     }
     $json = $record | ConvertTo-Json -Depth 3
