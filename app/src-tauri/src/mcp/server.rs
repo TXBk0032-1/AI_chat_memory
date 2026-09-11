@@ -114,6 +114,14 @@ impl ChatMemoryMcp {
         }
     }
 
+    /// MCP 数据读取的统一迁移 guard。旧数据目录一旦出现 redirect
+    /// marker，说明数据库已被桌面端 `move_data_directory` 搬到别处、
+    /// 本进程持有的旧 SQLite 池即将失效——读取必须立即拒绝并提示
+    /// 重启发起新的 MCP 进程，而不是继续吐出已被搬走的陈旧数据。
+    async fn ensure_current_data(&self) -> std::result::Result<(), AppError> {
+        self.service.ensure_current_data_directory().await
+    }
+
     #[tool(
         description = "跨会话搜索本地已同步的 AI 聊天记录。返回会话摘要列表（id、platform、title、时间等）及 total。limit 默认 20、上限 100；offset 默认 0。mode 可选 keyword/semantic/hybrid。"
     )]
@@ -132,6 +140,9 @@ impl ChatMemoryMcp {
             Ok(m) => m,
             Err(msg) => return Ok(tool_error(msg)),
         };
+        if let Err(err) = self.ensure_current_data().await {
+            return Ok(tool_error(format_app_error(&err)));
+        }
         let query = SearchQuery {
             q: args.q,
             platform: args.platform,
@@ -154,6 +165,9 @@ impl ChatMemoryMcp {
         &self,
         Parameters(args): Parameters<OpenSessionArgs>,
     ) -> Result<CallToolResult, McpError> {
+        if let Err(err) = self.ensure_current_data().await {
+            return Ok(tool_error(format_app_error(&err)));
+        }
         match self
             .service
             .open_session(&args.session_id, args.anchor_seq)
@@ -173,6 +187,9 @@ impl ChatMemoryMcp {
     ) -> Result<CallToolResult, McpError> {
         let start_seq = args.start_seq.unwrap_or(0).max(0);
         let limit = clamp_limit(args.limit, 50, 100);
+        if let Err(err) = self.ensure_current_data().await {
+            return Ok(tool_error(format_app_error(&err)));
+        }
         match self
             .service
             .session_messages(&args.session_id, start_seq, limit)
@@ -198,6 +215,9 @@ impl ChatMemoryMcp {
             Ok(m) => m,
             Err(msg) => return Ok(tool_error(msg)),
         };
+        if let Err(err) = self.ensure_current_data().await {
+            return Ok(tool_error(format_app_error(&err)));
+        }
         match self
             .service
             .session_search_hits(&args.session_id, &query, mode)
@@ -221,6 +241,9 @@ impl ChatMemoryMcp {
     ) -> Result<GetPromptResult, McpError> {
         let session_id = normalize_required_session_id(&args.session_id)
             .map_err(|msg| McpError::invalid_params(msg, None))?;
+        self.ensure_current_data()
+            .await
+            .map_err(|err| resource_mcp_error(&err))?;
         let open = self
             .service
             .open_session(&session_id, None)
@@ -354,6 +377,9 @@ impl ServerHandler for ChatMemoryMcp {
         let uri = request.uri.as_str();
         match parse_resource_uri(uri) {
             ResourceTarget::Recent { limit } => {
+                self.ensure_current_data()
+                    .await
+                    .map_err(|err| resource_mcp_error(&err))?;
                 let query = SearchQuery {
                     q: None,
                     platform: None,
@@ -371,6 +397,9 @@ impl ServerHandler for ChatMemoryMcp {
                 Ok(json_resource(uri, &list))
             }
             ResourceTarget::Session { id } => {
+                self.ensure_current_data()
+                    .await
+                    .map_err(|err| resource_mcp_error(&err))?;
                 let open = self
                     .service
                     .open_session(&id, None)
@@ -394,6 +423,9 @@ impl ServerHandler for ChatMemoryMcp {
                 start_seq,
                 limit,
             } => {
+                self.ensure_current_data()
+                    .await
+                    .map_err(|err| resource_mcp_error(&err))?;
                 let messages = self
                     .service
                     .session_messages(&id, start_seq, limit)
@@ -769,6 +801,233 @@ mod tests {
         assert!(tool_text.contains("seed-session"), "{tool_text}");
 
         let _ = running.cancel().await;
+    }
+
+    /// 迁移覆盖矩阵：旧数据目录出现有效 redirect marker 后，MCP 边界的
+    /// 全部数据读取入口必须立即拒绝并提示重启；纯静态入口保持可用。
+    /// 经 duplex JSON-RPC 走 ServerHandler 实际入口，等价于 stdio/HTTP 链路。
+    #[tokio::test]
+    async fn redirect_marker_blocks_all_mcp_data_reads() {
+        let (service, data_dir) = test_app_service().await;
+        // 模拟桌面端已完成迁移：旧目录留下原子 redirect marker，而本
+        // MCP 进程仍持有旧 SQLite 池。destination 仅作提示，不要求存在。
+        let destination =
+            std::env::temp_dir().join(format!("ai-chat-memory-mcp-moved-{}", uuid::Uuid::new_v4()));
+        crate::data_directory_marker::publish_redirect(&data_dir, &destination)
+            .await
+            .unwrap();
+
+        let (client_side, server_side) = tokio::io::duplex(64 * 1024);
+        let (read_half, mut write_half) = tokio::io::split(client_side);
+
+        async fn write_message(
+            writer: &mut tokio::io::WriteHalf<tokio::io::DuplexStream>,
+            value: &serde_json::Value,
+        ) {
+            writer
+                .write_all(format!("{value}\n").as_bytes())
+                .await
+                .unwrap();
+        }
+        async fn read_message(
+            reader: &mut BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>,
+        ) -> serde_json::Value {
+            let mut line = Vec::new();
+            reader.read_until(b'\n', &mut line).await.unwrap();
+            serde_json::from_slice(&line).unwrap()
+        }
+
+        fn assert_mcp_restart_error(response: &serde_json::Value, label: &str) {
+            assert!(
+                response["error"].is_object(),
+                "{label} 必须返回 JSON-RPC error，实际：{response}"
+            );
+            let message = response["error"]["message"].as_str().unwrap_or_default();
+            assert!(
+                message.contains("请重启 MCP"),
+                "{label} 的错误必须提示重启，实际：{message}"
+            );
+        }
+
+        write_message(
+            &mut write_half,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "mcp-test", "version": "0.0.0"}
+                }
+            }),
+        )
+        .await;
+        let running = ChatMemoryMcp::new(service)
+            .serve(server_side)
+            .await
+            .unwrap();
+        let mut reader = BufReader::new(read_half);
+        let response = read_message(&mut reader).await;
+        assert_eq!(response["id"], 1);
+        write_message(
+            &mut write_half,
+            &json!({"jsonrpc": "2.0", "method": "notifications/initialized"}),
+        )
+        .await;
+
+        // —— 4 个数据读取 tool 全部转为 tool error 并提示重启 ——
+        let tool_calls: Vec<(&str, serde_json::Value)> = vec![
+            ("search_sessions", json!({"q": "Rust"})),
+            ("open_session", json!({"session_id": "seed-session"})),
+            ("get_messages", json!({"session_id": "seed-session"})),
+            (
+                "search_in_session",
+                json!({"session_id": "seed-session", "query": "async"}),
+            ),
+        ];
+        let mut next_id = 2;
+        for (tool, arguments) in tool_calls {
+            let id = next_id;
+            next_id += 1;
+            write_message(
+                &mut write_half,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": "tools/call",
+                    "params": {"name": tool, "arguments": arguments}
+                }),
+            )
+            .await;
+            let response = read_message(&mut reader).await;
+            assert_eq!(response["id"], id, "tool {tool}");
+            assert_eq!(
+                response["result"]["isError"], true,
+                "tool {tool} 必须以 tool error 拒绝，实际：{response}"
+            );
+            let text = response["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap_or_default();
+            assert!(
+                text.contains("请重启 MCP"),
+                "tool {tool} 必须提示重启，实际：{text}"
+            );
+        }
+
+        // —— summarize-session 会读会话，必须返回 MCP error ——
+        write_message(
+            &mut write_half,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": next_id,
+                "method": "prompts/get",
+                "params": {
+                    "name": "summarize-session",
+                    "arguments": {"session_id": "seed-session"}
+                }
+            }),
+        )
+        .await;
+        let response = read_message(&mut reader).await;
+        assert_eq!(response["id"], next_id);
+        assert_mcp_restart_error(&response, "summarize-session");
+        next_id += 1;
+
+        // —— find-memories 不读数据库，静态提示词保持可生成 ——
+        write_message(
+            &mut write_half,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": next_id,
+                "method": "prompts/get",
+                "params": {
+                    "name": "find-memories",
+                    "arguments": {"topic": "量化交易"}
+                }
+            }),
+        )
+        .await;
+        let response = read_message(&mut reader).await;
+        assert_eq!(response["id"], next_id);
+        assert!(
+            response["error"].is_null(),
+            "find-memories 不读数据库，必须保持可用，实际：{response}"
+        );
+        let prompt_text = response["result"]["messages"][0]["content"]["text"]
+            .as_str()
+            .unwrap_or_default();
+        assert!(
+            prompt_text.contains("量化交易"),
+            "find-memories 应生成静态提示词，实际：{prompt_text}"
+        );
+        next_id += 1;
+
+        // —— 3 条 resource 路径全部返回 MCP error ——
+        for uri in [
+            "sessions://recent",
+            "session://seed-session",
+            "session://seed-session/messages?start_seq=0&limit=5",
+        ] {
+            write_message(
+                &mut write_half,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": next_id,
+                    "method": "resources/read",
+                    "params": {"uri": uri}
+                }),
+            )
+            .await;
+            let response = read_message(&mut reader).await;
+            assert_eq!(response["id"], next_id, "resource {uri}");
+            assert_mcp_restart_error(&response, uri);
+            next_id += 1;
+        }
+
+        // —— 静态元数据入口不访问数据库，保持可用 ——
+        write_message(
+            &mut write_half,
+            &json!({"jsonrpc": "2.0", "id": next_id, "method": "resources/list"}),
+        )
+        .await;
+        let response = read_message(&mut reader).await;
+        assert_eq!(response["id"], next_id);
+        assert!(
+            response["error"].is_null(),
+            "resources/list 只列元数据，必须保持可用，实际：{response}"
+        );
+        let uris: Vec<&str> = response["result"]["resources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|resource| resource["uri"].as_str().unwrap())
+            .collect();
+        assert_eq!(uris, vec!["sessions://recent"]);
+        next_id += 1;
+
+        write_message(
+            &mut write_half,
+            &json!({"jsonrpc": "2.0", "id": next_id, "method": "resources/templates/list"}),
+        )
+        .await;
+        let response = read_message(&mut reader).await;
+        assert_eq!(response["id"], next_id);
+        assert!(
+            response["error"].is_null(),
+            "resources/templates/list 只列元数据，必须保持可用，实际：{response}"
+        );
+        let templates: Vec<&str> = response["result"]["resourceTemplates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|template| template["uriTemplate"].as_str().unwrap())
+            .collect();
+        assert_eq!(templates, vec!["session://{id}", "session://{id}/messages"]);
+
+        let _ = running.cancel().await;
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let _ = std::fs::remove_dir_all(&destination);
     }
 
     #[test]

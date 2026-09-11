@@ -1927,7 +1927,6 @@ impl AppService {
     /// 说明数据库已被 `move_data_directory` 搬到别处、本进程持有的旧池
     /// 即将失效，读取必须立即拒绝并提示重启，而不是继续吐出陈旧数据。
     /// 仅由 MCP 边界调用；桌面进程迁移后的内部读行为保持不变。
-    #[allow(dead_code)] // wired by the MCP boundary guard in task 3
     pub async fn ensure_current_data_directory(&self) -> Result<()> {
         match crate::data_directory_marker::read_redirect(&self.data_dir).await? {
             None => Ok(()),
