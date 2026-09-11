@@ -1,6 +1,7 @@
 mod branch;
 mod commands;
 mod data_directory;
+mod data_directory_marker;
 mod database;
 mod embedding;
 mod error;
