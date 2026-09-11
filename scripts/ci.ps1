@@ -2,7 +2,8 @@
 param(
     [ValidateSet("check", "test", "release", "quick")]
     [string]$Stage = "check",
-    [switch]$Clean
+    [switch]$Clean,
+    [switch]$Force
 )
 
 $ErrorActionPreference = "Stop"
@@ -21,11 +22,18 @@ $win51ModulePath = @(
     $windowsPowerShellModules,
     (Join-Path $env:ProgramFiles "WindowsPowerShell\Modules")
 ) -join ";"
-$Root = Split-Path -Parent $PSScriptRoot
+$ScriptDir = if ($PSScriptRoot) { $PSScriptRoot } elseif ($MyInvocation.MyCommand.Path) { Split-Path -Parent $MyInvocation.MyCommand.Path } else { (Get-Location).Path }
+$Root = Split-Path -Parent $ScriptDir
 $App = Join-Path $Root "app"
 $Rust = Join-Path $App "src-tauri"
 $Artifacts = Join-Path $Root "artifacts"
-$InstallerBuilder = Join-Path $PSScriptRoot "build-windows-installers.ps1"
+$CacheDir = Join-Path $Root ".ci-cache"
+$InstallerBuilder = Join-Path $ScriptDir "build-windows-installers.ps1"
+$ciCacheHelper = Join-Path $ScriptDir "ci-cache-helper.ps1"
+if (-not (Test-Path -LiteralPath $ciCacheHelper -PathType Leaf)) {
+    throw "CI cache helper missing: $ciCacheHelper"
+}
+. $ciCacheHelper
 $env:RUSTUP_TOOLCHAIN = "1.97.0"
 $env:CARGO_TERM_COLOR = "always"
 
@@ -151,6 +159,7 @@ if ($Clean) {
         try { cargo clean } finally { Pop-Location }
         Remove-Item -LiteralPath (Join-Path $App "dist") -Recurse -Force -ErrorAction SilentlyContinue
         Remove-Item -LiteralPath $Artifacts -Recurse -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $CacheDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
 
@@ -251,16 +260,45 @@ function Invoke-ParallelSteps {
 
 $installerContractTest = Join-Path $PSScriptRoot "tests\build-windows-installers.Tests.ps1"
 $portableContractTest = Join-Path $PSScriptRoot "tests\build-dev-portable.Tests.ps1"
+$ciCacheContractTest = Join-Path $PSScriptRoot "tests\ci-cache.Tests.ps1"
 $userscriptPath = Join-Path $Root "userscript\dist\ai-chat-memory.user.js"
 $userscriptTestPath = Join-Path $Root "userscript\tests\capture.test.mjs"
 
 $frontendCmd = "npm run build"
-$rustCmd = "node --check `"$userscriptPath`" && node --test `"$userscriptTestPath`" && powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$installerContractTest`" && powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$portableContractTest`" && cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings"
+$rustCmd = "node --check `"$userscriptPath`" && node --test `"$userscriptTestPath`" && powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$installerContractTest`" && powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$portableContractTest`" && powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$ciCacheContractTest`" && cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings"
 
 if ($Stage -in "test", "release") {
     $frontendCmd = "npm run build && npm test"
     $rustCmd = "$rustCmd && cargo test --all-features"
 }
+
+$frontendPaths = @(
+    "app/src",
+    "app/tests",
+    "app/index.html",
+    "app/package.json",
+    "app/package-lock.json",
+    "app/tsconfig.json",
+    "app/tsconfig.node.json",
+    "app/vite.config.ts"
+)
+$rustPaths = @(
+    "app/src-tauri",
+    "rust-toolchain.toml",
+    "userscript",
+    "scripts/tests",
+    "scripts/ci-cache-helper.ps1",
+    "scripts/build-windows-installers.ps1",
+    "scripts/build-dev-portable.ps1",
+    "scripts/verify-portable-archive.ps1"
+)
+
+$frontendFingerprint = Get-InputFingerprint -RepoRoot $Root -Paths $frontendPaths
+$rustFingerprint = Get-InputFingerprint -RepoRoot $Root -Paths $rustPaths
+$packageVersion = (Get-Content -LiteralPath (Join-Path $App "package.json") -Raw | ConvertFrom-Json).version
+
+$frontendSkipped = Test-FrontendCacheValid -CacheDir $CacheDir -CurrentFingerprint $frontendFingerprint -AppDir $App -Stage $Stage
+$rustSkipped = Test-RustCacheValid -CacheDir $CacheDir -CurrentFingerprint $rustFingerprint -Stage $Stage
 
 # Lightweight CUDA-free stage used as the pre-push hook fallback. It only
 # validates the userscript and rebuilds the frontend; everything that needs the
@@ -273,41 +311,84 @@ if ($Stage -eq "quick") {
     Invoke-Step "Run userscript tests" {
         node --test $userscriptTestPath
     }
-    Invoke-Step "Build frontend" {
-        Push-Location $App
-        try { npm run build } finally { Pop-Location }
+    if ($frontendSkipped) {
+        Write-Host "`n==> [Cached] Frontend Pipeline (build) skipped - no code changes" -ForegroundColor DarkCyan
+    } else {
+        Invoke-Step "Build frontend" {
+            Push-Location $App
+            try { npm run build } finally { Pop-Location }
+        }
+        Save-FrontendCache -CacheDir $CacheDir -Fingerprint $frontendFingerprint -Tested $false
     }
     Write-Host "`nLocal CI stage 'quick' passed (CUDA-dependent checks were skipped; run 'ci.ps1 test' on a CUDA machine for the full pipeline)." -ForegroundColor Green
     exit 0
 }
 
-Invoke-ParallelSteps @(
-    @{
+$branches = @()
+if ($frontendSkipped) {
+    Write-Host "`n==> [Cached] Frontend Pipeline $(if ($Stage -in "test", "release") { '(build & test)' } else { '(build)' }) skipped - no code changes" -ForegroundColor DarkCyan
+} else {
+    $branches += @{
         Name = if ($Stage -in "test", "release") { "Frontend Pipeline (build & test)" } else { "Frontend Pipeline (build)" }
         WorkingDirectory = $App
         Command = $frontendCmd
-    },
-    @{
+    }
+}
+
+if ($rustSkipped) {
+    Write-Host "`n==> [Cached] Rust & Quality Pipeline $(if ($Stage -in "test", "release") { '(lint & test)' } else { '(lint)' }) skipped - no code changes" -ForegroundColor DarkCyan
+} else {
+    $branches += @{
         Name = if ($Stage -in "test", "release") { "Rust & Quality Pipeline (lint & test)" } else { "Rust & Quality Pipeline (lint)" }
         WorkingDirectory = $Rust
         Command = $rustCmd
     }
-)
+}
+
+if ($branches.Count -gt 0) {
+    Invoke-ParallelSteps $branches
+    if (-not $frontendSkipped) {
+        Save-FrontendCache -CacheDir $CacheDir -Fingerprint $frontendFingerprint -Tested ($Stage -in "test", "release")
+    }
+    if (-not $rustSkipped) {
+        Save-RustCache -CacheDir $CacheDir -Fingerprint $rustFingerprint -Tested ($Stage -in "test", "release")
+    }
+} else {
+    Write-Host "`nOK  All quality checks and tests are up to date (cached)" -ForegroundColor Green
+}
 
 if ($Stage -eq "release") {
-    $runningApp = Get-CimInstance Win32_Process -Filter "Name = 'ai-chat-memory-desktop.exe'" -ErrorAction SilentlyContinue
-    if ($runningApp) {
-        $ids = ($runningApp.ProcessId -join ", ")
-        throw "Close AI Chat Memory before release build (running process IDs: $ids)"
-    }
-    Invoke-Step "Build Windows NSIS installers" {
-        $previousModulePath = $env:PSModulePath
-        $env:PSModulePath = $win51ModulePath
-        try {
-            & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $InstallerBuilder -ArtifactsDirectory $Artifacts -RustVersion $rustVersion
-        } finally {
-            $env:PSModulePath = $previousModulePath
+    $canSkipPackaging = Test-ReleaseCacheValid -CacheDir $CacheDir `
+        -RepoRoot $Root `
+        -FrontendFingerprint $frontendFingerprint `
+        -RustFingerprint $rustFingerprint `
+        -ArtifactsDirectory $Artifacts `
+        -ExpectedVersion $packageVersion `
+        -Force:$Force
+
+    if ($canSkipPackaging) {
+        Write-Host "`n==> Code is unchanged and release artifacts are valid; skipping packaging (use -Force to rebuild)" -ForegroundColor Green
+        Write-Host "`nRelease artifacts: $Artifacts" -ForegroundColor Green
+        Get-ChildItem -LiteralPath $Artifacts | Select-Object Name, Length, LastWriteTime | Format-Table -AutoSize
+    } else {
+        $runningApp = Get-CimInstance Win32_Process -Filter "Name = 'ai-chat-memory-desktop.exe'" -ErrorAction SilentlyContinue
+        if ($runningApp) {
+            $ids = ($runningApp.ProcessId -join ", ")
+            throw "Close AI Chat Memory before release build (running process IDs: $ids)"
         }
+        Invoke-Step "Build Windows NSIS installers" {
+            $previousModulePath = $env:PSModulePath
+            $env:PSModulePath = $win51ModulePath
+            try {
+                & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $InstallerBuilder -ArtifactsDirectory $Artifacts -RustVersion $rustVersion
+            } finally {
+                $env:PSModulePath = $previousModulePath
+            }
+        }
+        Save-ReleaseCache -CacheDir $CacheDir `
+            -FrontendFingerprint $frontendFingerprint `
+            -RustFingerprint $rustFingerprint `
+            -Version $packageVersion
     }
 }
 
