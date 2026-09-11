@@ -89,6 +89,7 @@ async fn service_with_local_session_fixture() -> (AppService, PathBuf) {
             settings,
             semantic,
             role: ServiceRole::Desktop,
+            data_dir: Arc::new(data_dir.clone()),
             api_status: Arc::new(RwLock::new(ApiStatus::Starting)),
             last_userscript_request_at: Arc::new(RwLock::new(None)),
             sync_store: SyncStore::new(pool),
@@ -982,6 +983,7 @@ async fn restart_reconciles_a_committed_generation_before_selecting_credentials(
         settings: reloaded_settings,
         semantic: service.semantic.clone(),
         role: ServiceRole::Desktop,
+        data_dir: Arc::new(data_dir.clone()),
         api_status: Arc::new(RwLock::new(ApiStatus::Starting)),
         last_userscript_request_at: Arc::new(RwLock::new(None)),
         sync_store: SyncStore::new(service.pool.clone()),
@@ -3820,6 +3822,102 @@ async fn move_data_directory_rechecks_the_destination_inside_the_sync_gate() {
         matches!(error, AppError::Configuration(ref message) if message.contains("已存在")),
         "the recheck inside the sync gate must surface the friendly conflict, got {error:?}"
     );
+
+    let _ = std::fs::remove_dir_all(&destination);
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+#[tokio::test]
+async fn move_data_directory_publishes_redirect_for_old_readers() {
+    // 迁移完成后，旧数据目录必须留下原子 redirect marker：仍持有旧
+    // SQLite 池的 MCP stdio 进程据此立即拒绝读取并提示重启，而不是继续
+    // 服务已被搬走的陈旧数据。新目录自身没有 marker，重启后一切如常。
+    let (service, data_dir) = service_with_local_session_fixture().await;
+    let destination = std::env::temp_dir().join(format!(
+        "ai-chat-memory-move-marker-{}",
+        uuid::Uuid::new_v4()
+    ));
+
+    // 迁移前旧目录没有任何 marker，guard 必须放行。
+    service.ensure_current_data_directory().await.unwrap();
+
+    service.move_data_directory(&destination).await.unwrap();
+
+    // 旧目录发布了 marker，旧池上的 guard 必须以 Cancelled 拒绝并提示重启。
+    let guard_error = service.ensure_current_data_directory().await.unwrap_err();
+    assert!(
+        matches!(guard_error, AppError::Cancelled(ref message)
+            if message.contains("数据目录已迁移，请重启 MCP")),
+        "guard after a successful move must be Cancelled with the restart hint, got {guard_error:?}"
+    );
+    let marker_path = data_dir.join(crate::data_directory_marker::DATA_DIRECTORY_REDIRECT_FILE);
+    assert!(
+        marker_path.is_file(),
+        "the old data directory must carry the redirect marker"
+    );
+
+    // 目的目录确实拿到了数据库快照。
+    assert!(
+        destination.join("chat_memory.db").exists(),
+        "the destination must hold the snapshotted database"
+    );
+
+    // 重启后的进程在目的目录构建 service，guard 必须放行（新目录无 marker）。
+    let restarted_pool = database::connect(&destination.join("chat_memory.db"))
+        .await
+        .unwrap();
+    let restarted_settings = Arc::new(
+        SettingsStore::load(destination.join("settings.json"))
+            .await
+            .unwrap(),
+    );
+    let mut restarted_settings_value = restarted_settings.get().await;
+    restarted_settings_value.semantic_search.backend = EmbeddingBackendKind::Ollama;
+    restarted_settings
+        .update(restarted_settings_value.clone())
+        .await
+        .unwrap();
+    let restarted = AppService::new(restarted_pool, restarted_settings, destination.clone())
+        .await
+        .unwrap();
+    restarted
+        .ensure_current_data_directory()
+        .await
+        .expect("a service built on the destination directory must pass the guard");
+
+    let _ = std::fs::remove_dir_all(&destination);
+    let _ = std::fs::remove_dir_all(&data_dir);
+}
+
+#[tokio::test]
+async fn move_data_directory_leaves_no_marker_when_the_move_fails() {
+    // 迁移失败（目的目录已有 chat_memory.db）时旧目录绝不能留下 marker：
+    // 一旦发布，仍在运行的 MCP 进程会立刻拒绝读取，而数据库实际上
+    // 并没有搬走，用户只会看到无来由的故障。
+    let (service, data_dir) = service_with_local_session_fixture().await;
+    let destination =
+        std::env::temp_dir().join(format!("ai-chat-memory-move-fail-{}", uuid::Uuid::new_v4()));
+    tokio::fs::create_dir_all(&destination).await.unwrap();
+    tokio::fs::write(destination.join("chat_memory.db"), b"competing")
+        .await
+        .unwrap();
+
+    let error = service.move_data_directory(&destination).await.unwrap_err();
+    assert!(
+        matches!(error, AppError::Configuration(ref message) if message.contains("已存在")),
+        "the competing database must surface the friendly configuration error, got {error:?}"
+    );
+
+    let marker_path = data_dir.join(crate::data_directory_marker::DATA_DIRECTORY_REDIRECT_FILE);
+    assert!(
+        !marker_path.exists(),
+        "a failed move must not publish the redirect marker"
+    );
+    // 失败后旧目录的 guard 仍然放行，服务继续可用。
+    service
+        .ensure_current_data_directory()
+        .await
+        .expect("the old directory stays current after a failed move");
 
     let _ = std::fs::remove_dir_all(&destination);
     let _ = std::fs::remove_dir_all(&data_dir);

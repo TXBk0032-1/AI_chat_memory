@@ -253,6 +253,12 @@ pub struct AppService {
     settings: Arc<SettingsStore>,
     semantic: Arc<SemanticEngine>,
     role: ServiceRole,
+    /// The directory this service's database lives in. After
+    /// `move_data_directory` snapshots the database elsewhere, the redirect
+    /// marker is published here so old-pool readers (the still-running MCP
+    /// stdio process) can detect the move; `ensure_current_data_directory`
+    /// is the guard every MCP data read runs through first.
+    data_dir: Arc<PathBuf>,
     api_status: Arc<RwLock<ApiStatus>>,
     last_userscript_request_at: Arc<RwLock<Option<u64>>>,
     sync_store: SyncStore,
@@ -305,13 +311,16 @@ impl AppService {
         role: ServiceRole,
     ) -> Result<Self> {
         let build_started = std::time::Instant::now();
+        let data_dir = Arc::new(data_dir);
         let settings_value = settings.get().await;
         let semantic_enabled = settings_value.semantic_search.enabled;
         let embeddings = {
             let started = std::time::Instant::now();
-            let manager =
-                EmbeddingManager::from_settings(data_dir.clone(), settings_value.semantic_search)
-                    .await;
+            let manager = EmbeddingManager::from_settings(
+                data_dir.as_ref().clone(),
+                settings_value.semantic_search,
+            )
+            .await;
             tracing::info!(
                 elapsed_ms = started.elapsed().as_millis() as u64,
                 "service build: embedding manager ready"
@@ -338,7 +347,11 @@ impl AppService {
             elapsed_ms = build_started.elapsed().as_millis() as u64,
             "service build: embedding index activated"
         );
-        let semantic = Arc::new(SemanticEngine::new(pool.clone(), data_dir, embeddings));
+        let semantic = Arc::new(SemanticEngine::new(
+            pool.clone(),
+            data_dir.as_ref().clone(),
+            embeddings,
+        ));
         tracing::info!(
             elapsed_ms = build_started.elapsed().as_millis() as u64,
             "service build: semantic engine constructed"
@@ -365,6 +378,7 @@ impl AppService {
             settings,
             semantic,
             role,
+            data_dir: Arc::clone(&data_dir),
             api_status: Arc::new(RwLock::new(ApiStatus::Starting)),
             last_userscript_request_at: Arc::new(RwLock::new(None)),
             sync_store,
@@ -1909,6 +1923,20 @@ impl AppService {
         Ok(())
     }
 
+    /// 数据读取的统一迁移 guard：旧数据目录一旦出现 redirect marker，
+    /// 说明数据库已被 `move_data_directory` 搬到别处、本进程持有的旧池
+    /// 即将失效，读取必须立即拒绝并提示重启，而不是继续吐出陈旧数据。
+    /// 仅由 MCP 边界调用；桌面进程迁移后的内部读行为保持不变。
+    #[allow(dead_code)] // wired by the MCP boundary guard in task 3
+    pub async fn ensure_current_data_directory(&self) -> Result<()> {
+        match crate::data_directory_marker::read_redirect(&self.data_dir).await? {
+            None => Ok(()),
+            Some(_) => Err(AppError::Cancelled(
+                "数据目录已迁移，请重启 MCP 后重试".into(),
+            )),
+        }
+    }
+
     pub async fn move_data_directory(&self, directory: &Path) -> Result<()> {
         self.ensure_writable()?;
         // The destination probe and the VACUUM snapshot must run inside
@@ -1930,6 +1958,14 @@ impl AppService {
         let mut settings = self.settings().await;
         settings.data_directory = Some(directory.to_string_lossy().into_owned());
         self.settings.update(settings).await?;
+        // Publish the redirect marker in the old directory before setting the
+        // shutdown flag. A marker published only after VACUUM and settings
+        // both succeeded guarantees no half-written marker exists; if this
+        // publish fails the move returns Err without setting shutdown, so the
+        // UI never declares "migration fully succeeded" — the snapshot and
+        // settings are already on disk, and the next operation can surface
+        // the diagnostic instead of silently serving the moved-away data.
+        crate::data_directory_marker::publish_redirect(&self.data_dir, directory).await?;
         // The snapshot is complete and a restart has been requested. Set the
         // shutdown flag before releasing the sync_gate so every subsequent
         // write path observes it and rejects new work, leaving the old pool

@@ -7,16 +7,13 @@ use crate::error::{AppError, Result};
 /// Redirect marker 文件名。桌面端完成迁移后，在旧数据目录留下一个原子的、
 /// 版本化的 JSON 标记；仍持有旧 SQLite 池的 MCP stdio 进程读取它后立即
 /// 拒绝数据读取并提示重启。
-#[allow(dead_code)] // wired by service/mcp migration follow-up batches
 pub(crate) const DATA_DIRECTORY_REDIRECT_FILE: &str = ".ai-chat-memory-data-moved.json";
 
 /// 当前 marker schema 版本。读取方只认这个版本，其他版本一律失败关闭。
-#[allow(dead_code)] // wired by service/mcp migration follow-up batches
 const REDIRECT_VERSION: u32 = 1;
 
 /// 迁移标记 payload。`version` 用于未来的 schema 演进；`destination_hint`
 /// 仅用于日志与用户提示，读取方绝不据此自动切换数据库池。
-#[allow(dead_code)] // wired by service/mcp migration follow-up batches
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub(crate) struct DataDirectoryRedirect {
     pub version: u32,
@@ -25,9 +22,10 @@ pub(crate) struct DataDirectoryRedirect {
 }
 
 /// 在 `old_dir` 内原子发布迁移标记：先写 UUID 临时文件并 fsync，再 rename
-/// 到固定 marker 名。任一环节失败都删除临时文件并返回错误，目录中永远不会
-/// 出现半写的 marker；rename 落盘后即使掉电，也只会看到完整或缺失两种状态。
-#[allow(dead_code)] // wired by service/mcp migration follow-up batches
+/// 到固定 marker 名。rename 失败时删除临时文件并返回错误，正式 marker 未被
+/// 触碰；写入或 fsync 失败同样返回错误，但残留的临时文件惰性无害，不会与
+/// 正式 marker 混淆。目录中永远不会出现半写的 marker；rename 落盘后即使
+/// 掉电，也只会看到完整或缺失两种状态。
 pub(crate) async fn publish_redirect(old_dir: &Path, destination: &Path) -> Result<()> {
     let marker_path = old_dir.join(DATA_DIRECTORY_REDIRECT_FILE);
     // UUID 临时名与 SettingsStore 的 settings.json.tmp-* 同一惯例：并发
@@ -58,7 +56,6 @@ pub(crate) async fn publish_redirect(old_dir: &Path, destination: &Path) -> Resu
 /// 读取 `data_dir` 中的迁移标记。不存在视为未迁移（`None`）；损坏的 JSON
 /// 或未知版本一律失败关闭为 `AppError::InvalidData`——宁可拒绝读取，
 /// 也不让持有旧池的进程在目录已被搬走后继续服务陈旧数据。
-#[allow(dead_code)] // wired by service/mcp migration follow-up batches
 pub(crate) async fn read_redirect(data_dir: &Path) -> Result<Option<DataDirectoryRedirect>> {
     let marker_path = data_dir.join(DATA_DIRECTORY_REDIRECT_FILE);
     let raw = match tokio::fs::read(&marker_path).await {
