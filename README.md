@@ -87,11 +87,15 @@ userscript 请求必须满足：
 # check + Rust 测试
 .\scripts\ci.ps1 test
 
-# test + Windows MSI/EXE + SHA-256 manifest
+# test + Windows 安装包与便携版 ZIP + SHA-256 manifest
 .\scripts\ci.ps1 release
+
+# 强制重构发布安装包（前后端测试若无代码变更依然复用缓存）
+.\scripts\ci.ps1 release -Force
 ```
 
-release 产物输出到 `artifacts/`。使用 `-Clean` 可清理 Rust/前端缓存后执行完全构建。
+流水线具备智能缓存机制：前后端代码未发生变更时自动复用测试结果；若代码无改动且已有安装包产物完整有效，release 阶段会自动跳过打包。
+使用 `-Force` 可仅强制重新打包安装包；使用 `-Clean` 可清空所有缓存（包含 `.ci-cache/`、Cargo、前端 dist 和 artifacts）后执行完全构建。
 
 启用 pre-push hook（建议每个贡献者在首次克隆后执行一次，使 push 前自动跑 `ci.ps1 test` 守门；未启用时 `.githooks/pre-push` 不会被 git 调用）：
 
@@ -102,7 +106,14 @@ release 产物输出到 `artifacts/`。使用 `-Clean` 可清理 Rust/前端缓�
 编码代理在完成并提交任务后应执行统一结束 Hook：
 
 ```powershell
+# 智能模式：按需复用缓存并生成/跳过安装包
 .\scripts\finish-task.ps1
+
+# 强制重构发布安装包
+.\scripts\finish-task.ps1 -Force
+
+# 清理所有缓存重新构建
+.\scripts\finish-task.ps1 -Clean
 ```
 
-该命令要求工作区无未提交改动，并运行完整 release 流水线生成最新 MSI、EXE 和校验清单。
+该命令要求工作区无未提交改动，并运行完整 release 流水线确保产出最新安装包、便携版及校验清单。
