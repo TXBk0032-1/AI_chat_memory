@@ -2282,3 +2282,78 @@ fn validate_cloud_sync_update(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+    use crate::models::{CloudBackendKind, CloudSyncSettings};
+
+    #[test]
+    fn backend_switch_rotates_identity_once() {
+        let previous = CloudSyncSettings::default();
+        let mut s3 = previous.clone();
+        s3.backend = CloudBackendKind::S3;
+
+        assert!(prepare_cloud_sync_transition(&previous, &mut s3));
+        assert_ne!(s3.remote_id, previous.remote_id);
+        assert_ne!(s3.vault_id, previous.vault_id);
+        assert_ne!(s3.generation_id, previous.generation_id);
+
+        let switched = s3.clone();
+        assert!(!prepare_cloud_sync_transition(&switched, &mut s3));
+        assert_eq!(s3.remote_id, switched.remote_id);
+        assert_eq!(s3.vault_id, switched.vault_id);
+        assert_eq!(s3.generation_id, switched.generation_id);
+    }
+
+    #[test]
+    fn changing_remote_location_rotates_identity_and_requests_a_new_baseline() {
+        let mut previous = CloudSyncSettings {
+            backend: CloudBackendKind::S3,
+            ..CloudSyncSettings::default()
+        };
+        previous.s3.bucket = "first-bucket".into();
+        let mut moved = previous.clone();
+        moved.s3.bucket = "second-bucket".into();
+
+        assert!(prepare_cloud_sync_transition(&previous, &mut moved));
+        assert_ne!(moved.remote_id, previous.remote_id);
+        assert_ne!(moved.vault_id, previous.vault_id);
+        assert_ne!(moved.generation_id, previous.generation_id);
+    }
+
+    #[test]
+    fn unverified_new_or_changed_connection_cannot_be_enabled() {
+        let previous = CloudSyncSettings::default();
+        let mut forged = previous.clone();
+        forged.enabled = true;
+        forged.connection_verified = true;
+        assert!(validate_cloud_sync_update(&previous, &mut forged, false).is_err());
+        assert!(!forged.connection_verified);
+
+        let mut enabled = previous.clone();
+        enabled.enabled = true;
+        assert!(validate_cloud_sync_update(&previous, &mut enabled, false).is_err());
+
+        enabled.connection_verified = true;
+        assert!(validate_cloud_sync_update(&previous, &mut enabled, true).is_ok());
+
+        let mut changed = enabled.clone();
+        changed.s3.bucket = "another-bucket".into();
+        changed.backend = CloudBackendKind::S3;
+        assert!(validate_cloud_sync_update(&enabled, &mut changed, false).is_err());
+        assert!(!changed.connection_verified);
+    }
+
+    #[test]
+    fn enabled_legacy_webdav_connection_remains_usable() {
+        let previous = CloudSyncSettings {
+            enabled: true,
+            ..CloudSyncSettings::default()
+        };
+        let mut next = previous.clone();
+
+        assert!(validate_cloud_sync_update(&previous, &mut next, false).is_ok());
+        assert!(next.connection_verified);
+    }
+}
