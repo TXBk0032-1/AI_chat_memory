@@ -13,6 +13,18 @@ export interface RenderedExportMessage {
 // enough not to starve the UI thread.
 export const EXPORT_RENDER_BATCH_SIZE = 8
 
+// Fallback body for a message whose markdown render throws: the escaped raw
+// text keeps the conversation content in the export instead of dropping it.
+function escapePlainText(value: string): string {
+  return value.replace(/[&<>"']/g, (ch) => (
+    ch === '&' ? '&amp;'
+      : ch === '<' ? '&lt;'
+        : ch === '>' ? '&gt;'
+          : ch === '"' ? '&quot;'
+            : '&#39;'
+  ))
+}
+
 export function useChunkedExportRenderer(
   source: () => { messages: Message[]; references: Map<number, Reference>; includeThinking: boolean },
   render: typeof renderMarkdown = renderMarkdown,
@@ -52,6 +64,17 @@ export function useChunkedExportRenderer(
 
     const currentGeneration = generation
     const { messages, references, includeThinking } = source()
+    // A single malformed message must not kill the export: render() throwing
+    // inside a frame callback would otherwise abort the pipeline silently,
+    // leaving the current generation's promise pending forever. Degrade that
+    // one message to escaped plain text and keep the remaining batches going.
+    function renderOrFallback(value: string, message: Message): string {
+      try {
+        return render(value, message, references, '')
+      } catch {
+        return `<pre class="export-render-fallback">${escapePlainText(value)}</pre>`
+      }
+    }
     let index = 0
 
     function run() {
@@ -64,9 +87,9 @@ export function useChunkedExportRenderer(
         if (currentGeneration !== generation) return
         items.push({
           message,
-          content: render(message.content, message, references, ''),
+          content: renderOrFallback(message.content, message),
           thinking: includeThinking && typeof message.metadata?.thinking === 'string'
-            ? render(message.metadata.thinking, message, references, '')
+            ? renderOrFallback(message.metadata.thinking, message)
             : '',
         })
       }

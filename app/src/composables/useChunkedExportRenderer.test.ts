@@ -233,6 +233,44 @@ describe('useChunkedExportRenderer', () => {
     expect(runFrame()).toBe(false)
   })
 
+  it('degrades a throwing message to escaped plain text and keeps the pipeline alive', async () => {
+    const messages = makeMessages(10)
+    const render = vi.fn((value: string, message: Message, _references: Map<number, Reference>, _query: string) => {
+      if (message.id === 'm-2') throw new Error('malformed message')
+      return `<p>${value}</p>`
+    })
+    const { rendered, restart, whenReady } = useChunkedExportRenderer(() => ({ messages, references: new Map<number, Reference>(), includeThinking: false }), render)
+
+    restart()
+    const ready = whenReady()
+    runFrame()
+    runFrame()
+    await flushMicrotasks()
+    await ready
+    expect(rendered.value).toHaveLength(10)
+    // The poisoned message degrades to its escaped raw content...
+    expect(rendered.value[2].content).toBe('<pre class="export-render-fallback">content m-2</pre>')
+    // ...while every other message still renders normally.
+    expect(rendered.value[1].content).toBe('<p>content m-1</p>')
+    expect(rendered.value[3].content).toBe('<p>content m-3</p>')
+  })
+
+  it('degrades only the thinking render when the thinking pipeline throws', () => {
+    const messages = makeMessages(1)
+    messages[0].metadata = { thinking: 'thinking <text>' }
+    const render = vi.fn((value: string, _message: Message, _references: Map<number, Reference>, _query: string) => {
+      if (value === 'thinking <text>') throw new Error('malformed thinking')
+      return `<p>${value}</p>`
+    })
+    const { rendered, restart } = useChunkedExportRenderer(() => ({ messages, references: new Map<number, Reference>(), includeThinking: true }), render)
+
+    restart()
+    runFrame()
+
+    expect(rendered.value[0].content).toBe('<p>content m-0</p>')
+    expect(rendered.value[0].thinking).toBe('<pre class="export-render-fallback">thinking &lt;text&gt;</pre>')
+  })
+
   it('renders thinking only when included and the metadata value is a string', () => {
     const references = new Map<number, Reference>([[1, { cite_index: 1, url: 'https://example.com', title: 'Example', summary: '' }]])
     const messages = makeMessages(3)
