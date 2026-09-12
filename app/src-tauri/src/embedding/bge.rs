@@ -53,6 +53,10 @@ struct LoadedModel {
     device: Device,
     device_label: String,
     dtype_label: String,
+    // Resolved once at load time: every batch needs the `[SEP]` id for
+    // truncation, and a tokenizer without the token must fail at load rather
+    // than on the first inference.
+    sep_token_id: u32,
 }
 
 async fn run_model_task<T, F>(task: F) -> Result<T>
@@ -528,6 +532,9 @@ fn load_model(
         .map_err(|error| AppError::Configuration(format!("invalid bert config: {error}")))?;
     let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json"))
         .map_err(|error| AppError::Configuration(format!("tokenizer load failed: {error}")))?;
+    let sep_token_id = tokenizer
+        .token_to_id("[SEP]")
+        .ok_or_else(|| AppError::Configuration("tokenizer is missing [SEP] token".into()))?;
 
     let mut candidates = Vec::new();
     match preferred_device {
@@ -573,6 +580,7 @@ fn load_model(
                         device: device.clone(),
                         device_label: device_label.into(),
                         dtype_label: dtype_label.into(),
+                        sep_token_id,
                     };
                     if let Err(error) = warmup_model(&mut loaded, config.hidden_size) {
                         last_error = Some(error);
@@ -687,10 +695,7 @@ fn embed_single_batch(
         })
         .collect::<Vec<_>>();
 
-    let sep_id = loaded
-        .tokenizer
-        .token_to_id("[SEP]")
-        .ok_or_else(|| AppError::Configuration("tokenizer is missing [SEP] token".into()))?;
+    let sep_id = loaded.sep_token_id;
 
     let mut encodings = Vec::with_capacity(prepared.len());
     let mut max_len = 1usize;
