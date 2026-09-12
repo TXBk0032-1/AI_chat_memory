@@ -1930,9 +1930,12 @@ impl AppService {
     pub async fn ensure_current_data_directory(&self) -> Result<()> {
         match crate::data_directory_marker::read_redirect(&self.data_dir).await? {
             None => Ok(()),
-            Some(_) => Err(AppError::Cancelled(
-                "数据目录已迁移，请重启 MCP 后重试".into(),
-            )),
+            // destination_hint 仅用于提示（见 marker schema 注释），读取方绝不
+            // 据此自动切换数据库池；报错带上新目录，用户不必去旧目录翻 marker。
+            Some(redirect) => Err(AppError::Cancelled(format!(
+                "数据目录已迁移，请重启 MCP 后重试（新数据目录：{}）",
+                redirect.destination_hint
+            ))),
         }
     }
 

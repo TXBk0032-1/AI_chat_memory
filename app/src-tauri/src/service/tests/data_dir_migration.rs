@@ -121,12 +121,14 @@ async fn move_data_directory_publishes_redirect_for_old_readers() {
 
     service.move_data_directory(&destination).await.unwrap();
 
-    // 旧目录发布了 marker，旧池上的 guard 必须以 Cancelled 拒绝并提示重启。
+    // 旧目录发布了 marker，旧池上的 guard 必须以 Cancelled 拒绝并提示重启，
+    // 且报错携带 marker 里的 destination_hint，用户无需去旧目录翻 marker。
     let guard_error = service.ensure_current_data_directory().await.unwrap_err();
     assert!(
         matches!(guard_error, AppError::Cancelled(ref message)
-            if message.contains("数据目录已迁移，请重启 MCP")),
-        "guard after a successful move must be Cancelled with the restart hint, got {guard_error:?}"
+            if message.contains("数据目录已迁移，请重启 MCP")
+                && message.contains(destination.to_string_lossy().as_ref())),
+        "guard after a successful move must be Cancelled with the restart hint and the destination, got {guard_error:?}"
     );
     let marker_path = data_dir.join(crate::data_directory_marker::DATA_DIRECTORY_REDIRECT_FILE);
     assert!(
