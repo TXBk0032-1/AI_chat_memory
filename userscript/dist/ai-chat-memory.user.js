@@ -42,7 +42,10 @@
         maxUnassignedExchanges: 64,
         // 导入分批：后端 /sessions/import 的 body 限制为 20 MiB，留 1 MiB 余量，避免 413 击穿整轮同步。
         importBatchMaxItems: 100,
-        importBatchMaxBodyBytes: 19 * 1024 * 1024
+        importBatchMaxBodyBytes: 19 * 1024 * 1024,
+        // 重试队列死信阈值：同一会话连续失败达到该次数后不再参与后续重试
+        // 轮次（见 SyncRetryStore.retryable），只留队列痕迹，等待自愈或清空。
+        syncMaxRetryAttempts: 5
     });
 
     const JsonTools = Object.freeze({
@@ -1597,17 +1600,19 @@
         upsert(session, stage, message, id) {
             const entries = this.load();
             const key = id ?? session?.id;
-            if (key === null || key === undefined) return;
+            if (key === null || key === undefined) return undefined;
             const previous = entries[key];
+            const attempts = (Number(previous?.attempts) || 0) + 1;
             entries[key] = {
                 id: key,
                 updated_at: session?.updated_at ?? null,
                 stage,
-                attempts: (Number(previous?.attempts) || 0) + 1,
+                attempts,
                 message: String(message ?? '').slice(0, 500),
                 session: SyncRetryStore.stripSession(session)
             };
             this.save(entries);
+            return attempts;
         }
 
         remove(ids) {
@@ -1627,11 +1632,22 @@
 
         // 参与下一轮候选的条目：oversized 只是持久痕迹，重试也不会变小，不再重复抓详情。
         // 它若作为新鲜候选再次出现且体积合规，正常导入后由 remove 出队（自愈）。
-        retryable() {
+        // attempts 达到 maxAttempts 的条目即死信：不再参与候选（避免永久失败
+        // 的会话每轮白耗一次详情抓取与导入尝试），仅留在队列里等待导入成功
+        // 自愈或用户经油猴菜单清空。maxAttempts 缺省时不设上限。
+        retryable(maxAttempts) {
+            const limit = Number(maxAttempts);
+            const capped = Number.isFinite(limit) && limit >= 1 ? limit : Infinity;
             return Object.values(this.load())
-                .filter(entry => entry && entry.stage !== 'oversized')
+                .filter(entry => entry
+                    && entry.stage !== 'oversized'
+                    && Number(entry.attempts) < capped)
                 .map(entry => entry.session)
                 .filter(Boolean);
+        }
+
+        clear() {
+            this.save({});
         }
     }
 
@@ -1750,13 +1766,14 @@
 
         // 候选 = 正常候选 ∪ 本平台重试队列，按稳定 id 去重；正常候选优先（列表元数据更新），
         // 重试项不受 last_updated_at 游标过滤，保证失败会话在游标推进后仍会被重新同步。
+        // 达到 syncMaxRetryAttempts 死信阈值的条目不再并入（见 SyncRetryStore.retryable）。
         // 同时在 this._lastRetryIds 记录哪些候选仅来自重试队列，供 fetchDetailsAndPush 区分「新鲜候选全部失败」
         // 与「纯重试轮次再次失败」：前者仍抛错，后者只告警，避免一个永久失败的会话让每轮同步都显示错误。
         _mergeRetryCandidates(candidates) {
             const list = Array.isArray(candidates) ? [...candidates] : [];
             this._lastRetryIds = new Set();
             let retries = [];
-            try { retries = this.retryStore?.retryable() || []; } catch (err) { console.warn('读取重试队列失败:', err); }
+            try { retries = this.retryStore?.retryable(this.config.syncMaxRetryAttempts) || []; } catch (err) { console.warn('读取重试队列失败:', err); }
             if (!retries.length) return list;
             const seen = new Set(list.map(session => this._sessionId(session)).filter(id => id !== null && id !== undefined));
             let appended = 0;
@@ -1848,7 +1865,13 @@
         }
 
         _retryUpsert(session, id, stage, message) {
-            try { this.retryStore?.upsert(session, stage, message, id); } catch (err) { console.warn(`写入重试队列失败 (${id}):`, err); }
+            try {
+                const attempts = this.retryStore?.upsert(session, stage, message, id);
+                const max = Math.max(1, Number(this.config.syncMaxRetryAttempts) || Infinity);
+                if (Number.isFinite(attempts) && attempts >= max) {
+                    console.warn(`会话 ${id} 已连续失败 ${attempts} 次达到上限，停止自动重试；可用油猴菜单「清空同步重试队列」清理。`);
+                }
+            } catch (err) { console.warn(`写入重试队列失败 (${id}):`, err); }
         }
 
         _retryRemove(ids) {
@@ -2311,6 +2334,21 @@
             alert(`${PLATFORM} 令牌已清除，将自动捕获新的令牌。`);
         });
     }
+    // 死信出口：重试队列里达到 syncMaxRetryAttempts 的会话不再参与重试，
+    // 若一直无法自愈（如上游已删除），用户由此手动清空整条队列。
+    GM_registerMenuCommand('清空同步重试队列', () => {
+        try {
+            const store = coordinator?.retryStore;
+            if (!store) { alert('同步尚未初始化，无法清空重试队列。'); return; }
+            const count = Object.keys(store.load()).length;
+            if (!count) { alert('同步重试队列当前为空。'); return; }
+            if (!confirm(`清空 ${PLATFORM} 的同步重试队列？共 ${count} 条（含已停止重试的死信）。清空后不再自动重试；死信会话如仍需同步，请之后执行一次全量同步。`)) return;
+            store.clear();
+            alert('同步重试队列已清空。');
+        } catch (error) {
+            alert(`清空重试队列失败: ${error.message}`);
+        }
+    });
 
     let coordinator;
     const ui = new SyncPanel({
