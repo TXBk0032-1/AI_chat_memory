@@ -1,3 +1,15 @@
-mod cloud_backend_transition;
+mod baseline_sync;
 mod cloud_encryption;
+mod credentials_rollback;
+mod data_dir_migration;
+mod device_management;
+mod encryption;
+mod guards;
+mod released_v1;
+mod restart_reconcile;
+mod rewrite;
+pub(crate) mod support;
+mod switch;
+mod sync_gate_concurrency;
+mod sync_scheduler;
 mod zip_import;
