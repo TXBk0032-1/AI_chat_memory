@@ -14,7 +14,7 @@ use std::sync::Arc;
 async fn s3_credential_update_rolls_back_an_atomic_bundle_write_failure() {
     const OLD: [&str; 4] = ["OLD-AKID", "old-secret", "old-token", "old-passphrase"];
     for delete_optional in [false, true] {
-        let mut service = service_with_local_session().await;
+        let (mut service, _data_dir) = service_with_local_session_fixture().await;
         let new_token = (!delete_optional).then_some("new-token");
         let server = TestS3::start("NEW-AKID", new_token).await;
         let credentials = FaultInjectingCredentialStore::default();

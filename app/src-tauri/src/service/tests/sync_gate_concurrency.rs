@@ -5,7 +5,7 @@ use tokio::sync::Notify;
 
 #[tokio::test]
 async fn import_waits_for_generation_maintenance_before_mutating_local_state() {
-    let service = service_with_local_session().await;
+    let (service, _data_dir) = service_with_local_session_fixture().await;
     let maintenance = service.sync_gate.lock().await;
     let started = Arc::new(Notify::new());
     let mut operation = tokio::spawn({
@@ -54,7 +54,7 @@ async fn import_waits_for_generation_maintenance_before_mutating_local_state() {
 
 #[tokio::test]
 async fn delete_waits_for_generation_maintenance_before_mutating_local_state() {
-    let service = service_with_local_session().await;
+    let (service, _data_dir) = service_with_local_session_fixture().await;
     let maintenance = service.sync_gate.lock().await;
     let started = Arc::new(Notify::new());
     let mut operation = tokio::spawn({

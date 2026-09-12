@@ -4,14 +4,13 @@ use crate::{
         connection::{initialize_schema, register_sqlite_vec},
         import_sessions,
     },
-    models::{NormalizedSession, S3CloudSyncSettings},
+    models::NormalizedSession,
     sync::{
         backend::{CloudError, CloudErrorKind, CloudResult, RemoteEntry, RemoteObject},
         bundle::{
             BundleHeader, CompressionAlgorithm, ProtectionAlgorithm, SealedBundle, open_bundle,
             open_bundle_protected, seal_bundle,
         },
-        crypto::Argon2idConfig,
         s3::S3Backend,
         test_s3_server::TestS3,
         test_server::TestWebDav,
@@ -918,35 +917,15 @@ fn normalized_session(index: usize, title: &str, local_prefix: &str) -> Normaliz
 }
 
 fn s3_backend(server: &TestS3) -> Arc<S3Backend> {
-    let settings = S3CloudSyncSettings {
-        endpoint_url: server.endpoint().into(),
-        region: "us-east-1".into(),
-        bucket: "archive".into(),
-        prefix: "engine-tests".into(),
-        force_path_style: true,
-    };
-    Arc::new(S3Backend::new(&settings, "AKID", "secret-key", None).unwrap())
+    crate::test_support::test_s3_backend(server, "engine-tests")
 }
 
 fn test_protector(passphrase: &str) -> Arc<dyn PayloadProtector> {
-    test_protection(passphrase)
-        .derive_protector("vault", passphrase)
-        .unwrap()
-        .unwrap()
+    crate::test_support::test_protector("vault", passphrase)
 }
 
 fn test_protection(passphrase: &str) -> VaultProtection {
-    VaultProtection::encrypted_with_config(
-        "vault",
-        passphrase,
-        Argon2idConfig {
-            salt: [11; 16],
-            memory_kib: 8 * 1024,
-            iterations: 2,
-            parallelism: 1,
-        },
-    )
-    .unwrap()
+    crate::test_support::test_protection("vault", passphrase)
 }
 
 async fn initialize_test_vault<B: CloudBackend + ?Sized>(
@@ -955,19 +934,7 @@ async fn initialize_test_vault<B: CloudBackend + ?Sized>(
     generation_id: &str,
     protection: VaultProtection,
 ) {
-    load_or_create_vault(
-        backend,
-        VaultDocument::active(
-            VaultIdentity {
-                format_version: 2,
-                vault_id: vault_id.to_owned(),
-                generation_id: generation_id.to_owned(),
-            },
-            protection,
-        ),
-    )
-    .await
-    .unwrap();
+    crate::test_support::initialize_test_vault(backend, vault_id, generation_id, protection).await;
 }
 
 async fn initialize_released_v1_test_vault<B: CloudBackend + ?Sized>(backend: &B) {

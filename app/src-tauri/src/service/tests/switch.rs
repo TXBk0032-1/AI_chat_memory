@@ -18,7 +18,7 @@ use tokio::sync::Notify;
 
 #[tokio::test]
 async fn backend_switch_defers_generation_replay_without_rewriting_local_versions() {
-    let service = service_with_local_session().await;
+    let (service, _data_dir) = service_with_local_session_fixture().await;
     service.ensure_local_device().await.unwrap();
     service.sync_store.seed_local_baseline().await.unwrap();
     sqlx::query(
@@ -125,7 +125,7 @@ async fn backend_switch_defers_generation_replay_without_rewriting_local_version
 
 #[tokio::test]
 async fn webdav_to_s3_switch_publishes_live_sessions_and_tombstones_without_touching_webdav() {
-    let service = service_with_local_session().await;
+    let (service, _data_dir) = service_with_local_session_fixture().await;
     let webdav_server = TestWebDav::start("alice", "dav-password").await;
     let webdav_test = service
         .test_cloud_sync_connection(
@@ -300,7 +300,7 @@ async fn webdav_to_s3_switch_publishes_live_sessions_and_tombstones_without_touc
 
 #[tokio::test]
 async fn backend_switch_waits_for_running_sync_before_changing_configuration() {
-    let service = service_with_local_session().await;
+    let (service, _data_dir) = service_with_local_session_fixture().await;
     let running_sync = service.sync_gate.lock().await;
     let mut next = service.settings().await;
     next.cloud_sync.backend = CloudBackendKind::S3;

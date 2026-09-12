@@ -1,24 +1,19 @@
 use super::super::{AppService, CloudSyncRuntime, CloudSyncScheduler, ServiceRole};
 use super::support::*;
 use crate::error::AppError;
-use crate::models::{
-    ApiStatus, CloudBackendKind, CloudCredentialInput, CloudSyncSettings, S3CloudSyncSettings,
-};
+use crate::models::{ApiStatus, CloudCredentialInput};
 use crate::settings::SettingsStore;
 use crate::sync::backend::RemotePath;
 use crate::sync::credentials::{
     CredentialStore, CredentialTransitionPhase, MemoryCredentialStore, PendingCredentialProfile,
-    SecretKind, SecretValue, StoredCloudCredentialProfile, StoredCredentialBundle,
-    load_credential_bundle, save_credential_bundle,
+    StoredCloudCredentialProfile, StoredCredentialBundle, load_credential_bundle,
+    save_credential_bundle,
 };
 use crate::sync::engine::HeadDocument;
-use crate::sync::factory::backend_from_store;
 use crate::sync::store::SyncStore;
-use crate::sync::test_s3_server::TestS3;
 use crate::sync::vault::{
-    HeadPublishRequest, VaultDocument, VaultIdentity, VaultProtection, VaultState,
-    begin_generation_freeze_owned, begin_head_publish, load_or_create_vault,
-    load_versioned_identity,
+    HeadPublishRequest, VaultDocument, VaultProtection, VaultState, begin_generation_freeze_owned,
+    begin_head_publish, load_versioned_identity,
 };
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
@@ -93,7 +88,7 @@ async fn restart_reconciles_a_committed_generation_before_selecting_credentials(
         settings: reloaded_settings,
         semantic: service.semantic.clone(),
         role: ServiceRole::Desktop,
-        data_dir: Arc::new(data_dir.clone()),
+        data_dir: Arc::new(data_dir.path.clone()),
         api_status: Arc::new(RwLock::new(ApiStatus::Starting)),
         last_userscript_request_at: Arc::new(RwLock::new(None)),
         sync_store: SyncStore::new(service.pool.clone()),
@@ -125,28 +120,7 @@ async fn restart_reconciles_a_committed_generation_before_selecting_credentials(
 
 #[tokio::test]
 async fn restart_rolls_back_an_expired_pending_building_freeze() {
-    let (mut service, _data_dir) = service_with_local_session_fixture().await;
-    let credentials = MemoryCredentialStore::default();
-    service.credentials = Arc::new(credentials.clone());
-    let server = TestS3::start("AKID", None).await;
-    let mut settings = service.settings().await;
-    settings.cloud_sync = CloudSyncSettings {
-        backend: CloudBackendKind::S3,
-        enabled: true,
-        connection_verified: true,
-        remote_id: "remote-expired-pending-freeze".into(),
-        vault_id: "vault-expired-pending-freeze".into(),
-        generation_id: "generation-old".into(),
-        s3: S3CloudSyncSettings {
-            endpoint_url: server.endpoint().into(),
-            region: "us-east-1".into(),
-            bucket: "archive".into(),
-            prefix: "expired-pending-freeze".into(),
-            force_path_style: true,
-        },
-        ..CloudSyncSettings::default()
-    };
-    service.settings.update(settings.clone()).await.unwrap();
+    let fx = CloudFixture::plain(&auto_prefix("expired-pending-freeze")).await;
     let active_profile = StoredCloudCredentialProfile::S3 {
         access_key_id: "AKID".into(),
         secret_access_key: "secret-key".into(),
@@ -158,31 +132,18 @@ async fn restart_rolls_back_an_expired_pending_building_freeze() {
         .stage_transition(PendingCredentialProfile {
             credentials: active_profile,
             operation_id: "rotation-expired-freeze".into(),
-            target_vault_id: settings.cloud_sync.vault_id.clone(),
+            target_vault_id: fx.settings.vault_id.clone(),
             target_generation_id: "generation-next".into(),
             phase: CredentialTransitionPhase::Prepared,
         })
         .unwrap();
-    save_credential_bundle(&credentials, &settings.cloud_sync.remote_id, &bundle)
+    save_credential_bundle(fx.credentials.as_ref(), &fx.settings.remote_id, &bundle)
         .await
         .unwrap();
-    let backend = backend_from_store(&settings.cloud_sync, &credentials)
-        .await
-        .unwrap();
-    let active = VaultDocument::active(
-        VaultIdentity {
-            format_version: 2,
-            vault_id: settings.cloud_sync.vault_id.clone(),
-            generation_id: settings.cloud_sync.generation_id.clone(),
-        },
-        VaultProtection::plain(),
-    );
-    load_or_create_vault(backend.as_ref(), active.clone())
-        .await
-        .unwrap();
+    let active = load_versioned_identity(fx.backend.as_ref()).await.unwrap();
     begin_generation_freeze_owned(
-        backend.as_ref(),
-        &active,
+        fx.backend.as_ref(),
+        &active.document(),
         "generation-next",
         VaultProtection::plain(),
         "rotation-expired-freeze",
@@ -193,16 +154,17 @@ async fn restart_rolls_back_an_expired_pending_building_freeze() {
     .await
     .unwrap();
 
-    let reconciled = service
-        .reconcile_pending_credential_transition(settings.clone())
+    let reconciled = fx
+        .service
+        .reconcile_pending_credential_transition(fx.service.settings().await)
         .await
         .expect("an expired building freeze should safely roll back");
 
     assert_eq!(reconciled.cloud_sync.generation_id, "generation-old");
-    let remote = load_versioned_identity(backend.as_ref()).await.unwrap();
+    let remote = load_versioned_identity(fx.backend.as_ref()).await.unwrap();
     assert_eq!(remote.state, VaultState::Active);
     assert_eq!(remote.identity.generation_id, "generation-old");
-    let stored = load_credential_bundle(&credentials, &settings.cloud_sync.remote_id)
+    let stored = load_credential_bundle(fx.credentials.as_ref(), &fx.settings.remote_id)
         .await
         .unwrap()
         .unwrap();
@@ -211,28 +173,7 @@ async fn restart_rolls_back_an_expired_pending_building_freeze() {
 
 #[tokio::test]
 async fn restart_activates_an_expired_pending_ready_freeze() {
-    let (mut service, _data_dir) = service_with_local_session_fixture().await;
-    let credentials = MemoryCredentialStore::default();
-    service.credentials = Arc::new(credentials.clone());
-    let server = TestS3::start("AKID", None).await;
-    let mut settings = service.settings().await;
-    settings.cloud_sync = CloudSyncSettings {
-        backend: CloudBackendKind::S3,
-        enabled: true,
-        connection_verified: true,
-        remote_id: "remote-expired-ready-freeze".into(),
-        vault_id: "vault-expired-ready-freeze".into(),
-        generation_id: "generation-old".into(),
-        s3: S3CloudSyncSettings {
-            endpoint_url: server.endpoint().into(),
-            region: "us-east-1".into(),
-            bucket: "archive".into(),
-            prefix: "expired-ready-freeze".into(),
-            force_path_style: true,
-        },
-        ..CloudSyncSettings::default()
-    };
-    service.settings.update(settings.clone()).await.unwrap();
+    let fx = CloudFixture::plain(&auto_prefix("expired-ready-freeze")).await;
     let profile = StoredCloudCredentialProfile::S3 {
         access_key_id: "AKID".into(),
         secret_access_key: "secret-key".into(),
@@ -244,32 +185,18 @@ async fn restart_activates_an_expired_pending_ready_freeze() {
         .stage_transition(PendingCredentialProfile {
             credentials: profile,
             operation_id: "rotation-ready-freeze".into(),
-            target_vault_id: settings.cloud_sync.vault_id.clone(),
+            target_vault_id: fx.settings.vault_id.clone(),
             target_generation_id: "generation-next".into(),
             phase: CredentialTransitionPhase::RemoteFrozen,
         })
         .unwrap();
-    save_credential_bundle(&credentials, &settings.cloud_sync.remote_id, &bundle)
+    save_credential_bundle(fx.credentials.as_ref(), &fx.settings.remote_id, &bundle)
         .await
         .unwrap();
-    let backend = backend_from_store(&settings.cloud_sync, &credentials)
-        .await
-        .unwrap();
-    let active = VaultDocument::active(
-        VaultIdentity {
-            format_version: 2,
-            vault_id: settings.cloud_sync.vault_id.clone(),
-            generation_id: settings.cloud_sync.generation_id.clone(),
-        },
-        VaultProtection::plain(),
-    );
-    load_or_create_vault(backend.as_ref(), active.clone())
-        .await
-        .unwrap();
-    let current = load_versioned_identity(backend.as_ref()).await.unwrap();
+    let current = load_versioned_identity(fx.backend.as_ref()).await.unwrap();
     let frozen = VaultDocument {
-        identity: active.identity,
-        protection: active.protection,
+        identity: current.identity.clone(),
+        protection: current.protection.clone(),
         compatibility: None,
         state: VaultState::Frozen {
             operation_id: "rotation-ready-freeze".into(),
@@ -282,7 +209,7 @@ async fn restart_activates_an_expired_pending_ready_freeze() {
             retire_released_v1_compatibility: false,
         },
     };
-    backend
+    fx.backend
         .put_if_match(
             &RemotePath::parse("v1/vault.json").unwrap(),
             &serde_json::to_vec(&frozen).unwrap(),
@@ -291,16 +218,17 @@ async fn restart_activates_an_expired_pending_ready_freeze() {
         .await
         .unwrap();
 
-    let reconciled = service
-        .reconcile_pending_credential_transition(settings.clone())
+    let reconciled = fx
+        .service
+        .reconcile_pending_credential_transition(fx.service.settings().await)
         .await
         .expect("an expired ready freeze should activate the prepared generation");
 
     assert_eq!(reconciled.cloud_sync.generation_id, "generation-next");
-    let remote = load_versioned_identity(backend.as_ref()).await.unwrap();
+    let remote = load_versioned_identity(fx.backend.as_ref()).await.unwrap();
     assert_eq!(remote.state, VaultState::Active);
     assert_eq!(remote.identity.generation_id, "generation-next");
-    let stored = load_credential_bundle(&credentials, &settings.cloud_sync.remote_id)
+    let stored = load_credential_bundle(fx.credentials.as_ref(), &fx.settings.remote_id)
         .await
         .unwrap()
         .unwrap();
@@ -310,28 +238,7 @@ async fn restart_activates_an_expired_pending_ready_freeze() {
 
 #[tokio::test]
 async fn restart_finishes_a_pending_head_publication_before_reconciling_credentials() {
-    let (mut service, _data_dir) = service_with_local_session_fixture().await;
-    let credentials = MemoryCredentialStore::default();
-    service.credentials = Arc::new(credentials.clone());
-    let server = TestS3::start("AKID", None).await;
-    let mut settings = service.settings().await;
-    settings.cloud_sync = CloudSyncSettings {
-        backend: CloudBackendKind::S3,
-        enabled: true,
-        connection_verified: true,
-        remote_id: "remote-publishing-restart".into(),
-        vault_id: "vault-publishing-restart".into(),
-        generation_id: "generation-old".into(),
-        s3: S3CloudSyncSettings {
-            endpoint_url: server.endpoint().into(),
-            region: "us-east-1".into(),
-            bucket: "archive".into(),
-            prefix: "publishing-restart".into(),
-            force_path_style: true,
-        },
-        ..CloudSyncSettings::default()
-    };
-    service.settings.update(settings.clone()).await.unwrap();
+    let fx = CloudFixture::plain(&auto_prefix("publishing-restart")).await;
     let profile = StoredCloudCredentialProfile::S3 {
         access_key_id: "AKID".into(),
         secret_access_key: "secret-key".into(),
@@ -343,47 +250,31 @@ async fn restart_finishes_a_pending_head_publication_before_reconciling_credenti
         .stage_transition(PendingCredentialProfile {
             credentials: profile,
             operation_id: "rotation-after-publish".into(),
-            target_vault_id: settings.cloud_sync.vault_id.clone(),
+            target_vault_id: fx.settings.vault_id.clone(),
             target_generation_id: "generation-next".into(),
             phase: CredentialTransitionPhase::Prepared,
         })
         .unwrap();
-    save_credential_bundle(&credentials, &settings.cloud_sync.remote_id, &bundle)
+    save_credential_bundle(fx.credentials.as_ref(), &fx.settings.remote_id, &bundle)
         .await
         .unwrap();
-    let backend = backend_from_store(&settings.cloud_sync, &credentials)
-        .await
-        .unwrap();
-    load_or_create_vault(
-        backend.as_ref(),
-        VaultDocument::active(
-            VaultIdentity {
-                format_version: 2,
-                vault_id: settings.cloud_sync.vault_id.clone(),
-                generation_id: settings.cloud_sync.generation_id.clone(),
-            },
-            VaultProtection::plain(),
-        ),
-    )
-    .await
-    .unwrap();
-    let active = load_versioned_identity(backend.as_ref()).await.unwrap();
+    let active = load_versioned_identity(fx.backend.as_ref()).await.unwrap();
     let head_path = format!(
         "v1/generations/{}/devices/device-restart/head.json",
-        settings.cloud_sync.generation_id
+        fx.settings.generation_id
     );
     let head = HeadDocument {
-        generation_id: settings.cloud_sync.generation_id.clone(),
+        generation_id: fx.settings.generation_id.clone(),
         device_id: "device-restart".into(),
         end_seq: 1,
         path: format!(
             "v1/generations/{}/devices/device-restart/bundles/1-1-test.acmb",
-            settings.cloud_sync.generation_id
+            fx.settings.generation_id
         ),
         sha256: "test".into(),
     };
     begin_head_publish(
-        backend.as_ref(),
+        fx.backend.as_ref(),
         &active,
         HeadPublishRequest {
             operation_id: "publish-restart".into(),
@@ -399,28 +290,29 @@ async fn restart_finishes_a_pending_head_publication_before_reconciling_credenti
     .await
     .unwrap();
 
-    let reconciled = service
-        .reconcile_pending_credential_transition(settings.clone())
+    let reconciled = fx
+        .service
+        .reconcile_pending_credential_transition(fx.service.settings().await)
         .await
         .expect("a stored head publication should finish deterministically");
 
     assert_eq!(reconciled.cloud_sync.generation_id, "generation-old");
     assert_eq!(
-        load_versioned_identity(backend.as_ref())
+        load_versioned_identity(fx.backend.as_ref())
             .await
             .unwrap()
             .state,
         VaultState::Active
     );
     assert_eq!(
-        backend
+        fx.backend
             .get(&RemotePath::parse(&head_path).unwrap())
             .await
             .unwrap()
             .bytes,
         serde_json::to_vec(&head).unwrap()
     );
-    let stored = load_credential_bundle(&credentials, &settings.cloud_sync.remote_id)
+    let stored = load_credential_bundle(fx.credentials.as_ref(), &fx.settings.remote_id)
         .await
         .unwrap()
         .unwrap();
@@ -429,29 +321,10 @@ async fn restart_finishes_a_pending_head_publication_before_reconciling_credenti
 
 #[tokio::test]
 async fn expired_pending_freeze_with_a_wrong_active_passphrase_does_not_touch_remote_state() {
-    let (mut service, _data_dir) = service_with_local_session_fixture().await;
-    let credentials = MemoryCredentialStore::default();
-    service.credentials = Arc::new(credentials.clone());
-    let server = TestS3::start("AKID", None).await;
-    let mut settings = service.settings().await;
-    settings.cloud_sync = CloudSyncSettings {
-        backend: CloudBackendKind::S3,
-        enabled: true,
-        connection_verified: true,
-        encryption_enabled: true,
-        remote_id: "remote-fresh-wrong-passphrase".into(),
-        vault_id: "vault-fresh-wrong-passphrase".into(),
-        generation_id: "generation-old".into(),
-        s3: S3CloudSyncSettings {
-            endpoint_url: server.endpoint().into(),
-            region: "us-east-1".into(),
-            bucket: "archive".into(),
-            prefix: "fresh-wrong-passphrase".into(),
-            force_path_style: true,
-        },
-        ..CloudSyncSettings::default()
-    };
-    service.settings.update(settings.clone()).await.unwrap();
+    let fx = CloudFixture::encrypted(&auto_prefix("fresh-wrong-passphrase"), "correct-passphrase")
+        .await
+        .frozen_by_other_device("rotation-fresh-freeze", LeaseLifecycle::Expired)
+        .await;
     let profile = StoredCloudCredentialProfile::S3 {
         access_key_id: "AKID".into(),
         secret_access_key: "secret-key".into(),
@@ -463,79 +336,38 @@ async fn expired_pending_freeze_with_a_wrong_active_passphrase_does_not_touch_re
         .stage_transition(PendingCredentialProfile {
             credentials: profile,
             operation_id: "rotation-fresh-freeze".into(),
-            target_vault_id: settings.cloud_sync.vault_id.clone(),
+            target_vault_id: fx.settings.vault_id.clone(),
             target_generation_id: "generation-next".into(),
             phase: CredentialTransitionPhase::Prepared,
         })
         .unwrap();
-    save_credential_bundle(&credentials, &settings.cloud_sync.remote_id, &bundle)
+    save_credential_bundle(fx.credentials.as_ref(), &fx.settings.remote_id, &bundle)
         .await
         .unwrap();
-    let backend = backend_from_store(&settings.cloud_sync, &credentials)
-        .await
-        .unwrap();
-    let active = VaultDocument::active(
-        VaultIdentity {
-            format_version: 2,
-            vault_id: settings.cloud_sync.vault_id.clone(),
-            generation_id: settings.cloud_sync.generation_id.clone(),
-        },
-        VaultProtection::encrypted(&settings.cloud_sync.vault_id, "correct-passphrase").unwrap(),
-    );
-    load_or_create_vault(backend.as_ref(), active.clone())
-        .await
-        .unwrap();
-    begin_generation_freeze_owned(
-        backend.as_ref(),
-        &active,
-        "generation-next",
-        VaultProtection::plain(),
-        "rotation-fresh-freeze",
-        "device-restart",
-        1,
-        2,
-    )
-    .await
-    .unwrap();
     let vault_path = RemotePath::parse("v1/vault.json").unwrap();
-    let before = backend.get(&vault_path).await.unwrap();
+    let before = fx.backend.get(&vault_path).await.unwrap();
 
-    let error = service
-        .reconcile_pending_credential_transition(settings)
+    let error = fx
+        .service
+        .reconcile_pending_credential_transition(fx.service.settings().await)
         .await
         .unwrap_err();
 
     assert!(matches!(error, AppError::Crypto(_)), "{error:?}");
-    let after = backend.get(&vault_path).await.unwrap();
+    let after = fx.backend.get(&vault_path).await.unwrap();
     assert_eq!(after.etag, before.etag);
     assert_eq!(after.bytes, before.bytes);
 }
 
 #[tokio::test]
 async fn fresh_pending_publishing_with_a_wrong_active_passphrase_does_not_touch_remote_state() {
-    let (mut service, _data_dir) = service_with_local_session_fixture().await;
-    let credentials = MemoryCredentialStore::default();
-    service.credentials = Arc::new(credentials.clone());
-    let server = TestS3::start("AKID", None).await;
-    let mut settings = service.settings().await;
-    settings.cloud_sync = CloudSyncSettings {
-        backend: CloudBackendKind::S3,
-        enabled: true,
-        connection_verified: true,
-        encryption_enabled: true,
-        remote_id: "remote-fresh-publishing-wrong-passphrase".into(),
-        vault_id: "vault-fresh-publishing-wrong-passphrase".into(),
-        generation_id: "generation-old".into(),
-        s3: S3CloudSyncSettings {
-            endpoint_url: server.endpoint().into(),
-            region: "us-east-1".into(),
-            bucket: "archive".into(),
-            prefix: "fresh-publishing-wrong-passphrase".into(),
-            force_path_style: true,
-        },
-        ..CloudSyncSettings::default()
-    };
-    service.settings.update(settings.clone()).await.unwrap();
+    let fx = CloudFixture::encrypted(
+        &auto_prefix("fresh-publishing-wrong-passphrase"),
+        "correct-passphrase",
+    )
+    .await
+    .publishing_by_other_device(LeaseLifecycle::Expired)
+    .await;
     let profile = StoredCloudCredentialProfile::S3 {
         access_key_id: "AKID".into(),
         secret_access_key: "secret-key".into(),
@@ -547,149 +379,57 @@ async fn fresh_pending_publishing_with_a_wrong_active_passphrase_does_not_touch_
         .stage_transition(PendingCredentialProfile {
             credentials: profile,
             operation_id: "rotation-fresh-publishing".into(),
-            target_vault_id: settings.cloud_sync.vault_id.clone(),
+            target_vault_id: fx.settings.vault_id.clone(),
             target_generation_id: "generation-next".into(),
             phase: CredentialTransitionPhase::Prepared,
         })
         .unwrap();
-    save_credential_bundle(&credentials, &settings.cloud_sync.remote_id, &bundle)
+    save_credential_bundle(fx.credentials.as_ref(), &fx.settings.remote_id, &bundle)
         .await
         .unwrap();
-    let backend = backend_from_store(&settings.cloud_sync, &credentials)
-        .await
-        .unwrap();
-    let active = VaultDocument::active(
-        VaultIdentity {
-            format_version: 2,
-            vault_id: settings.cloud_sync.vault_id.clone(),
-            generation_id: settings.cloud_sync.generation_id.clone(),
-        },
-        VaultProtection::encrypted(&settings.cloud_sync.vault_id, "correct-passphrase").unwrap(),
-    );
-    load_or_create_vault(backend.as_ref(), active.clone())
-        .await
-        .unwrap();
-    let current = load_versioned_identity(backend.as_ref()).await.unwrap();
-    let head_path = format!(
+    let vault_path = RemotePath::parse("v1/vault.json").unwrap();
+    let before = fx.backend.get(&vault_path).await.unwrap();
+    let head_path = RemotePath::parse(&format!(
         "v1/generations/{}/devices/device-other/head.json",
-        settings.cloud_sync.generation_id
-    );
-    let replacement_head = HeadDocument {
-        generation_id: settings.cloud_sync.generation_id.clone(),
-        device_id: "device-other".into(),
-        end_seq: 1,
-        path: format!(
-            "v1/generations/{}/devices/device-other/bundles/1-1-test.acmb",
-            settings.cloud_sync.generation_id
-        ),
-        sha256: "test".into(),
-    };
-    begin_head_publish(
-        backend.as_ref(),
-        &current,
-        HeadPublishRequest {
-            operation_id: "expired-publishing".into(),
-            owner_device_id: "device-other".into(),
-            started_at_ms: 1,
-            lease_expires_at_ms: 2,
-            head_path: head_path.clone(),
-            expected_head_etag: None,
-            replacement_head_json: serde_json::to_string(&replacement_head).unwrap(),
-            published_mutation_count: 1,
-        },
-    )
-    .await
+        fx.settings.generation_id
+    ))
     .unwrap();
-    let vault_before = vault_object_snapshot(backend.as_ref()).await;
-    let head_path = RemotePath::parse(&head_path).unwrap();
-    let head_before = backend.get(&head_path).await.ok();
+    let before_head = fx.backend.get(&head_path).await.ok();
 
-    let error = service
-        .reconcile_pending_credential_transition(settings)
+    let error = fx
+        .service
+        .reconcile_pending_credential_transition(fx.service.settings().await)
         .await
         .unwrap_err();
 
     assert!(matches!(error, AppError::Crypto(_)), "{error:?}");
-    assert_eq!(vault_object_snapshot(backend.as_ref()).await, vault_before);
-    assert_eq!(backend.get(&head_path).await.ok(), head_before);
+    let after = fx.backend.get(&vault_path).await.unwrap();
+    assert_eq!(after.etag, before.etag);
+    assert_eq!(after.bytes, before.bytes);
+    assert_eq!(fx.backend.get(&head_path).await.ok(), before_head);
 }
 
 #[tokio::test]
 async fn sync_recovers_an_abandoned_frozen_vault_before_publishing() {
-    let service = service_with_local_session().await;
-    let server = TestS3::start("AKID", None).await;
-    let remote_id = format!("frozen-test-{}", uuid::Uuid::new_v4().simple());
-    let mut settings = service.settings().await;
-    settings.cloud_sync = CloudSyncSettings {
-        backend: CloudBackendKind::S3,
-        enabled: true,
-        connection_verified: true,
-        remote_id: remote_id.clone(),
-        vault_id: "vault-frozen-test".into(),
-        generation_id: "generation-old".into(),
-        s3: S3CloudSyncSettings {
-            endpoint_url: server.endpoint().into(),
-            region: "us-east-1".into(),
-            bucket: "archive".into(),
-            prefix: "service-frozen-recovery".into(),
-            force_path_style: true,
-        },
-        ..CloudSyncSettings::default()
-    };
-    service.settings.update(settings.clone()).await.unwrap();
-    service
-        .credentials
-        .set(
-            &remote_id,
-            SecretKind::S3AccessKeyId,
-            SecretValue::new("AKID"),
-        )
+    let fx = CloudFixture::plain(&auto_prefix("service-frozen-recovery"))
         .await
-        .unwrap();
-    service
-        .credentials
-        .set(
-            &remote_id,
-            SecretKind::S3SecretAccessKey,
-            SecretValue::new("secret-key"),
-        )
-        .await
-        .unwrap();
-    let backend = backend_from_store(&settings.cloud_sync, service.credentials.as_ref())
-        .await
-        .unwrap();
-    let active = VaultDocument::active(
-        VaultIdentity {
-            format_version: 2,
-            vault_id: settings.cloud_sync.vault_id.clone(),
-            generation_id: settings.cloud_sync.generation_id.clone(),
-        },
-        VaultProtection::plain(),
-    );
-    load_or_create_vault(backend.as_ref(), active.clone())
-        .await
-        .unwrap();
-    let frozen = begin_generation_freeze_owned(
-        backend.as_ref(),
-        &active,
-        "generation-abandoned",
-        VaultProtection::plain(),
-        "operation-abandoned",
-        "device-abandoned",
-        1,
-        2,
-    )
-    .await
-    .unwrap();
-    assert!(matches!(frozen.state, VaultState::Frozen { .. }));
+        .frozen_by_other_device("operation-abandoned", LeaseLifecycle::Expired)
+        .await;
 
-    service.sync_once_locked(settings).await.unwrap();
+    fx.service
+        .sync_once_locked(fx.service.settings().await)
+        .await
+        .unwrap();
 
-    let recovered = load_versioned_identity(backend.as_ref()).await.unwrap();
+    let recovered = load_versioned_identity(fx.backend.as_ref()).await.unwrap();
     assert_eq!(recovered.state, VaultState::Active);
     assert_eq!(recovered.identity.generation_id, "generation-old");
     assert_eq!(
-        service.sync_store.pending_mutation_count().await.unwrap(),
+        fx.service
+            .sync_store
+            .pending_mutation_count()
+            .await
+            .unwrap(),
         0
     );
 }

@@ -7,9 +7,7 @@ use crate::sync::credentials::{
     load_credential_bundle,
 };
 use crate::sync::engine::HeadDocument;
-use crate::sync::vault::{
-    VaultDocument, VaultIdentity, VaultProtection, load_or_create_vault, load_versioned_identity,
-};
+use crate::sync::vault::load_versioned_identity;
 use std::sync::Arc;
 
 #[tokio::test]
@@ -114,26 +112,13 @@ async fn sync_password_change_reads_old_chain_and_commits_new_encrypted_generati
 
 #[tokio::test]
 async fn enabling_encryption_reads_the_old_plain_chain_and_commits_an_encrypted_generation() {
-    let (service, settings_before, backend, _server) =
-        configured_s3_service_for_sync_guard_tests("enable-encryption", false, "old-passphrase")
-            .await;
-    load_or_create_vault(
-        backend.as_ref(),
-        VaultDocument::active(
-            VaultIdentity {
-                format_version: 2,
-                vault_id: settings_before.cloud_sync.vault_id.clone(),
-                generation_id: settings_before.cloud_sync.generation_id.clone(),
-            },
-            VaultProtection::plain(),
-        ),
-    )
-    .await
-    .unwrap();
+    let fx = CloudFixture::plain(&auto_prefix("enable-encryption")).await;
+    let settings_before = fx.service.settings().await;
 
     let mut next = settings_before.clone();
     next.cloud_sync.encryption_enabled = true;
-    let updated = service
+    let updated = fx
+        .service
         .update_settings_with_cloud_credentials(
             next,
             Some(CloudCredentialInput::S3 {
@@ -151,7 +136,7 @@ async fn enabling_encryption_reads_the_old_plain_chain_and_commits_an_encrypted_
         updated.cloud_sync.generation_id,
         settings_before.cloud_sync.generation_id
     );
-    let remote = load_versioned_identity(backend.as_ref()).await.unwrap();
+    let remote = load_versioned_identity(fx.backend.as_ref()).await.unwrap();
     assert_eq!(
         remote.identity.generation_id,
         updated.cloud_sync.generation_id
