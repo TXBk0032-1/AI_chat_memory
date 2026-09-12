@@ -18,6 +18,8 @@ mod semantic;
 mod service;
 mod settings;
 pub mod sync;
+#[cfg(test)]
+pub(crate) mod test_support;
 mod tray;
 mod window_lifecycle;
 

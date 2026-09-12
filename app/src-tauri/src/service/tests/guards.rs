@@ -10,34 +10,24 @@ use crate::sync::engine::HeadDocument;
 use crate::sync::factory::backend_from_input;
 use crate::sync::test_s3_server::TestS3;
 use crate::sync::vault::{
-    HeadPublishRequest, VaultDocument, VaultIdentity, VaultProtection,
-    begin_generation_freeze_owned, begin_head_publish, load_or_create_vault,
-    load_versioned_identity,
+    HeadPublishRequest, VaultDocument, VaultIdentity, VaultProtection, begin_head_publish,
+    load_or_create_vault, load_versioned_identity,
 };
 
 #[tokio::test]
 async fn sync_rejects_remote_plain_when_local_encryption_is_persisted() {
-    let (service, settings, backend, _server) =
-        configured_s3_service_for_sync_guard_tests("plain-fence", true, "local-passphrase").await;
-    load_or_create_vault(
-        backend.as_ref(),
-        VaultDocument::active(
-            VaultIdentity {
-                format_version: 2,
-                vault_id: settings.cloud_sync.vault_id.clone(),
-                generation_id: settings.cloud_sync.generation_id.clone(),
-            },
-            VaultProtection::plain(),
-        ),
-    )
-    .await
-    .unwrap();
+    let fx = CloudFixture::plain(&auto_prefix("plain-fence"))
+        .await
+        .with_encryption_enabled(true)
+        .await
+        .with_local_passphrase("local-passphrase")
+        .await;
     let vault_path = RemotePath::parse("v1/vault.json").unwrap();
-    let before = backend.get(&vault_path).await.unwrap();
-    let settings_before = service.settings().await;
+    let before = fx.backend.get(&vault_path).await.unwrap();
 
-    let error = service
-        .sync_once_locked(settings.clone())
+    let error = fx
+        .service
+        .sync_once_locked(fx.service.settings().await)
         .await
         .unwrap_err();
 
@@ -45,209 +35,123 @@ async fn sync_rejects_remote_plain_when_local_encryption_is_persisted() {
         matches!(error, AppError::InvalidData(_) | AppError::Crypto(_)),
         "{error:?}"
     );
-    assert_eq!(
-        serde_json::to_value(service.settings().await).unwrap(),
-        serde_json::to_value(settings_before).unwrap()
-    );
-    let after = backend.get(&vault_path).await.unwrap();
+    fx.assert_cloud_config_unchanged().await;
+    let after = fx.backend.get(&vault_path).await.unwrap();
     assert_eq!(after.etag, before.etag);
     assert_eq!(after.bytes, before.bytes);
-    assert!(service.sync_store.device_state().await.unwrap().is_none());
+    assert!(
+        fx.service
+            .sync_store
+            .device_state()
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
 async fn sync_wrong_passphrase_does_not_recover_expired_frozen_vault() {
-    let (service, mut settings, backend, _server) = configured_s3_service_for_sync_guard_tests(
-        "wrong-passphrase-frozen",
-        true,
-        "wrong-passphrase",
-    )
-    .await;
-    settings.cloud_sync.encryption_enabled = true;
-    service.settings.update(settings.clone()).await.unwrap();
-    let protection =
-        VaultProtection::encrypted(&settings.cloud_sync.vault_id, "correct-passphrase").unwrap();
-    let active = VaultDocument::active(
-        VaultIdentity {
-            format_version: 2,
-            vault_id: settings.cloud_sync.vault_id.clone(),
-            generation_id: settings.cloud_sync.generation_id.clone(),
-        },
-        protection,
-    );
-    load_or_create_vault(backend.as_ref(), active.clone())
-        .await
-        .unwrap();
-    begin_generation_freeze_owned(
-        backend.as_ref(),
-        &active,
-        "generation-next",
-        VaultProtection::plain(),
-        "expired-freeze",
-        "device-other",
-        1,
-        2,
+    let fx = CloudFixture::encrypted(
+        &auto_prefix("wrong-passphrase-frozen"),
+        "correct-passphrase",
     )
     .await
-    .unwrap();
+    .frozen_by_other_device("expired-freeze", LeaseLifecycle::Expired)
+    .await
+    .with_local_passphrase("wrong-passphrase")
+    .await;
     let vault_path = RemotePath::parse("v1/vault.json").unwrap();
-    let before = backend.get(&vault_path).await.unwrap();
-    let settings_before = service.settings().await;
+    let before = fx.backend.get(&vault_path).await.unwrap();
 
-    let error = service
-        .sync_once_locked(settings.clone())
+    let error = fx
+        .service
+        .sync_once_locked(fx.service.settings().await)
         .await
         .unwrap_err();
 
     assert!(matches!(error, AppError::Crypto(_)), "{error:?}");
-    assert_eq!(
-        serde_json::to_value(service.settings().await).unwrap(),
-        serde_json::to_value(settings_before).unwrap()
-    );
-    let after = backend.get(&vault_path).await.unwrap();
+    fx.assert_cloud_config_unchanged().await;
+    let after = fx.backend.get(&vault_path).await.unwrap();
     assert_eq!(after.etag, before.etag);
     assert_eq!(after.bytes, before.bytes);
 }
 
 #[tokio::test]
 async fn sync_wrong_passphrase_does_not_recover_publishing_vault() {
-    let (service, mut settings, backend, _server) = configured_s3_service_for_sync_guard_tests(
-        "wrong-passphrase-publishing",
-        true,
-        "wrong-passphrase",
-    )
-    .await;
-    settings.cloud_sync.encryption_enabled = true;
-    service.settings.update(settings.clone()).await.unwrap();
-    let protection =
-        VaultProtection::encrypted(&settings.cloud_sync.vault_id, "correct-passphrase").unwrap();
-    let active = VaultDocument::active(
-        VaultIdentity {
-            format_version: 2,
-            vault_id: settings.cloud_sync.vault_id.clone(),
-            generation_id: settings.cloud_sync.generation_id.clone(),
-        },
-        protection,
-    );
-    load_or_create_vault(backend.as_ref(), active)
-        .await
-        .unwrap();
-    let current = load_versioned_identity(backend.as_ref()).await.unwrap();
-    let head_path = format!(
-        "v1/generations/{}/devices/device-other/head.json",
-        settings.cloud_sync.generation_id
-    );
-    let replacement_head = HeadDocument {
-        generation_id: settings.cloud_sync.generation_id.clone(),
-        device_id: "device-other".into(),
-        end_seq: 1,
-        path: format!(
-            "v1/generations/{}/devices/device-other/bundles/1-1-test.acmb",
-            settings.cloud_sync.generation_id
-        ),
-        sha256: "test".into(),
-    };
-    begin_head_publish(
-        backend.as_ref(),
-        &current,
-        HeadPublishRequest {
-            operation_id: "expired-publish".into(),
-            owner_device_id: "device-other".into(),
-            started_at_ms: 1,
-            lease_expires_at_ms: 2,
-            head_path: head_path.clone(),
-            expected_head_etag: None,
-            replacement_head_json: serde_json::to_string(&replacement_head).unwrap(),
-            published_mutation_count: 1,
-        },
+    let fx = CloudFixture::encrypted(
+        &auto_prefix("wrong-passphrase-publishing"),
+        "correct-passphrase",
     )
     .await
-    .unwrap();
+    .publishing_by_other_device(LeaseLifecycle::Expired)
+    .await
+    .with_local_passphrase("wrong-passphrase")
+    .await;
     let vault_path = RemotePath::parse("v1/vault.json").unwrap();
-    let before = backend.get(&vault_path).await.unwrap();
-    let head_path = RemotePath::parse(&head_path).unwrap();
-    let before_head = backend.get(&head_path).await.ok();
-    let settings_before = service.settings().await;
+    let before = fx.backend.get(&vault_path).await.unwrap();
+    let head_path = RemotePath::parse(&format!(
+        "v1/generations/{}/devices/device-other/head.json",
+        fx.settings.generation_id
+    ))
+    .unwrap();
+    let before_head = fx.backend.get(&head_path).await.ok();
 
-    let error = service
-        .sync_once_locked(settings.clone())
+    let error = fx
+        .service
+        .sync_once_locked(fx.service.settings().await)
         .await
         .unwrap_err();
 
     assert!(matches!(error, AppError::Crypto(_)), "{error:?}");
-    assert_eq!(
-        serde_json::to_value(service.settings().await).unwrap(),
-        serde_json::to_value(settings_before).unwrap()
-    );
-    let after = backend.get(&vault_path).await.unwrap();
+    fx.assert_cloud_config_unchanged().await;
+    let after = fx.backend.get(&vault_path).await.unwrap();
     assert_eq!(after.etag, before.etag);
     assert_eq!(after.bytes, before.bytes);
-    assert_eq!(backend.get(&head_path).await.ok(), before_head);
+    assert_eq!(fx.backend.get(&head_path).await.ok(), before_head);
 }
 
 #[tokio::test]
 async fn sync_rejects_plain_active_from_a_frozen_recovery_reread_without_mutation() {
-    let (service, settings, backend, server) = configured_s3_service_for_sync_guard_tests(
-        "frozen-reread-plain",
-        true,
-        "correct-passphrase",
-    )
-    .await;
-    let active = VaultDocument::active(
-        VaultIdentity {
-            format_version: 2,
-            vault_id: settings.cloud_sync.vault_id.clone(),
-            generation_id: settings.cloud_sync.generation_id.clone(),
-        },
-        VaultProtection::encrypted(&settings.cloud_sync.vault_id, "correct-passphrase").unwrap(),
-    );
-    load_or_create_vault(backend.as_ref(), active.clone())
+    let fx = CloudFixture::encrypted(&auto_prefix("frozen-reread-plain"), "correct-passphrase")
         .await
-        .unwrap();
-    begin_generation_freeze_owned(
-        backend.as_ref(),
-        &active,
-        "generation-next",
-        VaultProtection::plain(),
-        "expired-frozen-reread-plain",
-        "device-other",
-        1,
-        2,
-    )
-    .await
-    .unwrap();
-    let device = service.ensure_local_device().await.unwrap();
-    service.sync_store.seed_local_baseline().await.unwrap();
+        .frozen_by_other_device("expired-frozen-reread-plain", LeaseLifecycle::Expired)
+        .await;
+    let device = fx.service.ensure_local_device().await.unwrap();
+    fx.service.sync_store.seed_local_baseline().await.unwrap();
     let head_path = RemotePath::parse(&format!(
         "v1/generations/{}/devices/{}/head.json",
-        settings.cloud_sync.generation_id, device.device_id
+        fx.settings.generation_id, device.device_id
     ))
     .unwrap();
-    let settings_before = service.settings().await;
-    let vault_before = vault_object_snapshot(backend.as_ref()).await;
-    let head_before = backend.get(&head_path).await.ok();
-    let outbox_before = service
+    let vault_before = vault_object_snapshot(fx.backend.as_ref()).await;
+    let head_before = fx.backend.get(&head_path).await.ok();
+    let outbox_before = fx
+        .service
         .sync_store
         .pending_mutations(i64::MAX)
         .await
         .unwrap();
-    let device_before = service.sync_store.device_state().await.unwrap();
-    let scripted = VaultDocument::active(active.identity.clone(), VaultProtection::plain());
-    server
+    let device_before = fx.service.sync_store.device_state().await.unwrap();
+    let scripted = VaultDocument::active(
+        VaultIdentity {
+            format_version: 2,
+            vault_id: fx.settings.vault_id.clone(),
+            generation_id: fx.settings.generation_id.clone(),
+        },
+        VaultProtection::plain(),
+    );
+    fx.server
         .script_vault_change_after_gets(1, serde_json::to_vec(&scripted).unwrap())
         .await;
 
-    let error = service.sync_now().await.unwrap_err();
+    let error = fx.service.sync_now().await.unwrap_err();
 
     assert!(matches!(error, AppError::InvalidData(_)), "{error:?}");
+    fx.assert_cloud_config_unchanged().await;
+    fx.assert_remote_untouched(&vault_before).await;
+    assert_eq!(fx.backend.get(&head_path).await.ok(), head_before);
     assert_eq!(
-        serde_json::to_value(service.settings().await).unwrap(),
-        serde_json::to_value(settings_before).unwrap()
-    );
-    assert_eq!(vault_object_snapshot(backend.as_ref()).await, vault_before);
-    assert_eq!(backend.get(&head_path).await.ok(), head_before);
-    assert_eq!(
-        service
+        fx.service
             .sync_store
             .pending_mutations(i64::MAX)
             .await
@@ -255,63 +159,39 @@ async fn sync_rejects_plain_active_from_a_frozen_recovery_reread_without_mutatio
         outbox_before
     );
     assert_eq!(
-        service.sync_store.device_state().await.unwrap(),
+        fx.service.sync_store.device_state().await.unwrap(),
         device_before
     );
 }
 
 #[tokio::test]
 async fn verified_vault_rejects_changed_identity_from_a_frozen_recovery_reread() {
-    let (service, settings, backend, server) = configured_s3_service_for_sync_guard_tests(
-        "frozen-reread-identity",
-        true,
-        "correct-passphrase",
-    )
-    .await;
-    let active = VaultDocument::active(
-        VaultIdentity {
-            format_version: 2,
-            vault_id: settings.cloud_sync.vault_id.clone(),
-            generation_id: settings.cloud_sync.generation_id.clone(),
-        },
-        VaultProtection::encrypted(&settings.cloud_sync.vault_id, "correct-passphrase").unwrap(),
-    );
-    load_or_create_vault(backend.as_ref(), active.clone())
+    let fx = CloudFixture::encrypted(&auto_prefix("frozen-reread-identity"), "correct-passphrase")
         .await
-        .unwrap();
-    begin_generation_freeze_owned(
-        backend.as_ref(),
-        &active,
-        "generation-next",
-        VaultProtection::plain(),
-        "expired-frozen-reread-identity",
-        "device-other",
-        1,
-        2,
-    )
-    .await
-    .unwrap();
-    let vault_before = vault_object_snapshot(backend.as_ref()).await;
+        .frozen_by_other_device("expired-frozen-reread-identity", LeaseLifecycle::Expired)
+        .await;
+    let vault_before = vault_object_snapshot(fx.backend.as_ref()).await;
     let changed_vault_id = "vault-changed-during-recovery";
     let scripted = VaultDocument::active(
         VaultIdentity {
             format_version: 2,
             vault_id: changed_vault_id.into(),
-            generation_id: settings.cloud_sync.generation_id.clone(),
+            generation_id: fx.settings.generation_id.clone(),
         },
         VaultProtection::encrypted(changed_vault_id, "correct-passphrase").unwrap(),
     );
-    server
+    fx.server
         .script_vault_change_after_gets(1, serde_json::to_vec(&scripted).unwrap())
         .await;
 
-    let result = service
+    let result = fx
+        .service
         .load_verified_vault(
-            backend.as_ref(),
-            &settings.cloud_sync,
+            fx.backend.as_ref(),
+            &fx.settings,
             VaultVerification {
                 create_if_missing: false,
-                expected_vault_id: Some(&settings.cloud_sync.vault_id),
+                expected_vault_id: Some(&fx.settings.vault_id),
                 fence_encryption_enabled: true,
                 expected_algorithm: None,
                 proposed: None,
@@ -325,44 +205,36 @@ async fn verified_vault_rejects_changed_identity_from_a_frozen_recovery_reread()
     };
 
     assert!(matches!(error, AppError::InvalidData(_)), "{error:?}");
-    assert_eq!(vault_object_snapshot(backend.as_ref()).await, vault_before);
+    fx.assert_remote_untouched(&vault_before).await;
 }
 
 #[tokio::test]
 async fn saving_settings_rejects_remote_plain_when_local_encryption_is_persisted() {
-    let (service, settings_before, backend, _server) =
-        configured_s3_service_for_sync_guard_tests("settings-plain-fence", true, "old-passphrase")
-            .await;
-    load_or_create_vault(
-        backend.as_ref(),
-        VaultDocument::active(
-            VaultIdentity {
-                format_version: 2,
-                vault_id: settings_before.cloud_sync.vault_id.clone(),
-                generation_id: settings_before.cloud_sync.generation_id.clone(),
-            },
-            VaultProtection::plain(),
-        ),
-    )
-    .await
-    .unwrap();
-    let vault_before = vault_object_snapshot(backend.as_ref()).await;
-    let device = service.ensure_local_device().await.unwrap();
+    let fx = CloudFixture::plain(&auto_prefix("settings-plain-fence"))
+        .await
+        .with_encryption_enabled(true)
+        .await
+        .with_local_passphrase("old-passphrase")
+        .await;
+    let vault_before = vault_object_snapshot(fx.backend.as_ref()).await;
+    let device = fx.service.ensure_local_device().await.unwrap();
     let head_path = RemotePath::parse(&format!(
         "v1/generations/{}/devices/{}/head.json",
-        settings_before.cloud_sync.generation_id, device.device_id
+        fx.settings.generation_id, device.device_id
     ))
     .unwrap();
-    let head_before = backend.get(&head_path).await.ok();
-    let outbox_before = service
+    let head_before = fx.backend.get(&head_path).await.ok();
+    let outbox_before = fx
+        .service
         .sync_store
         .pending_mutations(i64::MAX)
         .await
         .unwrap();
-    let mut next = settings_before.clone();
+    let mut next = fx.service.settings().await;
     next.setup_complete = !next.setup_complete;
 
-    let error = service
+    let error = fx
+        .service
         .update_settings_with_cloud_credentials(
             next,
             Some(CloudCredentialInput::S3 {
@@ -379,14 +251,11 @@ async fn saving_settings_rejects_remote_plain_when_local_encryption_is_persisted
         matches!(error, AppError::InvalidData(_) | AppError::Crypto(_)),
         "{error:?}"
     );
+    fx.assert_cloud_config_unchanged().await;
+    fx.assert_remote_untouched(&vault_before).await;
+    assert_eq!(fx.backend.get(&head_path).await.ok(), head_before);
     assert_eq!(
-        serde_json::to_value(service.settings().await).unwrap(),
-        serde_json::to_value(settings_before).unwrap()
-    );
-    assert_eq!(vault_object_snapshot(backend.as_ref()).await, vault_before);
-    assert_eq!(backend.get(&head_path).await.ok(), head_before);
-    assert_eq!(
-        service
+        fx.service
             .sync_store
             .pending_mutations(i64::MAX)
             .await
@@ -397,34 +266,25 @@ async fn saving_settings_rejects_remote_plain_when_local_encryption_is_persisted
 
 #[tokio::test]
 async fn joining_existing_vault_with_wrong_passphrase_does_not_recover_expired_frozen_vault() {
-    let (service, draft, backend, _server) =
-        configured_join_s3_service_for_guard_tests("join-wrong-frozen").await;
-    let current = load_versioned_identity(backend.as_ref()).await.unwrap();
-    let active = current.document();
-    begin_generation_freeze_owned(
-        backend.as_ref(),
-        &active,
-        "generation-next",
-        VaultProtection::plain(),
-        "join-expired-freeze",
-        "device-other",
-        1,
-        2,
-    )
-    .await
-    .unwrap();
-    let vault_before = vault_object_snapshot(backend.as_ref()).await;
-    let settings_before = service.settings().await;
-    let outbox_before = service
+    let (fx, draft) =
+        CloudFixture::join_candidate(&auto_prefix("join-wrong-frozen"), "correct-passphrase").await;
+    let fx = fx
+        .frozen_by_other_device("join-expired-freeze", LeaseLifecycle::Expired)
+        .await;
+    let vault_before = vault_object_snapshot(fx.backend.as_ref()).await;
+    let settings_before = fx.service.settings().await;
+    let outbox_before = fx
+        .service
         .sync_store
         .pending_mutations(i64::MAX)
         .await
         .unwrap();
 
-    let error = service
+    let error = fx
+        .service
         .update_settings_with_cloud_credentials(
             AppSettings {
-                cloud_sync: draft.clone(),
+                cloud_sync: draft,
                 ..settings_before.clone()
             },
             Some(wrong_join_credentials()),
@@ -434,12 +294,12 @@ async fn joining_existing_vault_with_wrong_passphrase_does_not_recover_expired_f
 
     assert!(matches!(error, AppError::Crypto(_)), "{error:?}");
     assert_eq!(
-        serde_json::to_value(service.settings().await).unwrap(),
+        serde_json::to_value(fx.service.settings().await).unwrap(),
         serde_json::to_value(settings_before).unwrap()
     );
-    assert_eq!(vault_object_snapshot(backend.as_ref()).await, vault_before);
+    fx.assert_remote_untouched(&vault_before).await;
     assert_eq!(
-        service
+        fx.service
             .sync_store
             .pending_mutations(i64::MAX)
             .await
@@ -450,9 +310,10 @@ async fn joining_existing_vault_with_wrong_passphrase_does_not_recover_expired_f
 
 #[tokio::test]
 async fn joining_existing_vault_with_wrong_passphrase_does_not_recover_publishing_vault() {
-    let (service, draft, backend, _server) =
-        configured_join_s3_service_for_guard_tests("join-wrong-publishing").await;
-    let current = load_versioned_identity(backend.as_ref()).await.unwrap();
+    let (fx, draft) =
+        CloudFixture::join_candidate(&auto_prefix("join-wrong-publishing"), "correct-passphrase")
+            .await;
+    let current = load_versioned_identity(fx.backend.as_ref()).await.unwrap();
     let head_path = format!(
         "v1/generations/{}/devices/device-other/head.json",
         current.identity.generation_id
@@ -468,7 +329,7 @@ async fn joining_existing_vault_with_wrong_passphrase_does_not_recover_publishin
         sha256: "test".into(),
     };
     begin_head_publish(
-        backend.as_ref(),
+        fx.backend.as_ref(),
         &current,
         HeadPublishRequest {
             operation_id: "join-expired-publish".into(),
@@ -483,20 +344,22 @@ async fn joining_existing_vault_with_wrong_passphrase_does_not_recover_publishin
     )
     .await
     .unwrap();
-    let vault_before = vault_object_snapshot(backend.as_ref()).await;
+    let vault_before = vault_object_snapshot(fx.backend.as_ref()).await;
     let head_path = RemotePath::parse(&head_path).unwrap();
-    let head_before = backend.get(&head_path).await.ok();
-    let settings_before = service.settings().await;
-    let outbox_before = service
+    let head_before = fx.backend.get(&head_path).await.ok();
+    let settings_before = fx.service.settings().await;
+    let outbox_before = fx
+        .service
         .sync_store
         .pending_mutations(i64::MAX)
         .await
         .unwrap();
 
-    let error = service
+    let error = fx
+        .service
         .update_settings_with_cloud_credentials(
             AppSettings {
-                cloud_sync: draft.clone(),
+                cloud_sync: draft,
                 ..settings_before.clone()
             },
             Some(wrong_join_credentials()),
@@ -506,13 +369,13 @@ async fn joining_existing_vault_with_wrong_passphrase_does_not_recover_publishin
 
     assert!(matches!(error, AppError::Crypto(_)), "{error:?}");
     assert_eq!(
-        serde_json::to_value(service.settings().await).unwrap(),
+        serde_json::to_value(fx.service.settings().await).unwrap(),
         serde_json::to_value(settings_before).unwrap()
     );
-    assert_eq!(vault_object_snapshot(backend.as_ref()).await, vault_before);
-    assert_eq!(backend.get(&head_path).await.ok(), head_before);
+    fx.assert_remote_untouched(&vault_before).await;
+    assert_eq!(fx.backend.get(&head_path).await.ok(), head_before);
     assert_eq!(
-        service
+        fx.service
             .sync_store
             .pending_mutations(i64::MAX)
             .await
@@ -523,7 +386,7 @@ async fn joining_existing_vault_with_wrong_passphrase_does_not_recover_publishin
 
 #[tokio::test]
 async fn connection_test_prepares_a_draft_without_persisting_local_or_remote_state() {
-    let service = service_with_local_session().await;
+    let (service, _data_dir) = service_with_local_session_fixture().await;
     service.ensure_local_device().await.unwrap();
     service.sync_store.seed_local_baseline().await.unwrap();
     service
@@ -618,7 +481,7 @@ async fn connection_test_prepares_a_draft_without_persisting_local_or_remote_sta
 #[tokio::test]
 async fn joining_an_existing_vault_rejects_plain_and_encrypted_policy_mismatches() {
     for remote_encrypted in [false, true] {
-        let service = service_with_local_session().await;
+        let (service, _data_dir) = service_with_local_session_fixture().await;
         let server = TestS3::start("AKID", None).await;
         let requested_encryption = !remote_encrypted;
         let cloud_sync = CloudSyncSettings {
@@ -642,7 +505,7 @@ async fn joining_an_existing_vault_rejects_plain_and_encrypted_policy_mismatches
         };
         let backend = backend_from_input(&cloud_sync, &credentials).unwrap();
         let remote_protection = if remote_encrypted {
-            VaultProtection::encrypted("remote-vault", "remote-passphrase").unwrap()
+            crate::test_support::test_protection("remote-vault", "remote-passphrase")
         } else {
             VaultProtection::plain()
         };
