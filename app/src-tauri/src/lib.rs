@@ -116,6 +116,8 @@ pub fn run() {
                 let _ = window.show();
                 let _ = window.unminimize();
                 let _ = window.set_focus();
+            } else {
+                tracing::warn!("second instance requested but main window not found");
             }
         }))
         .plugin(tauri_plugin_opener::init())
