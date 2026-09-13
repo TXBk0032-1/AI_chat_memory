@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
-use super::{BackendIdentity, EmbeddingBackend, ensure_dimensions};
+use super::{BackendIdentity, CancellationToken, EmbeddingBackend, ensure_dimensions};
 use crate::{
     error::Result,
     models::{EmbeddingBackendKind, EmbeddingHealth},
@@ -62,7 +62,11 @@ impl EmbeddingBackend for MockEmbeddingBackend {
         }
     }
 
-    async fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    async fn embed_documents(
+        &self,
+        texts: &[String],
+        _cancellation: Option<&CancellationToken>,
+    ) -> Result<Vec<Vec<f32>>> {
         let vectors = texts
             .iter()
             .map(|text| self.embed_one(text, false))

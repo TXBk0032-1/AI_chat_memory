@@ -68,6 +68,7 @@ dependencies = [
  "candle-transformers",
  "chacha20poly1305",
  "chrono",
+ "filetime",
  "futures",
  "hex",
  "hf-hub",

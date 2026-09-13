@@ -3,7 +3,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::json;
 
-use super::{BackendIdentity, EmbeddingBackend, ensure_dimensions};
+use super::{BackendIdentity, CancellationToken, EmbeddingBackend, ensure_dimensions};
 use crate::{
     error::{AppError, Result},
     models::{EmbeddingBackendKind, EmbeddingHealth, RemoteEmbeddingSettings},
@@ -111,28 +111,38 @@ impl HttpEmbeddingBackend {
         Ok(dim)
     }
 
-    async fn embed(&self, texts: &[String], _is_query: bool) -> Result<Vec<Vec<f32>>> {
+    async fn embed(
+        &self,
+        texts: &[String],
+        _is_query: bool,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
         match self.kind {
-            EmbeddingBackendKind::Ollama => self.embed_ollama(texts).await,
+            EmbeddingBackendKind::Ollama => self.embed_ollama(texts, cancellation).await,
             EmbeddingBackendKind::LlamaCpp | EmbeddingBackendKind::OpenaiCompatible => {
-                self.embed_openai(texts).await
+                self.embed_openai(texts, cancellation).await
             }
             EmbeddingBackendKind::Local => unreachable!(),
         }
     }
 
-    async fn embed_ollama(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    async fn embed_ollama(
+        &self,
+        texts: &[String],
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Vec<Vec<f32>>> {
         // Prefer the batch `/api/embed` endpoint: one round trip for the
         // whole batch instead of one per text, which makes full index rebuilds over
         // thousands of chunks dramatically faster. Fall back to the legacy
         // single-text `/api/embeddings` endpoint for servers that don't implement
         // the batch variant (older Ollama or compatible servers).
         if texts.len() > 1 {
-            match self.embed_ollama_batch(texts).await {
+            match self.embed_ollama_batch(texts, cancellation).await {
                 Ok(vectors) => return Ok(vectors),
+                Err(error @ AppError::Cancelled(_)) => return Err(error),
                 Err(error) => {
                     tracing::warn!(%error, "ollama batch embed failed; falling back to per-text");
                 }
@@ -140,60 +150,53 @@ impl HttpEmbeddingBackend {
         }
         let mut vectors = Vec::with_capacity(texts.len());
         for text in texts {
+            if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                return Err(AppError::Cancelled(CANCELLED_MESSAGE.into()));
+            }
             let url = format!(
                 "{}/api/embeddings",
                 self.settings.base_url.trim_end_matches('/')
             );
-            let response = self
-                .client
-                .post(url)
-                .json(&json!({
-                    "model": self.settings.model,
-                    "prompt": text,
-                }))
-                .send()
-                .await
-                .map_err(|error| AppError::Configuration(error.to_string()))?;
+            let request = self.client.post(url).json(&json!({
+                "model": self.settings.model,
+                "prompt": text,
+            }));
+            let response = cancellable(send_request(request), cancellation).await?;
             if !response.status().is_success() {
                 let status = response.status();
-                let body = response.text().await.unwrap_or_default();
+                let body = error_body(response, cancellation).await?;
                 return Err(AppError::Configuration(format!(
                     "ollama embeddings failed ({status}): {body}"
                 )));
             }
-            let payload: OllamaEmbeddingResponse = response
-                .json()
-                .await
-                .map_err(|error| AppError::Configuration(error.to_string()))?;
+            let payload: OllamaEmbeddingResponse =
+                cancellable(parse_json(response), cancellation).await?;
             vectors.push(payload.embedding);
         }
         self.lock_or_infer_dimensions(&vectors)?;
         Ok(vectors)
     }
 
-    async fn embed_ollama_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    async fn embed_ollama_batch(
+        &self,
+        texts: &[String],
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Vec<Vec<f32>>> {
         let url = format!("{}/api/embed", self.settings.base_url.trim_end_matches('/'));
-        let response = self
-            .client
-            .post(url)
-            .json(&json!({
-                "model": self.settings.model,
-                "input": texts,
-            }))
-            .send()
-            .await
-            .map_err(|error| AppError::Configuration(error.to_string()))?;
+        let request = self.client.post(url).json(&json!({
+            "model": self.settings.model,
+            "input": texts,
+        }));
+        let response = cancellable(send_request(request), cancellation).await?;
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = error_body(response, cancellation).await?;
             return Err(AppError::Configuration(format!(
                 "ollama embed batch failed ({status}): {body}"
             )));
         }
-        let payload: OllamaEmbedBatchResponse = response
-            .json()
-            .await
-            .map_err(|error| AppError::Configuration(error.to_string()))?;
+        let payload: OllamaEmbedBatchResponse =
+            cancellable(parse_json(response), cancellation).await?;
         let vectors = payload.embeddings;
         if vectors.len() != texts.len() {
             return Err(AppError::Configuration(format!(
@@ -206,7 +209,11 @@ impl HttpEmbeddingBackend {
         Ok(vectors)
     }
 
-    async fn embed_openai(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+    async fn embed_openai(
+        &self,
+        texts: &[String],
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Vec<Vec<f32>>> {
         let url = format!(
             "{}/embeddings",
             self.settings.base_url.trim_end_matches('/')
@@ -223,25 +230,69 @@ impl HttpEmbeddingBackend {
         {
             request = request.bearer_auth(api_key);
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|error| AppError::Configuration(error.to_string()))?;
+        let response = cancellable(send_request(request), cancellation).await?;
         if !response.status().is_success() {
             let status = response.status();
-            let body = response.text().await.unwrap_or_default();
+            let body = error_body(response, cancellation).await?;
             return Err(AppError::Configuration(format!(
                 "openai-compatible embeddings failed ({status}): {body}"
             )));
         }
-        let payload: OpenAiEmbeddingResponse = response
-            .json()
-            .await
-            .map_err(|error| AppError::Configuration(error.to_string()))?;
+        let payload: OpenAiEmbeddingResponse =
+            cancellable(parse_json(response), cancellation).await?;
         let vectors = align_openai_embedding_vectors(payload.data, texts.len())?;
         self.lock_or_infer_dimensions(&vectors)?;
         Ok(vectors)
     }
+}
+
+const CANCELLED_MESSAGE: &str = "远程编码已取消";
+
+/// Races `future` against `cancellation`. Without a token the future runs to
+/// completion. `CancellationToken::cancelled()` only resolves on a real
+/// cancel (it stays pending forever once every source is dropped), so it is
+/// only ever awaited inside this `select!`, never on its own.
+async fn cancellable<T>(
+    future: impl std::future::Future<Output = Result<T>>,
+    cancellation: Option<&CancellationToken>,
+) -> Result<T> {
+    let Some(token) = cancellation else {
+        return future.await;
+    };
+    tokio::select! {
+        biased;
+        _ = token.cancelled() => Err(AppError::Cancelled(CANCELLED_MESSAGE.into())),
+        result = future => result,
+    }
+}
+
+async fn send_request(request: reqwest::RequestBuilder) -> Result<reqwest::Response> {
+    request
+        .send()
+        .await
+        .map_err(|error| AppError::Configuration(error.to_string()))
+}
+
+async fn parse_json<T: serde::de::DeserializeOwned>(response: reqwest::Response) -> Result<T> {
+    response
+        .json()
+        .await
+        .map_err(|error| AppError::Configuration(error.to_string()))
+}
+
+/// Reads the body of a non-2xx response for the error message. The read races
+/// `cancellation` like every other network await: a cancelled task returns
+/// `Err(Cancelled)` instead of waiting on a slow error body until the client
+/// timeout. Body read failures degrade to an empty body, never to an error.
+async fn error_body(
+    response: reqwest::Response,
+    cancellation: Option<&CancellationToken>,
+) -> Result<String> {
+    cancellable(
+        async { Ok(response.text().await.unwrap_or_default()) },
+        cancellation,
+    )
+    .await
 }
 
 /// True when a configured api_key would travel over plaintext http to a
@@ -310,12 +361,17 @@ impl EmbeddingBackend for HttpEmbeddingBackend {
         }
     }
 
-    async fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        self.embed(texts, false).await
+    async fn embed_documents(
+        &self,
+        texts: &[String],
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Vec<Vec<f32>>> {
+        self.embed(texts, false, cancellation).await
     }
 
+    // Queries are interactive and never subject to background cancellation.
     async fn embed_queries(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        self.embed(texts, true).await
+        self.embed(texts, true, None).await
     }
 
     async fn healthcheck(&self) -> Result<EmbeddingHealth> {
@@ -359,6 +415,7 @@ struct OpenAiEmbeddingItem {
 
 #[cfg(test)]
 mod tests {
+    use super::super::CancellationSource;
     use super::*;
 
     fn settings(dimensions: Option<usize>) -> RemoteEmbeddingSettings {
@@ -477,5 +534,220 @@ mod tests {
                 .to_string()
                 .contains("returned 2 vectors for 3 inputs")
         );
+    }
+
+    /// Reads from `socket` until the end of the HTTP request headers so the
+    /// client is known to be waiting on the response (never mid-connect).
+    async fn read_request_headers(socket: &mut tokio::net::TcpStream) {
+        use tokio::io::AsyncReadExt;
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 1024];
+        loop {
+            let read = socket.read(&mut chunk).await.unwrap();
+            if read == 0 {
+                break;
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+            if buffer.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+    }
+
+    /// Spawns a fixture that accepts one connection, reads the request
+    /// headers, writes `prefix` (possibly nothing) and then holds the socket
+    /// open without ever finishing the response until the task is aborted.
+    /// The returned receiver fires once the request headers have arrived.
+    fn spawn_hanging_server(
+        listener: tokio::net::TcpListener,
+        prefix: &'static str,
+    ) -> (
+        tokio::task::JoinHandle<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let (request_seen_tx, request_seen_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_request_headers(&mut socket).await;
+            if !prefix.is_empty() {
+                socket.write_all(prefix.as_bytes()).await.unwrap();
+                socket.flush().await.unwrap();
+            }
+            request_seen_tx.send(()).unwrap();
+            // Hold the socket (never answer) until the test aborts this task;
+            // the client side would otherwise stay pending up to its 60s timeout.
+            std::future::pending::<()>().await;
+            drop(socket);
+        });
+        (server, request_seen_rx)
+    }
+
+    /// Drives `request` (bounded by 250ms) concurrently with a canceller that
+    /// waits for the fixture's "request received" signal, optionally lingers
+    /// so the client has parsed whatever the fixture wrote, then cancels the
+    /// source. Returns the request outcome and whether the signal arrived
+    /// before the cancel was issued.
+    async fn cancel_after_request_seen<F>(
+        request: F,
+        request_seen: tokio::sync::oneshot::Receiver<()>,
+        linger: std::time::Duration,
+        source: &CancellationSource,
+    ) -> (
+        std::result::Result<F::Output, tokio::time::error::Elapsed>,
+        bool,
+    )
+    where
+        F: std::future::Future,
+    {
+        let bounded = tokio::time::timeout(std::time::Duration::from_millis(250), request);
+        let canceller = async {
+            let seen = request_seen.await.is_ok();
+            if !linger.is_zero() {
+                tokio::time::sleep(linger).await;
+            }
+            source.cancel_current();
+            seen
+        };
+        tokio::join!(bounded, canceller)
+    }
+
+    #[tokio::test]
+    async fn document_request_returns_cancelled_before_http_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Accept the connection, read the request, but never answer: the
+        // reqwest future is in flight and stays pending until its 60s timeout
+        // unless cancellation interrupts it.
+        let (server, request_seen) = spawn_hanging_server(listener, "");
+        let backend = HttpEmbeddingBackend::openai_compatible(
+            EmbeddingBackendKind::OpenaiCompatible,
+            remote_settings(&format!("http://{addr}/v1"), None),
+        )
+        .unwrap();
+        let source = CancellationSource::new();
+        let token = source.token();
+        let texts: [String; 1] = ["blocked".into()];
+        let (result, cancelled_after_request_seen) = cancel_after_request_seen(
+            backend.embed_documents(&texts, Some(&token)),
+            request_seen,
+            std::time::Duration::ZERO,
+            &source,
+        )
+        .await;
+        assert!(
+            cancelled_after_request_seen,
+            "cancel must be issued only after the server accepted and read the request"
+        );
+        let error = result
+            .expect("cancel must beat 60 second timeout")
+            .unwrap_err();
+        assert!(matches!(error, AppError::Cancelled(_)), "got {error:?}");
+        assert!(error.to_string().contains(CANCELLED_MESSAGE));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn already_cancelled_token_short_circuits_without_connecting() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let backend = HttpEmbeddingBackend::openai_compatible(
+            EmbeddingBackendKind::OpenaiCompatible,
+            remote_settings(&format!("http://{addr}/v1"), None),
+        )
+        .unwrap();
+        let source = CancellationSource::new();
+        let token = source.token();
+        source.cancel_current();
+        let error = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            backend.embed_documents(&["never sent".into()], Some(&token)),
+        )
+        .await
+        .expect("pre-cancelled request must return immediately")
+        .unwrap_err();
+        assert!(matches!(error, AppError::Cancelled(_)), "got {error:?}");
+        // A pre-cancelled token must short-circuit before any connection is
+        // attempted, so the listener never sees a client.
+        let accepted =
+            tokio::time::timeout(std::time::Duration::from_millis(100), listener.accept()).await;
+        assert!(
+            accepted.is_err(),
+            "no connection may be opened for a pre-cancelled token"
+        );
+    }
+
+    #[tokio::test]
+    async fn error_response_with_hanging_body_returns_cancelled() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        // Status and headers arrive so `send()` resolves with a 500, but the
+        // announced body never does: reading the error body must still lose
+        // the race against cancellation instead of waiting for the 60s timeout.
+        let (server, request_seen) = spawn_hanging_server(
+            listener,
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Type: text/plain\r\nContent-Length: 100\r\n\r\n",
+        );
+        let backend = HttpEmbeddingBackend::openai_compatible(
+            EmbeddingBackendKind::OpenaiCompatible,
+            remote_settings(&format!("http://{addr}/v1"), None),
+        )
+        .unwrap();
+        let source = CancellationSource::new();
+        let token = source.token();
+        let texts: [String; 1] = ["hanging body".into()];
+        // Linger so the client has certainly parsed the 500 status line and is
+        // now blocked inside the body read, not still inside `send()`.
+        let (result, cancelled_after_request_seen) = cancel_after_request_seen(
+            backend.embed_documents(&texts, Some(&token)),
+            request_seen,
+            std::time::Duration::from_millis(50),
+            &source,
+        )
+        .await;
+        assert!(cancelled_after_request_seen);
+        let error = result
+            .expect("cancel must beat 60 second timeout while reading the error body")
+            .unwrap_err();
+        assert!(matches!(error, AppError::Cancelled(_)), "got {error:?}");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn uncancelled_document_request_still_returns_vectors() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let (mut socket, _) = listener.accept().await.unwrap();
+            // Drain the request headers before answering so the client never
+            // sees a reset while it is still writing.
+            read_request_headers(&mut socket).await;
+            let body = r#"{"data":[{"index":0,"embedding":[0.1,0.2,0.3]}]}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.shutdown().await.unwrap();
+        });
+        let backend = HttpEmbeddingBackend::openai_compatible(
+            EmbeddingBackendKind::OpenaiCompatible,
+            remote_settings(&format!("http://{addr}/v1"), None),
+        )
+        .unwrap();
+        let source = CancellationSource::new();
+        let token = source.token();
+        let vectors = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            backend.embed_documents(&["ok".into()], Some(&token)),
+        )
+        .await
+        .expect("local fixture must answer promptly")
+        .unwrap();
+        assert_eq!(vectors.len(), 1);
+        assert_eq!(vectors[0], vec![0.1, 0.2, 0.3]);
+        assert_eq!(backend.identity().dimensions, 3);
+        server.await.unwrap();
     }
 }

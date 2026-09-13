@@ -1,6 +1,6 @@
 use sqlx::{
     SqlitePool,
-    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 use std::path::Path;
 use std::sync::Once;
@@ -37,31 +37,54 @@ pub async fn connect(path: &Path) -> Result<SqlitePool> {
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
+    // WAL + moderate sync is a better default for large embedding rebuilds.
+    // `synchronous` and `temp_store` are connection-local, so they live on the
+    // connect options: every connection the pool opens inherits them, instead
+    // of only whichever connection happened to run a one-off PRAGMA.
     let options = SqliteConnectOptions::new()
         .filename(path)
         .create_if_missing(true)
         .foreign_keys(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
+        .pragma("temp_store", "MEMORY")
         .busy_timeout(Duration::from_secs(5));
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
         .connect_with(options)
         .await?;
-    // WAL + moderate sync is a better default for large embedding rebuilds.
-    sqlx::query("PRAGMA journal_mode = WAL;")
-        .execute(&pool)
-        .await?;
-    sqlx::query("PRAGMA synchronous = NORMAL;")
-        .execute(&pool)
-        .await?;
-    sqlx::query("PRAGMA temp_store = MEMORY;")
-        .execute(&pool)
-        .await?;
-    initialize_schema(&pool).await?;
+    // Schema version fast path: initialize_schema walks a long chain of
+    // CREATE/ALTER/ensure checks which costs ~0.5s on a cold filesystem. The
+    // chain is fully idempotent, so a matching user_version stamp lets every
+    // subsequent open skip straight to serving queries.
+    let schema_version: i32 = sqlx::query_scalar("PRAGMA user_version;")
+        .fetch_one(&pool)
+        .await
+        .unwrap_or(0);
+    if schema_version != SCHEMA_VERSION {
+        let started = std::time::Instant::now();
+        initialize_schema(&pool).await?;
+        sqlx::query(&format!("PRAGMA user_version = {SCHEMA_VERSION};"))
+            .execute(&pool)
+            .await?;
+        tracing::info!(
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "database schema initialized"
+        );
+    } else {
+        tracing::debug!("database schema version matches; skipping initialize_schema");
+    }
     // Full-table timestamp rewrites are expensive on large archives; only do them
     // once for small/fresh databases so startup stays interactive.
     maybe_normalize_stored_timestamps(&pool).await?;
     Ok(pool)
 }
+
+/// Fast-path stamp for `connect`: when `PRAGMA user_version` equals this
+/// value the whole initialize_schema chain is skipped. Any schema change —
+/// new table, column, index, or ensure_* rule — MUST bump this constant,
+/// otherwise existing installs will never pick the change up.
+const SCHEMA_VERSION: i32 = 1;
 
 pub(crate) async fn initialize_schema(pool: &SqlitePool) -> Result<()> {
     sqlx::query("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, platform TEXT NOT NULL, platform_session_id TEXT NOT NULL, title TEXT, created_at TEXT, updated_at TEXT, imported_at TEXT DEFAULT CURRENT_TIMESTAMP, raw_data TEXT, UNIQUE(platform, platform_session_id));").execute(pool).await?;
@@ -708,6 +731,135 @@ pub async fn copy_database(source: &Path, destination: &Path) -> Result<()> {
 mod tests {
     use super::*;
     use sqlx::sqlite::SqlitePoolOptions;
+
+    async fn schema_gate_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "acm-schema-gate-{name}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        dir
+    }
+
+    #[tokio::test]
+    async fn connect_stamps_schema_version_on_fresh_database() {
+        let dir = schema_gate_dir("fresh").await;
+        let path = dir.join("chat_memory.db");
+
+        let pool = connect(&path).await.unwrap();
+        let version: i32 = sqlx::query_scalar("PRAGMA user_version;")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn connect_skips_initialize_schema_when_version_matches() {
+        let dir = schema_gate_dir("skip").await;
+        let path = dir.join("chat_memory.db");
+
+        let pool = connect(&path).await.unwrap();
+        pool.close().await;
+
+        // Sabotage a table: if the version gate skips initialize_schema on the
+        // next open, the table must stay missing.
+        let pool = connect(&path).await.unwrap();
+        sqlx::query("DROP TABLE sync_entity_versions;")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+
+        let pool = connect(&path).await.unwrap();
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sync_entity_versions')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            !exists,
+            "a matching user_version must skip initialize_schema entirely"
+        );
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn connect_reinitializes_schema_when_version_mismatches() {
+        let dir = schema_gate_dir("mismatch").await;
+        let path = dir.join("chat_memory.db");
+
+        let pool = connect(&path).await.unwrap();
+        pool.close().await;
+        let pool = connect(&path).await.unwrap();
+        sqlx::query("DROP TABLE sync_entity_versions;")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("PRAGMA user_version = 0;")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+
+        let pool = connect(&path).await.unwrap();
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sync_entity_versions')",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            exists,
+            "a version mismatch must run the full initialize_schema chain"
+        );
+        let version: i32 = sqlx::query_scalar("PRAGMA user_version;")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn every_pooled_connection_inherits_connection_pragmas() {
+        let dir = schema_gate_dir("pool-pragmas").await;
+        let pool = connect(&dir.join("db.sqlite")).await.unwrap();
+
+        // Hold all five connections at once so each one is a distinct SQLite
+        // handle; connection-local PRAGMAs must be present on every one.
+        let mut held = Vec::new();
+        for _ in 0..5 {
+            held.push(pool.acquire().await.unwrap());
+        }
+        for (index, connection) in held.iter_mut().enumerate() {
+            let synchronous: i64 = sqlx::query_scalar("PRAGMA synchronous")
+                .fetch_one(&mut **connection)
+                .await
+                .unwrap();
+            let temp_store: i64 = sqlx::query_scalar("PRAGMA temp_store")
+                .fetch_one(&mut **connection)
+                .await
+                .unwrap();
+            assert_eq!(synchronous, 1, "connection {index}: synchronous != NORMAL");
+            assert_eq!(temp_store, 2, "connection {index}: temp_store != MEMORY");
+        }
+        drop(held);
+
+        let journal: String = sqlx::query_scalar("PRAGMA journal_mode")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(journal.to_ascii_lowercase(), "wal");
+        pool.close().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[tokio::test]
     async fn registers_sqlite_vec_and_creates_vector_table() {

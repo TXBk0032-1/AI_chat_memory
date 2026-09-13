@@ -60,4 +60,19 @@ describe('useSessionCatalog', () => {
     expect(visibleIds.has('p2-99')).toBe(true)
     expect(visibleIds.has('p1-0')).toBe(true)
   })
+
+  it('retries the same next page after loadMore fails', async () => {
+    const first = Array.from({ length: 100 }, (_, i) => ({ id: `p1-${i}` }))
+    const second = [{ id: 'p2-0' }]
+    const searchSessions = vi.fn()
+      .mockResolvedValueOnce({ sessions: first, total: 101, search_mode: 'hybrid', semantic_status: 'ready' })
+      .mockRejectedValueOnce(new Error('network'))
+      .mockResolvedValueOnce({ sessions: second, total: 101, search_mode: 'hybrid', semantic_status: 'ready' })
+    const catalog = useSessionCatalog(fakeApi(searchSessions))
+    await catalog.loadSessions()
+    await catalog.loadMore()
+    await catalog.loadMore()
+    expect(searchSessions.mock.calls.map(([query]) => query.offset)).toEqual([0, 100, 100])
+    expect(catalog.sessions.value[catalog.sessions.value.length - 1]?.id).toBe('p2-0')
+  })
 })

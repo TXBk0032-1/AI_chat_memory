@@ -771,3 +771,619 @@ test('session list and detail fetches forward the abort signal to the transport'
     assert.equal(signals[0], controller.signal, 'detail fetch must forward the abort signal');
 });
 
+const encodedImportBytes = (platform, batch) =>
+    new TextEncoder().encode(JSON.stringify({ platform, sessions: batch })).byteLength;
+
+test('buildImportBatches respects count and UTF-8 body limits', () => {
+    const { api } = loadTestApi();
+    const sessions = [
+        { id: 'a', title: '你'.repeat(20) },
+        { id: 'b', title: '好'.repeat(20) },
+        { id: 'c', title: 'ok' },
+    ];
+
+    const byCount = api.buildImportBatches('deepseek', sessions, { maxItems: 2, maxBodyBytes: 1024 * 1024 });
+    assert.equal(byCount.oversized.length, 0);
+    assert.deepEqual(plain(byCount.batches.map(batch => batch.map(item => item.id))), [['a', 'b'], ['c']], 'item count must cap a batch');
+
+    // 20 个中文字符 = 60 UTF-8 字节：用 string.length 判定会严重低估，只有实测字节才会在此切分。
+    const maxBodyBytes = 210;
+    assert.ok(encodedImportBytes('deepseek', sessions.slice(0, 2)) <= maxBodyBytes, 'fixture: first two must fit');
+    assert.ok(encodedImportBytes('deepseek', sessions) > maxBodyBytes, 'fixture: all three must exceed the limit');
+    const { batches, oversized } = api.buildImportBatches('deepseek', sessions, { maxItems: 100, maxBodyBytes });
+    assert.equal(oversized.length, 0);
+    assert.ok(batches.length > 1, 'byte limit must force a split');
+    assert.ok(batches.every(batch => encodedImportBytes('deepseek', batch) <= maxBodyBytes), 'every batch envelope must stay under the byte limit');
+    assert.deepEqual(plain(batches.flat().map(item => item.id)), ['a', 'b', 'c'], 'no session may be dropped or reordered');
+});
+
+test('buildImportBatches moves a single oversized session to oversized and keeps batching the rest', () => {
+    const { api } = loadTestApi();
+    const sessions = [
+        { id: 'small1', title: 'x' },
+        { id: 'huge', title: '测'.repeat(500) },
+        { id: 'small2', title: 'y' },
+    ];
+    const maxBodyBytes = 200;
+    const { batches, oversized } = api.buildImportBatches('p', sessions, { maxItems: 100, maxBodyBytes });
+    assert.deepEqual(plain(oversized.map(item => item.id)), ['huge'], 'the session that cannot fit alone must be reported, not sent');
+    assert.deepEqual(plain(batches.flat().map(item => item.id)), ['small1', 'small2'], 'remaining sessions must still be batched');
+    assert.ok(batches.every(batch => encodedImportBytes('p', batch) <= maxBodyBytes));
+});
+
+test('fetchDetailsAndPush sends batches and keeps partial success when one batch fails', async () => {
+    const { api } = loadTestApi();
+    const adapter = {
+        platform: 'deepseek', needsToken: false,
+        fetchConversation: async id => ({ id, messages: [] })
+    };
+    const bodies = [];
+    const bridge = {
+        request: async (path, options = {}) => {
+            bodies.push(options.body);
+            if (bodies.length === 2) {
+                return { ok: false, status: 413, json: async () => ({}), text: async () => 'payload too large' };
+            }
+            return { ok: true, status: 200, json: async () => ({ imported: 2, skipped: 1 }), text: async () => '{}' };
+        }
+    };
+    const maxBodyBytes = 4096;
+    const coordinator = new api.SyncCoordinator({
+        adapter, bridgeClient: bridge,
+        ui: { setStatus() {}, setProgress() {}, setSyncing() {} },
+        detailConcurrency: 1, detailDelayMs: 0,
+        config: { importBatchMaxItems: 2, importBatchMaxBodyBytes: maxBodyBytes }
+    });
+
+    const result = await coordinator.fetchDetailsAndPush([{ id: 's1' }, { id: 's2' }, { id: 's3' }]);
+
+    assert.equal(bodies.length, 2, 'three sessions with maxItems=2 must become exactly two requests');
+    assert.ok(bodies.every(body => new TextEncoder().encode(body).byteLength <= maxBodyBytes), 'no request body may exceed the configured limit');
+    assert.deepEqual(plain(result.sessions.map(s => s.id)), ['s1', 's2'], 'only sessions accepted by an ok batch count as synced');
+    assert.equal(result.imported, 2, 'imported must accumulate from the successful batch only');
+    assert.equal(result.skipped, 1);
+    assert.deepEqual(plain(result.failed.map(f => ({ id: f.id, stage: f.stage }))), [{ id: 's3', stage: 'import' }], 'the failed batch must be reported with the import stage');
+});
+
+test('fetchDetailsAndPush throws when every batch fails', async () => {
+    const { api } = loadTestApi();
+    const adapter = { platform: 'deepseek', needsToken: false, fetchConversation: async id => ({ id }) };
+    const bridge = { request: async () => ({ ok: false, status: 413, json: async () => ({}), text: async () => 'too large' }) };
+    const coordinator = new api.SyncCoordinator({
+        adapter, bridgeClient: bridge,
+        ui: { setStatus() {}, setProgress() {}, setSyncing() {} },
+        detailConcurrency: 1, detailDelayMs: 0
+    });
+    await assert.rejects(() => coordinator.fetchDetailsAndPush([{ id: 's1' }]), /413/);
+});
+
+const okImport = (imported, skipped = 0) => ({ ok: true, status: 200, json: async () => ({ imported, skipped }), text: async () => '{}' });
+const makePushCoordinator = (api, bridge, config = { importBatchMaxItems: 1, importBatchMaxBodyBytes: 4096 }) => new api.SyncCoordinator({
+    adapter: { platform: 'deepseek', needsToken: false, fetchConversation: async id => ({ id, messages: [] }) },
+    bridgeClient: bridge,
+    ui: { setStatus() {}, setProgress() {}, setSyncing() {} },
+    detailConcurrency: 1, detailDelayMs: 0,
+    config
+});
+
+test('fetchDetailsAndPush records a batch the server accepted even if stop() lands while the response is in flight', async () => {
+    const { api } = loadTestApi();
+    let coordinator;
+    let requests = 0;
+    const bridge = {
+        request: async () => {
+            requests++;
+            // The server has already imported the batch; the user hits stop before the response is handled.
+            coordinator.stop();
+            return okImport(1);
+        }
+    };
+    coordinator = makePushCoordinator(api, bridge);
+    const result = await coordinator.fetchDetailsAndPush([{ id: 's1' }, { id: 's2' }]);
+    assert.equal(result.state, 'stopped');
+    assert.equal(requests, 1, 'no further batch may be sent after stop');
+    assert.deepEqual(plain(result.sessions.map(s => s.id)), ['s1'], 'a batch accepted by the server must be reported as synced even when stopped right after');
+    assert.equal(result.imported, 1, 'imported must be accumulated for the accepted batch');
+});
+
+test('fetchDetailsAndPush treats a thrown transport error as an import-stage failure of that batch only', async () => {
+    const { api } = loadTestApi();
+    let requests = 0;
+    const bridge = {
+        request: async () => {
+            requests++;
+            if (requests === 1) throw new Error('network down');
+            return okImport(1);
+        }
+    };
+    const coordinator = makePushCoordinator(api, bridge);
+    const result = await coordinator.fetchDetailsAndPush([{ id: 's1' }, { id: 's2' }]);
+    assert.equal(requests, 2, 'the second batch must still be sent after a transport error');
+    assert.deepEqual(plain(result.failed.map(f => ({ id: f.id, stage: f.stage }))), [{ id: 's1', stage: 'import' }]);
+    assert.match(result.failed[0].error, /network down/);
+    assert.deepEqual(plain(result.sessions.map(s => s.id)), ['s2']);
+    assert.equal(result.imported, 1, 'imported counts only the batch that succeeded');
+});
+
+test('fetchDetailsAndPush reports a single oversized session without sending it and imports the rest', async () => {
+    const { api } = loadTestApi();
+    const bodies = [];
+    const bridge = { request: async (path, options = {}) => { bodies.push(options.body); return okImport(1); } };
+    const coordinator = makePushCoordinator(api, bridge, { importBatchMaxItems: 100, importBatchMaxBodyBytes: 200 });
+    const result = await coordinator.fetchDetailsAndPush([{ id: 'small1' }, { id: 'huge', title: 'x'.repeat(400) }, { id: 'small2' }]);
+    assert.deepEqual(plain(result.failed.map(f => ({ id: f.id, stage: f.stage }))), [{ id: 'huge', stage: 'oversized' }]);
+    assert.ok(bodies.every(body => !body.includes('"huge"')), 'the oversized session must never be sent');
+    const sent = bodies.map(body => JSON.parse(body).sessions.map(s => s.id));
+    assert.deepEqual(sent.flat(), ['small1', 'small2'], 'remaining sessions must be sent');
+    assert.equal(bodies.length, sent.length, 'request count equals the number of non-oversized batches');
+    assert.deepEqual(plain(result.sessions.map(s => s.id)), ['small1', 'small2']);
+    assert.equal(result.imported, bodies.length);
+});
+
+test('fetchDetailsAndPush stops between batches and keeps the first accepted batch', async () => {
+    const { api } = loadTestApi();
+    let coordinator;
+    let requests = 0;
+    let stopCalls = 0;
+    // The first batch's response is fully delivered; stop() lands while its body is being read,
+    // which is the last hook before the loop's between-batch stopped check.
+    const bridge = {
+        request: async () => {
+            requests++;
+            return {
+                ok: true, status: 200, text: async () => '{}',
+                json: async () => { stopCalls++; coordinator.stop(); return { imported: 1, skipped: 0 }; }
+            };
+        }
+    };
+    coordinator = makePushCoordinator(api, bridge);
+    const result = await coordinator.fetchDetailsAndPush([{ id: 's1' }, { id: 's2' }]);
+    assert.equal(result.state, 'stopped');
+    assert.deepEqual(plain(result.sessions.map(s => s.id)), ['s1']);
+    assert.equal(result.imported, 1);
+    assert.equal(requests, 1, 'only the first batch may reach the bridge');
+    assert.equal(stopCalls, 1);
+});
+
+// ===== Persistent retry queue (audit #27): failed sessions must survive the cursor and a page refresh =====
+
+const RETRY_KEY = 'sync_retry_queue_v1:deepseek';
+
+// Incremental deepseek adapter whose list page is served by `pages` and whose detail fetch fails for ids in `failing`.
+const makeRetryAdapter = (api, pages, failing = new Set()) => ({
+    platform: 'deepseek', needsToken: false,
+    fetchSessionPage: async () => pages.shift() || { data: { biz_data: { chat_sessions: [], has_more: false } } },
+    _extractSessionsPage: api.DeepSeekAdapter.prototype._extractSessionsPage,
+    fetchConversation: async id => {
+        if (failing.has(id)) throw new Error(`detail boom ${id}`);
+        return { id, messages: [{ role: 'user', content: 'hello' }] };
+    }
+});
+const page = (sessions, hasMore = false) => ({ data: { biz_data: { chat_sessions: sessions, has_more: hasMore } } });
+const makeRetryBridge = (cursorRef, bodies) => ({
+    checkServer: async () => ({ state: 'connected', url: 'http://bridge' }),
+    request: async (path, options = {}) => {
+        if (path.includes('sync-status')) return { ok: true, status: 200, json: async () => ({ last_updated_at: cursorRef.value }), text: async () => '{}' };
+        bodies.push(options.body);
+        return okImport(JSON.parse(options.body).sessions.length);
+    }
+});
+const quietUi = { setStatus() {}, setProgress() {}, setSyncing() {} };
+
+test('SyncRetryStore keeps list-level metadata only, truncates messages, counts attempts, and removes ids', () => {
+    const { api } = loadTestApi();
+    const storage = new Map();
+    const store = new api.SyncRetryStore('deepseek', (key, fallback) => storage.has(key) ? storage.get(key) : fallback, (key, value) => storage.set(key, value));
+    assert.deepEqual(plain(store.load()), {}, 'an empty store loads as an empty entries object');
+    assert.deepEqual(plain(store.sessions()), []);
+
+    const session = { id: 'a', updated_at: 120, title: 'A', _conversation: { messages: [{ content: 'secret body' }] } };
+    store.upsert(session, 'detail', 'x'.repeat(700));
+    const saved = storage.get(RETRY_KEY);
+    assert.equal(saved.version, 1);
+    const entry = saved.entries.a;
+    assert.equal(entry.id, 'a');
+    assert.equal(entry.updated_at, 120);
+    assert.equal(entry.stage, 'detail');
+    assert.equal(entry.attempts, 1);
+    assert.equal(entry.message.length, 500, 'error message must be truncated to 500 chars');
+    assert.deepEqual(plain(entry.session), { id: 'a', updated_at: 120, title: 'A' }, 'the conversation body must never be persisted');
+    assert.equal(JSON.stringify(saved).includes('secret body'), false);
+
+    store.upsert({ id: 'a', updated_at: 120 }, 'import', 'again');
+    assert.equal(storage.get(RETRY_KEY).entries.a.attempts, 2, 'attempts increments on repeated failures');
+    assert.equal(storage.get(RETRY_KEY).entries.a.stage, 'import', 'the latest stage wins');
+
+    store.upsert({ id: 'b', updated_at: 5 }, 'detail', 'b failed');
+    assert.deepEqual(plain(store.sessions().map(s => s.id).sort()), ['a', 'b']);
+    store.remove(['a', 'missing']);
+    assert.deepEqual(plain(Object.keys(storage.get(RETRY_KEY).entries)), ['b'], 'remove persists immediately');
+});
+
+test('SyncRetryStore falls back to an empty retry queue when the stored value is corrupt', () => {
+    const { api } = loadTestApi();
+    const storage = new Map();
+    const getValue = (key, fallback) => storage.has(key) ? storage.get(key) : fallback;
+    const setValue = (key, value) => storage.set(key, value);
+    for (const corrupt of ['garbage', 42, null, { version: 2, entries: { a: {} } }, { version: 1, entries: 'nope' }, { version: 1 }, [1, 2]]) {
+        storage.set(RETRY_KEY, corrupt);
+        const store = new api.SyncRetryStore('deepseek', getValue, setValue);
+        assert.deepEqual(plain(store.load()), {}, `corrupt value ${JSON.stringify(corrupt)} must load as empty`);
+        assert.deepEqual(plain(store.sessions()), []);
+    }
+    const store = new api.SyncRetryStore('deepseek', getValue, setValue);
+    store.upsert({ id: 'a', updated_at: 1 }, 'detail', 'boom');
+    assert.deepEqual(Object.keys(storage.get(RETRY_KEY).entries), ['a'], 'a corrupt value is replaced by a fresh v1 queue on the next write');
+    assert.equal(storage.get(RETRY_KEY).version, 1);
+});
+
+test('retry queue persists a detail failure to GM storage and a reloaded coordinator still selects it past the cursor', async () => {
+    const { api, values: storage } = loadTestApi();
+    const bodies = [];
+    const cursor = { value: 100 };
+    const failing = new Set(['failed-a']);
+    const first = new api.SyncCoordinator({
+        adapter: makeRetryAdapter(api, [page([{ id: 'ok-b', updated_at: 150 }, { id: 'failed-a', updated_at: 120 }])], failing),
+        bridgeClient: makeRetryBridge(cursor, bodies), ui: quietUi, detailConcurrency: 1, detailDelayMs: 0
+    });
+    const result = await first.sync(false);
+    assert.equal(result.imported, 1);
+    assert.deepEqual(plain(result.failed.map(f => ({ id: f.id, stage: f.stage }))), [{ id: 'failed-a', stage: 'detail' }]);
+    assert.deepEqual(JSON.parse(bodies[0]).sessions.map(s => s.id), ['ok-b']);
+
+    const saved = storage.get(RETRY_KEY);
+    assert.equal(saved?.version, 1, 'the retry queue must be persisted via the default GM storage');
+    assert.equal(saved.entries['failed-a'].attempts, 1);
+    assert.equal(saved.entries['failed-a'].stage, 'detail');
+    assert.deepEqual(plain(saved.entries['failed-a'].session), { id: 'failed-a', updated_at: 120 });
+    assert.equal(Object.keys(saved.entries).length, 1, 'the successful session must not be queued');
+
+    // Page refresh: a brand-new coordinator over the same GM storage; the server cursor advanced to B (200 > 120),
+    // so the list page no longer surfaces A.
+    const reloaded = new api.SyncCoordinator({
+        adapter: makeRetryAdapter(api, [page([{ id: 'ok-b', updated_at: 150 }])], failing),
+        bridgeClient: makeRetryBridge(cursor, bodies), ui: quietUi, detailConcurrency: 1, detailDelayMs: 0
+    });
+    const retried = await reloaded.selectSessions('200');
+    assert.deepEqual(plain(retried.map(item => item.id)), ['failed-a']);
+    assert.equal(storage.get(RETRY_KEY).entries['failed-a'].attempts, 1);
+});
+
+test('cursor advances past failures yet later syncs keep retrying the queued session until the server accepts it', async () => {
+    const { api, values: storage } = loadTestApi();
+    const bodies = [];
+    const cursor = { value: 100 };
+    const failing = new Set(['failed-a']);
+    const pages = [page([{ id: 'ok-b', updated_at: 150 }, { id: 'failed-a', updated_at: 120 }])];
+    const make = () => new api.SyncCoordinator({
+        adapter: makeRetryAdapter(api, pages, failing),
+        bridgeClient: makeRetryBridge(cursor, bodies), ui: quietUi, detailConcurrency: 1, detailDelayMs: 0
+    });
+    await make().sync(false);
+    assert.deepEqual(Object.keys(storage.get(RETRY_KEY).entries), ['failed-a']);
+
+    // Round 2: backend cursor moved to B; the list page is empty beyond the cursor, so the queued A is the only
+    // candidate. It fails again -> attempts 2. A retry-only round must NOT surface as a sync error (before the
+    // queue existed the session was silently dropped, so an error every round would be a new regression).
+    cursor.value = 150;
+    pages.push(page([{ id: 'ok-b', updated_at: 150 }]));
+    const statuses = [];
+    const second = await new api.SyncCoordinator({
+        adapter: makeRetryAdapter(api, pages, failing),
+        bridgeClient: makeRetryBridge(cursor, bodies), ui: { setStatus: text => statuses.push(text), setProgress() {}, setSyncing() {} },
+        detailConcurrency: 1, detailDelayMs: 0
+    }).sync(false);
+    assert.notEqual(second.state, 'error', 'a round consisting only of queued retries must not be reported as an error');
+    assert.equal(second.imported, 0);
+    assert.deepEqual(plain(second.failed.map(f => ({ id: f.id, stage: f.stage }))), [{ id: 'failed-a', stage: 'detail' }]);
+    assert.equal(storage.get(RETRY_KEY).entries['failed-a'].attempts, 2);
+    assert.equal(bodies.length, 1, 'nothing new to push in round 2');
+    assert.ok(statuses.includes('⚠️ 1 个历史失败会话仍未同步'), `status must warn about the still-failing queued session, got: ${JSON.stringify(statuses)}`);
+
+    // Round 3: A recovers; it is pushed and removed from the queue.
+    failing.clear();
+    pages.push(page([{ id: 'ok-b', updated_at: 150 }]));
+    const third = await make().sync(false);
+    assert.equal(third.imported, 1);
+    assert.deepEqual(JSON.parse(bodies[1]).sessions.map(s => s.id), ['failed-a']);
+    assert.deepEqual(plain(storage.get(RETRY_KEY).entries), {}, 'an accepted session leaves the retry queue');
+
+    // Round 4: nothing pending anymore.
+    pages.push(page([{ id: 'ok-b', updated_at: 150 }]));
+    const fourth = await make().sync(false);
+    assert.equal(fourth.imported, 0);
+    assert.equal(bodies.length, 2);
+});
+
+test('retry queue records import-stage batch failures, queues oversized sessions under their own stage, and removes accepted or skipped ones', async () => {
+    const { api, values: storage } = loadTestApi();
+    let requests = 0;
+    const bridge = {
+        request: async (path, options = {}) => {
+            requests++;
+            const ids = JSON.parse(options.body).sessions.map(s => s.id);
+            if (ids.includes('http-fail')) return { ok: false, status: 500, json: async () => ({}), text: async () => 'server exploded ' + 'y'.repeat(600) };
+            if (ids.includes('skipped-only')) return okImport(0, 1);
+            return okImport(ids.length);
+        }
+    };
+    const coordinator = makePushCoordinator(api, bridge, { importBatchMaxItems: 1, importBatchMaxBodyBytes: 200 });
+    // Pre-seed the queue so the successful/skipped sessions prove removal.
+    coordinator.retryStore.upsert({ id: 'ok', updated_at: 1 }, 'detail', 'earlier');
+    coordinator.retryStore.upsert({ id: 'skipped-only', updated_at: 1 }, 'import', 'earlier');
+    const result = await coordinator.fetchDetailsAndPush([
+        { id: 'ok', updated_at: 1 }, { id: 'http-fail', updated_at: 2 }, { id: 'skipped-only', updated_at: 3 }, { id: 'huge', title: 'x'.repeat(400) }
+    ]);
+    assert.equal(requests, 3, 'the oversized session is never sent');
+    assert.deepEqual(plain(result.failed.map(f => ({ id: f.id, stage: f.stage }))).sort((a, b) => a.id.localeCompare(b.id)), [
+        { id: 'http-fail', stage: 'import' }, { id: 'huge', stage: 'oversized' }
+    ]);
+    const entries = storage.get(RETRY_KEY).entries;
+    assert.deepEqual(Object.keys(entries).sort(), ['http-fail', 'huge'], 'the HTTP-failed and the oversized session are queued; accepted/skipped are removed');
+    assert.equal(entries.huge.stage, 'oversized', 'spec 5.2: an oversized session leaves a persistent trace in the retry queue');
+    assert.equal(entries.huge.attempts, 1);
+    assert.equal(entries['http-fail'].stage, 'import');
+    assert.equal(entries['http-fail'].attempts, 1);
+    assert.equal(entries['http-fail'].message.length, 500);
+    assert.match(entries['http-fail'].message, /500/);
+    assert.deepEqual(plain(entries['http-fail'].session), { id: 'http-fail', updated_at: 2 }, 'the fetched conversation must not be persisted');
+});
+
+test('selectSessions merges retry entries with normal candidates, dedupes by id, and prefers the fresher list metadata', async () => {
+    const { api } = loadTestApi();
+    const storage = new Map();
+    const getValue = (key, fallback) => storage.has(key) ? storage.get(key) : fallback;
+    const setValue = (key, value) => storage.set(key, value);
+    const store = new api.SyncRetryStore('deepseek', getValue, setValue);
+    store.upsert({ id: 'dup', updated_at: 120, title: 'stale' }, 'detail', 'boom');
+    store.upsert({ id: 'only-retry', updated_at: 50 }, 'import', 'boom');
+
+    const coordinator = new api.SyncCoordinator({
+        adapter: makeRetryAdapter(api, [page([{ id: 'dup', updated_at: 300, title: 'fresh' }, { id: 'new', updated_at: 250 }])]),
+        bridgeClient: {}, ui: quietUi, getValue, setValue
+    });
+    const selected = await coordinator.selectSessions('200');
+    assert.deepEqual(plain(selected.map(s => s.id)), ['dup', 'new', 'only-retry'], 'normal candidates first, then queued sessions not already present');
+    assert.equal(selected[0].title, 'fresh', 'the normal candidate keeps its newer list metadata');
+    assert.equal(selected.filter(s => s.id === 'dup').length, 1);
+
+    // The full (no cursor) path merges too and stays idempotent.
+    const full = new api.SyncCoordinator({
+        adapter: { platform: 'deepseek', fetchAllSessions: async () => [{ id: 'dup', updated_at: 300, title: 'fresh' }] },
+        bridgeClient: {}, ui: quietUi, getValue, setValue
+    });
+    assert.deepEqual(plain((await full.selectSessions(null)).map(s => s.id)), ['dup', 'only-retry']);
+});
+
+test('platform retry isolation: a deepseek retry queue never leaks into a kimi coordinator and vice versa', async () => {
+    const { api, values: storage } = loadTestApi();
+    const kimiKey = 'sync_retry_queue_v1:kimi';
+    const cursor = { value: 100 };
+    const bodies = [];
+    const failing = new Set(['failed-a']);
+    const deepseek = new api.SyncCoordinator({
+        adapter: makeRetryAdapter(api, [page([{ id: 'failed-a', updated_at: 120 }, { id: 'ok-b', updated_at: 150 }])], failing),
+        bridgeClient: makeRetryBridge(cursor, bodies), ui: quietUi, detailConcurrency: 1, detailDelayMs: 0
+    });
+    await deepseek.sync(false);
+    assert.deepEqual(Object.keys(storage.get(RETRY_KEY).entries), ['failed-a']);
+    assert.equal(storage.has(kimiKey), false, 'a deepseek failure must not create a kimi queue');
+
+    const kimi = new api.SyncCoordinator({
+        adapter: { platform: 'kimi', fetchAllSessions: async () => [{ id: 'kimi-1' }] },
+        bridgeClient: makeRetryBridge(cursor, bodies), ui: quietUi
+    });
+    assert.deepEqual(plain((await kimi.selectSessions('200')).map(s => s.id)), ['kimi-1'], 'kimi selection ignores the deepseek queue');
+    assert.equal(storage.has(kimiKey), false);
+
+    kimi.retryStore.upsert({ id: 'kimi-failed' }, 'detail', 'boom');
+    assert.deepEqual(Object.keys(storage.get(kimiKey).entries), ['kimi-failed']);
+    assert.deepEqual(Object.keys(storage.get(RETRY_KEY).entries), ['failed-a'], 'the deepseek queue is untouched by kimi writes');
+    assert.deepEqual(plain((await deepseek.selectSessions('200')).map(s => s.id)), ['failed-a'], 'deepseek selection ignores the kimi queue');
+});
+
+test('fetchDetailsAndPush still throws when every fresh (non-queued) candidate fails to fetch details', async () => {
+    const { api } = loadTestApi();
+    const cursor = { value: 100 };
+    const bodies = [];
+    const coordinator = new api.SyncCoordinator({
+        adapter: makeRetryAdapter(api, [page([{ id: 'failed-a', updated_at: 120 }])], new Set(['failed-a'])),
+        bridgeClient: makeRetryBridge(cursor, bodies), ui: quietUi, detailConcurrency: 1, detailDelayMs: 0
+    });
+    const result = await coordinator.sync(false);
+    assert.equal(result.state, 'error', 'a fresh candidate failing completely keeps the pre-existing error result');
+    assert.match(String(result.error?.message), /detail boom failed-a/);
+    await assert.rejects(() => coordinator.fetchDetailsAndPush([{ id: 'failed-a', updated_at: 120 }]), /detail boom failed-a/,
+        'direct fetchDetailsAndPush calls have no retry ids and keep throwing');
+});
+
+test('a queued session that turns out oversized is kept under stage oversized, excluded from the next selection, and self-heals once it fits', async () => {
+    const { api, values: storage } = loadTestApi();
+    const bodies = [];
+    const bridge = { request: async (path, options = {}) => { bodies.push(options.body); return okImport(1); } };
+    const coordinator = makePushCoordinator(api, bridge, { importBatchMaxItems: 100, importBatchMaxBodyBytes: 200 });
+    coordinator.adapter.fetchAllSessions = async () => [];
+    // It failed at the import stage earlier (e.g. a 500) and was queued; now its detail fetch succeeds but it is too big.
+    coordinator.retryStore.upsert({ id: 'huge', title: 'x'.repeat(400) }, 'import', 'earlier');
+    coordinator.retryStore.upsert({ id: 'other', updated_at: 1 }, 'detail', 'earlier');
+    const result = await coordinator.fetchDetailsAndPush([{ id: 'small' }, { id: 'huge', title: 'x'.repeat(400) }]);
+    assert.deepEqual(plain(result.failed.map(f => ({ id: f.id, stage: f.stage }))), [{ id: 'huge', stage: 'oversized' }]);
+    assert.ok(bodies.every(body => !body.includes('"huge"')), 'the oversized session must never be sent');
+    const entries = storage.get(RETRY_KEY).entries;
+    assert.deepEqual(Object.keys(entries).sort(), ['huge', 'other'], 'spec 5.2: the oversized session stays queued as a persistent trace; unrelated entries stay');
+    assert.equal(entries.huge.stage, 'oversized');
+    assert.equal(entries.huge.attempts, 2, 'the earlier import failure plus this oversized round');
+    assert.deepEqual(plain(coordinator.retryStore.retryable().map(s => s.id)), ['other'], 'retryable() filters out oversized entries');
+
+    // Next round: the oversized entry is not a candidate, so no detail fetch is wasted on it every round.
+    const next = await coordinator.selectSessions(null);
+    assert.deepEqual(plain(next.map(s => s.id)), ['other'], 'oversized queue entries must not be merged into the candidates');
+
+    // Self-heal: it reappears as a fresh candidate that now fits -> imported normally and removed from the queue.
+    const healed = await coordinator.fetchDetailsAndPush([{ id: 'huge', title: 'small now' }]);
+    assert.deepEqual(plain(healed.sessions.map(s => s.id)), ['huge']);
+    assert.deepEqual(Object.keys(storage.get(RETRY_KEY).entries), ['other'], 'an accepted session leaves the queue whatever its previous stage');
+});
+
+test('stop() during a detail fetch neither queues the aborted session nor reports it as a detail failure', async () => {
+    const { api, values: storage } = loadTestApi();
+    let coordinator;
+    let detailCalls = 0;
+    const adapter = {
+        platform: 'deepseek', needsToken: false,
+        fetchConversation: async () => { detailCalls++; coordinator.stop(); throw new Error('Aborted'); }
+    };
+    coordinator = new api.SyncCoordinator({
+        adapter, bridgeClient: { request: async () => okImport(1) }, ui: quietUi, detailConcurrency: 1, detailDelayMs: 0
+    });
+    const result = await coordinator.fetchDetailsAndPush([{ id: 's1' }, { id: 's2' }]);
+    assert.equal(result.state, 'stopped');
+    assert.equal(detailCalls, 1, 'no retry attempt and no second session after stop');
+    assert.deepEqual(plain(result.sessions), []);
+    assert.equal(storage.has(RETRY_KEY) ? Object.keys(storage.get(RETRY_KEY).entries).length : 0, 0,
+        'a user stop must not be persisted as a detail failure');
+});
+
+// ===== Batch review fixes: stop must not lose selected sessions, poison sessions must not sink whole batches =====
+
+test('stop() thrown as AbortError from the second batch queues every unpushed session so the advanced cursor cannot hide them', async () => {
+    const { api, values: storage } = loadTestApi();
+    let coordinator;
+    let requests = 0;
+    const bridge = {
+        request: async () => {
+            requests++;
+            if (requests === 2) {
+                // The user hits stop while the second request is in flight: the bridge surfaces the abort.
+                coordinator.stop();
+                throw new DOMException('aborted', 'AbortError');
+            }
+            return okImport(1);
+        }
+    };
+    coordinator = makePushCoordinator(api, bridge);
+    const result = await coordinator.fetchDetailsAndPush([
+        { id: 'newest', updated_at: 300 }, { id: 'mid', updated_at: 250 }, { id: 'old', updated_at: 200 }
+    ]);
+    assert.equal(result.state, 'stopped');
+    assert.equal(requests, 2, 'no further batch may be sent after stop');
+    assert.deepEqual(plain(result.sessions.map(s => s.id)), ['newest'], 'only the batch the server accepted counts as synced');
+    assert.equal(result.imported, 1);
+    // The server cursor now sits at 300; mid/old are below it and would never be selected again without the queue.
+    const entries = storage.get(RETRY_KEY)?.entries || {};
+    assert.deepEqual(Object.keys(entries).sort(), ['mid', 'old'], 'the aborted batch and every batch after it must be queued');
+    assert.ok(Object.values(entries).every(entry => entry.stage === 'import'), 'queued under the import stage');
+    assert.deepEqual(plain(entries.mid.session), { id: 'mid', updated_at: 250 }, 'only list-level metadata is persisted');
+    assert.deepEqual(plain(entries.old.session), { id: 'old', updated_at: 200 });
+});
+
+test('stop() landing between batches queues the sessions that were never pushed', async () => {
+    const { api, values: storage } = loadTestApi();
+    let coordinator;
+    let requests = 0;
+    const bridge = {
+        request: async () => {
+            requests++;
+            return {
+                ok: true, status: 200, text: async () => '{}',
+                json: async () => { coordinator.stop(); return { imported: 1, skipped: 0 }; }
+            };
+        }
+    };
+    coordinator = makePushCoordinator(api, bridge);
+    const result = await coordinator.fetchDetailsAndPush([{ id: 's1', updated_at: 3 }, { id: 's2', updated_at: 2 }, { id: 's3', updated_at: 1 }]);
+    assert.equal(result.state, 'stopped');
+    assert.equal(requests, 1, 'only the first batch may reach the bridge');
+    assert.deepEqual(plain(result.sessions.map(s => s.id)), ['s1']);
+    const entries = storage.get(RETRY_KEY)?.entries || {};
+    assert.deepEqual(Object.keys(entries).sort(), ['s2', 's3'], 'both unpushed sessions must be queued');
+    assert.ok(Object.values(entries).every(entry => entry.stage === 'import'));
+});
+
+test('a poison session from the retry queue is pushed alone so the other queued session still succeeds and dequeues', async () => {
+    const { api, values: storage } = loadTestApi();
+    const bodies = [];
+    const bridge = {
+        request: async (path, options = {}) => {
+            bodies.push(options.body);
+            if (options.body.includes('"poison"')) {
+                return { ok: false, status: 400, json: async () => ({}), text: async () => 'platform session id is empty' };
+            }
+            return okImport(JSON.parse(options.body).sessions.length);
+        }
+    };
+    const coordinator = makePushCoordinator(api, bridge, { importBatchMaxItems: 100, importBatchMaxBodyBytes: 4096 });
+    coordinator.adapter.fetchAllSessions = async () => [];
+    coordinator.retryStore.upsert({ id: 'poison', updated_at: 1 }, 'import', 'earlier');
+    coordinator.retryStore.upsert({ id: 'good', updated_at: 2 }, 'import', 'earlier');
+
+    const selected = await coordinator.selectSessions(null);
+    assert.deepEqual(plain(selected.map(s => s.id)).sort(), ['good', 'poison'], 'fixture: both come from the queue, no fresh candidates');
+    const result = await coordinator.fetchDetailsAndPush(selected);
+
+    assert.equal(bodies.length, 2, 'queued sessions must be pushed one per request');
+    assert.ok(bodies.every(body => JSON.parse(body).sessions.length === 1));
+    assert.deepEqual(plain(result.sessions.map(s => s.id)), ['good'], 'the good queued session must not be sunk by the poison one');
+    assert.deepEqual(plain(result.failed.map(f => ({ id: f.id, stage: f.stage }))), [{ id: 'poison', stage: 'import' }]);
+    const entries = storage.get(RETRY_KEY).entries;
+    assert.deepEqual(Object.keys(entries), ['poison'], 'good leaves the queue, poison stays');
+    assert.equal(entries.poison.attempts, 2);
+    assert.match(entries.poison.message, /400/);
+});
+
+test('fresh candidates still share batches while queued retries are isolated one per request', async () => {
+    const { api } = loadTestApi();
+    const bodies = [];
+    const bridge = { request: async (path, options = {}) => { bodies.push(JSON.parse(options.body).sessions.map(s => s.id)); return okImport(1); } };
+    const coordinator = makePushCoordinator(api, bridge, { importBatchMaxItems: 100, importBatchMaxBodyBytes: 4096 });
+    coordinator.adapter.fetchAllSessions = async () => [{ id: 'f1', updated_at: 9 }, { id: 'f2', updated_at: 8 }];
+    coordinator.retryStore.upsert({ id: 'r1', updated_at: 1 }, 'import', 'earlier');
+    coordinator.retryStore.upsert({ id: 'r2', updated_at: 2 }, 'detail', 'earlier');
+    const selected = await coordinator.selectSessions(null);
+    const result = await coordinator.fetchDetailsAndPush(selected);
+    assert.deepEqual(plain(bodies), [['f1', 'f2'], ['r1'], ['r2']], 'fresh sessions batch together; each retry is its own batch');
+    assert.deepEqual(plain(result.sessions.map(s => s.id)), ['f1', 'f2', 'r1', 'r2']);
+});
+
+// ===== Batch review fix: buildImportBatches must size batches in O(n), not re-serialize the batch per session =====
+
+test('estimateImportBodyBytes equals the encoded envelope byte-for-byte for fixed and pseudo-random sessions', () => {
+    const { api } = loadTestApi();
+    assert.equal(typeof api.estimateImportBodyBytes, 'function', 'the linear byte estimator must be exposed for equivalence testing');
+    const cjkPlatform = '平台\u{1F600}';
+    const fixtures = [
+        ['p', []],
+        ['p', [{ id: 'a' }]],
+        [cjkPlatform, [{ id: 'a', title: '你好' }, { id: 'b', title: '\u{1F600}'.repeat(3), nested: { list: [1, 'x', null, true] } }]],
+        [undefined, [{ id: 'a' }, { id: 'b' }]],
+        ['k', [{ id: 'q', text: 'quote " backslash \\ newline \n tab \t nul \0 ctrl \x1f bom \uFEFF' }, undefined, { id: 'u', u: undefined, f() {}, d: new Date(0) }]],
+    ];
+    for (const [platform, sessions] of fixtures) {
+        assert.equal(api.estimateImportBodyBytes(platform, sessions), encodedImportBytes(platform, sessions), `fixture ${JSON.stringify(platform)} / ${sessions.length} sessions`);
+    }
+
+    // Deterministic pseudo-random sessions mixing 1/2/3/4-byte UTF-8 code points and JSON-escaped characters.
+    let seed = 20260908;
+    const rand = n => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
+    const alphabet = ['a', 'Z', '"', '\\', '\n', 'é', '中', '文', '\u{1F600}', '\u{1F4A9}', ' ', '', ' '];
+    const randomText = () => Array.from({ length: rand(40) }, () => alphabet[rand(alphabet.length)]).join('');
+    for (let round = 0; round < 25; round++) {
+        const platform = randomText();
+        const sessions = Array.from({ length: rand(12) }, (_, index) => ({
+            id: `s${index}`, title: randomText(), updated_at: rand(100000), tags: [randomText(), rand(3)], _conversation: { messages: [{ content: randomText() }] }
+        }));
+        assert.equal(api.estimateImportBodyBytes(platform, sessions), encodedImportBytes(platform, sessions), `random round ${round}`);
+        const maxBodyBytes = 120 + rand(400);
+        const { batches, oversized } = api.buildImportBatches(platform, sessions, { maxItems: 100, maxBodyBytes });
+        assert.deepEqual(plain([...batches.flat(), ...oversized].map(s => s.id).sort()), plain(sessions.map(s => s.id).sort()), 'no session may be lost');
+        for (const [index, batch] of batches.entries()) {
+            assert.ok(encodedImportBytes(platform, batch) <= maxBodyBytes, `round ${round} batch ${index} must fit`);
+            assert.equal(api.estimateImportBodyBytes(platform, batch), encodedImportBytes(platform, batch));
+            // Greedy tightness: the batch was closed only because the next batch's first session could not be appended.
+            if (index + 1 < batches.length) {
+                assert.ok(encodedImportBytes(platform, [...batch, batches[index + 1][0]]) > maxBodyBytes, `round ${round} batch ${index} closed too early`);
+            }
+        }
+        for (const session of oversized) assert.ok(encodedImportBytes(platform, [session]) > maxBodyBytes);
+    }
+});

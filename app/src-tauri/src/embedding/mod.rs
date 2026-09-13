@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{
     error::{AppError, Result},
@@ -9,6 +8,7 @@ use crate::{
 };
 
 pub mod bge;
+pub mod cancellation;
 mod http;
 pub mod local;
 // The deterministic mock backend is a test fixture only: since the silent
@@ -17,6 +17,7 @@ pub mod local;
 mod mock;
 
 pub use bge::LocalBgeBackend;
+pub use cancellation::{CancellationSource, CancellationToken};
 pub use http::HttpEmbeddingBackend;
 pub use local::LocalHarrierBackend;
 #[cfg(test)]
@@ -37,13 +38,30 @@ pub trait EmbeddingBackend: Send + Sync {
     fn is_ready(&self) -> bool {
         true
     }
+    /// Best-effort background warm-up: pre-loads heavy local resources so the
+    /// first embed/search does not pay a load stall. The default is a no-op
+    /// for backends with nothing to pre-load (HTTP) or that already load
+    /// lazily on first use.
+    async fn warm_up(&self) -> Result<()> {
+        Ok(())
+    }
     fn runtime_device(&self) -> Option<String> {
         None
     }
     fn runtime_dtype(&self) -> Option<String> {
         None
     }
-    async fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
+    /// Embeds documents for the background index. `cancellation` is the
+    /// caller's token for this unit of work; backends must abort with
+    /// `AppError::Cancelled` once it reports cancelled and must not consult
+    /// any other cancellation state.
+    async fn embed_documents(
+        &self,
+        texts: &[String],
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Vec<Vec<f32>>>;
+    /// Embeds interactive search queries. Never subject to background
+    /// cancellation.
     async fn embed_queries(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
     async fn healthcheck(&self) -> Result<EmbeddingHealth>;
 }
@@ -52,7 +70,7 @@ pub struct EmbeddingManager {
     data_dir: PathBuf,
     settings: SemanticSearchSettings,
     active: Arc<dyn EmbeddingBackend>,
-    cancel_flag: Arc<AtomicBool>,
+    cancellation: CancellationSource,
 }
 
 impl EmbeddingManager {
@@ -66,7 +84,7 @@ impl EmbeddingManager {
             data_dir,
             settings,
             active,
-            cancel_flag: Arc::new(AtomicBool::new(false)),
+            cancellation: CancellationSource::new(),
         }
     }
 
@@ -74,13 +92,13 @@ impl EmbeddingManager {
         data_dir: PathBuf,
         settings: SemanticSearchSettings,
     ) -> Result<Self> {
-        let cancel_flag = Arc::new(AtomicBool::new(false));
-        let active = build_backend(&data_dir, &settings, cancel_flag.clone()).await?;
+        let cancellation = CancellationSource::new();
+        let active = build_backend(&data_dir, &settings, cancellation.clone()).await?;
         Ok(Self {
             data_dir,
             settings,
             active,
-            cancel_flag,
+            cancellation,
         })
     }
 
@@ -100,16 +118,22 @@ impl EmbeddingManager {
         self.active.identity()
     }
 
-    pub fn cancel_flag(&self) -> Arc<AtomicBool> {
-        self.cancel_flag.clone()
+    /// Shared cancellation source, for local backends that check cancellation
+    /// during model download / load outside of an `embed_documents` call.
+    pub fn cancellation_source(&self) -> CancellationSource {
+        self.cancellation.clone()
     }
 
+    /// Token for a new unit of background work (index drain). Cancelled only
+    /// by a `request_cancel()` that happens after it was issued.
+    pub fn background_token(&self) -> CancellationToken {
+        self.cancellation.begin_work()
+    }
+
+    /// Cancels every background token issued so far. Work started afterwards
+    /// is unaffected; there is deliberately no way to "clear" a cancellation.
     pub fn request_cancel(&self) {
-        self.cancel_flag.store(true, Ordering::SeqCst);
-    }
-
-    pub fn clear_cancel(&self) {
-        self.cancel_flag.store(false, Ordering::SeqCst);
+        self.cancellation.cancel_current();
     }
 
     pub async fn healthcheck(&self) -> EmbeddingHealth {
@@ -165,7 +189,7 @@ pub fn local_model_files_present(model_dir: &Path) -> bool {
 pub async fn build_backend(
     data_dir: &Path,
     settings: &SemanticSearchSettings,
-    cancel_flag: Arc<AtomicBool>,
+    cancellation: CancellationSource,
 ) -> Result<Arc<dyn EmbeddingBackend>> {
     match settings.backend {
         EmbeddingBackendKind::Local => {
@@ -181,7 +205,7 @@ pub async fn build_backend(
                         settings.local.model.clone(),
                         model_dir,
                         &settings.local,
-                        cancel_flag,
+                        cancellation,
                     )
                     .await?,
                 ))
@@ -196,7 +220,7 @@ pub async fn build_backend(
                         settings.local.model.clone(),
                         model_dir,
                         &settings.local,
-                        cancel_flag,
+                        cancellation,
                     )
                     .await?,
                 ))
@@ -255,7 +279,6 @@ pub fn ensure_dimensions(vectors: &[Vec<f32>], expected: usize) -> Result<()> {
 mod tests {
     use super::*;
     use crate::models::{LocalEmbeddingSettings, SemanticSearchSettings};
-    use std::sync::atomic::AtomicBool;
 
     fn temp_dir(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -287,7 +310,7 @@ mod tests {
         std::fs::write(&blocker, b"x").unwrap();
         let settings = local_settings(&blocker);
 
-        let result = build_backend(&dir, &settings, Arc::new(AtomicBool::new(false))).await;
+        let result = build_backend(&dir, &settings, CancellationSource::new()).await;
 
         // The previous behavior silently fell back to a mock 640-dim backend;
         // the failure must now propagate so no fake vectors enter the index.
@@ -304,12 +327,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let settings = local_settings(&dir);
-        let cancel = Arc::new(AtomicBool::new(false));
         let backend = LocalHarrierBackend::open(
             settings.local.model.clone(),
             dir.clone(),
             &settings.local,
-            cancel,
+            CancellationSource::new(),
         )
         .await
         .unwrap();

@@ -6,13 +6,14 @@ use futures::StreamExt;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use tokenizers::Tokenizer;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
 use super::local::DownloadProgressCallback;
-use super::{BackendIdentity, EmbeddingBackend, ensure_dimensions};
+use super::{
+    BackendIdentity, CancellationSource, CancellationToken, EmbeddingBackend, ensure_dimensions,
+};
 use crate::{
     error::{AppError, Result},
     models::{
@@ -41,7 +42,9 @@ pub struct LocalBgeBackend {
     state: Arc<std::sync::Mutex<Option<LoadedModel>>>,
     runtime_device: Arc<std::sync::Mutex<String>>,
     runtime_dtype: Arc<std::sync::Mutex<String>>,
-    cancel_flag: Arc<AtomicBool>,
+    /// Shared cancellation source; model download takes a token per attempt
+    /// so a cancel only aborts downloads already in flight.
+    cancellation: CancellationSource,
 }
 
 struct LoadedModel {
@@ -50,6 +53,10 @@ struct LoadedModel {
     device: Device,
     device_label: String,
     dtype_label: String,
+    // Resolved once at load time: every batch needs the `[SEP]` id for
+    // truncation, and a tokenizer without the token must fail at load rather
+    // than on the first inference.
+    sep_token_id: u32,
 }
 
 async fn run_model_task<T, F>(task: F) -> Result<T>
@@ -67,7 +74,7 @@ impl LocalBgeBackend {
         model_id: String,
         model_dir: PathBuf,
         settings: &LocalEmbeddingSettings,
-        cancel_flag: Arc<AtomicBool>,
+        cancellation: CancellationSource,
     ) -> Result<Self> {
         tokio::fs::create_dir_all(&model_dir)
             .await
@@ -83,7 +90,7 @@ impl LocalBgeBackend {
             state: Arc::new(std::sync::Mutex::new(None)),
             runtime_device: Arc::new(std::sync::Mutex::new("unloaded".into())),
             runtime_dtype: Arc::new(std::sync::Mutex::new("unloaded".into())),
-            cancel_flag,
+            cancellation,
         })
     }
 
@@ -131,11 +138,14 @@ impl LocalBgeBackend {
             }
             return Ok(());
         }
+        // Take the token at download start: a cancel issued before this call
+        // does not affect it, one issued during the download aborts it.
+        let cancellation = self.cancellation.token();
         download_model(
             &self.model_id,
             &self.model_dir,
             on_progress,
-            Some(self.cancel_flag.clone()),
+            Some(&cancellation),
         )
         .await
     }
@@ -203,18 +213,23 @@ impl LocalBgeBackend {
         Ok(())
     }
 
-    async fn embed(&self, texts: &[String], is_query: bool) -> Result<Vec<Vec<f32>>> {
+    async fn embed(
+        &self,
+        texts: &[String],
+        is_query: bool,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
-        if self.cancel_flag.load(Ordering::SeqCst) {
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
             return Err(AppError::Cancelled("本地编码已取消".into()));
         }
         self.ensure_loaded().await?;
         let dimensions = self.dimensions;
         let state = self.state.clone();
         let texts = texts.to_vec();
-        let cancel_flag = self.cancel_flag.clone();
+        let cancellation = cancellation.cloned();
         run_model_task(move || {
             let mut guard = state
                 .lock()
@@ -222,7 +237,7 @@ impl LocalBgeBackend {
             let loaded = guard
                 .as_mut()
                 .ok_or_else(|| AppError::Configuration("local model not loaded".into()))?;
-            embed_texts(loaded, &texts, is_query, dimensions, &cancel_flag)
+            embed_texts(loaded, &texts, is_query, dimensions, cancellation.as_ref())
         })
         .await
     }
@@ -287,6 +302,12 @@ impl EmbeddingBackend for LocalBgeBackend {
         model_files_present(&self.model_dir) && self.is_loaded()
     }
 
+    async fn warm_up(&self) -> Result<()> {
+        // ensure_loaded is idempotent and serialized by load_gate, so a
+        // background warm-up can safely race the first embed request.
+        self.ensure_loaded().await
+    }
+
     fn runtime_device(&self) -> Option<String> {
         Some(self.runtime_device_label())
     }
@@ -295,12 +316,17 @@ impl EmbeddingBackend for LocalBgeBackend {
         Some(self.runtime_dtype_label())
     }
 
-    async fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        self.embed(texts, false).await
+    async fn embed_documents(
+        &self,
+        texts: &[String],
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Vec<Vec<f32>>> {
+        self.embed(texts, false, cancellation).await
     }
 
     async fn embed_queries(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        self.embed(texts, true).await
+        // Interactive queries are never gated by background cancellation.
+        self.embed(texts, true, None).await
     }
 
     async fn healthcheck(&self) -> Result<EmbeddingHealth> {
@@ -343,12 +369,12 @@ async fn download_model(
     model_id: &str,
     model_dir: &Path,
     on_progress: Option<DownloadProgressCallback>,
-    cancel_flag: Option<Arc<AtomicBool>>,
+    cancellation: Option<&CancellationToken>,
 ) -> Result<()> {
     tokio::fs::create_dir_all(model_dir)
         .await
         .map_err(|error| AppError::Configuration(error.to_string()))?;
-    check_cancelled(cancel_flag.as_ref(), "模型下载已取消")?;
+    check_cancelled(cancellation, "模型下载已取消")?;
 
     if let Some(on_progress) = &on_progress {
         on_progress(ModelDownloadProgress {
@@ -371,7 +397,7 @@ async fn download_model(
     let file_count = MODEL_FILES.len();
 
     for (file_index, file) in MODEL_FILES.iter().enumerate() {
-        check_cancelled(cancel_flag.as_ref(), "模型下载已取消")?;
+        check_cancelled(cancellation, "模型下载已取消")?;
         let url = format!("https://huggingface.co/{model_id}/resolve/main/{file}");
         let response =
             client.get(&url).send().await.map_err(|error| {
@@ -393,7 +419,7 @@ async fn download_model(
         let mut downloaded_bytes = 0u64;
 
         while let Some(chunk) = stream.next().await {
-            if let Err(error) = check_cancelled(cancel_flag.as_ref(), "模型下载已取消") {
+            if let Err(error) = check_cancelled(cancellation, "模型下载已取消") {
                 drop(output);
                 let _ = tokio::fs::remove_file(&temporary).await;
                 return Err(error);
@@ -433,7 +459,7 @@ async fn download_model(
             .await
             .map_err(|error| AppError::Configuration(error.to_string()))?;
         drop(output);
-        check_cancelled(cancel_flag.as_ref(), "模型下载已取消")?;
+        check_cancelled(cancellation, "模型下载已取消")?;
         if destination.exists() {
             let _ = tokio::fs::remove_file(&destination).await;
         }
@@ -457,8 +483,8 @@ async fn download_model(
     Ok(())
 }
 
-fn check_cancelled(cancel_flag: Option<&Arc<AtomicBool>>, message: &str) -> Result<()> {
-    if cancel_flag.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+fn check_cancelled(cancellation: Option<&CancellationToken>, message: &str) -> Result<()> {
+    if cancellation.is_some_and(CancellationToken::is_cancelled) {
         Err(AppError::Cancelled(message.into()))
     } else {
         Ok(())
@@ -506,6 +532,9 @@ fn load_model(
         .map_err(|error| AppError::Configuration(format!("invalid bert config: {error}")))?;
     let tokenizer = Tokenizer::from_file(model_dir.join("tokenizer.json"))
         .map_err(|error| AppError::Configuration(format!("tokenizer load failed: {error}")))?;
+    let sep_token_id = tokenizer
+        .token_to_id("[SEP]")
+        .ok_or_else(|| AppError::Configuration("tokenizer is missing [SEP] token".into()))?;
 
     let mut candidates = Vec::new();
     match preferred_device {
@@ -551,6 +580,7 @@ fn load_model(
                         device: device.clone(),
                         device_label: device_label.into(),
                         dtype_label: dtype_label.into(),
+                        sep_token_id,
                     };
                     if let Err(error) = warmup_model(&mut loaded, config.hidden_size) {
                         last_error = Some(error);
@@ -604,8 +634,7 @@ fn try_load(
 }
 
 fn warmup_model(loaded: &mut LoadedModel, dimensions: usize) -> Result<()> {
-    let dummy_cancel = AtomicBool::new(false);
-    let vectors = embed_texts(loaded, &["warmup".into()], false, dimensions, &dummy_cancel)?;
+    let vectors = embed_texts(loaded, &["warmup".into()], false, dimensions, None)?;
     if vectors.len() != 1 || vectors[0].len() != dimensions {
         return Err(AppError::Configuration(
             "bge warmup returned unexpected shape".into(),
@@ -633,14 +662,14 @@ fn embed_texts(
     texts: &[String],
     is_query: bool,
     dimensions: usize,
-    cancel_flag: &AtomicBool,
+    cancellation: Option<&CancellationToken>,
 ) -> Result<Vec<Vec<f32>>> {
     if texts.is_empty() {
         return Ok(Vec::new());
     }
     let mut all_vectors = Vec::with_capacity(texts.len());
     for chunk in texts.chunks(sub_batch_size(loaded)) {
-        if cancel_flag.load(Ordering::SeqCst) {
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
             return Err(AppError::Cancelled("本地编码已取消".into()));
         }
         let batch_vectors = embed_single_batch(loaded, chunk, is_query, dimensions)?;
@@ -666,6 +695,8 @@ fn embed_single_batch(
         })
         .collect::<Vec<_>>();
 
+    let sep_id = loaded.sep_token_id;
+
     let mut encodings = Vec::with_capacity(prepared.len());
     let mut max_len = 1usize;
     for text in &prepared {
@@ -673,15 +704,13 @@ fn embed_single_batch(
             .tokenizer
             .encode(text.as_str(), true)
             .map_err(|error| AppError::Configuration(format!("tokenize failed: {error}")))?;
-        let mut ids = encoding.get_ids().to_vec();
+        let ids = encoding.get_ids().to_vec();
         if ids.is_empty() {
             return Err(AppError::Configuration(
                 "tokenizer produced empty input".into(),
             ));
         }
-        if ids.len() > MAX_SEQUENCE_LEN {
-            ids.truncate(MAX_SEQUENCE_LEN);
-        }
+        let ids = truncate_with_sep(ids, MAX_SEQUENCE_LEN, sep_id);
         max_len = max_len.max(ids.len());
         encodings.push(ids);
     }
@@ -754,6 +783,19 @@ fn candle_err(error: candle_core::Error) -> AppError {
     AppError::Configuration(error.to_string())
 }
 
+/// Truncate a token id sequence to `max_len` while keeping the trailing
+/// `[SEP]` marker so the encoder still sees a well-formed `[CLS] ... [SEP]`
+/// input. Sequences within the limit are returned unchanged.
+fn truncate_with_sep(mut ids: Vec<u32>, max_len: usize, sep_id: u32) -> Vec<u32> {
+    if ids.len() > max_len {
+        ids.truncate(max_len);
+        if let Some(last) = ids.last_mut() {
+            *last = sep_id;
+        }
+    }
+    ids
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -778,7 +820,7 @@ mod tests {
             "fixture/bge-model".into(),
             dir.clone(),
             &LocalEmbeddingSettings::default(),
-            Arc::new(AtomicBool::new(false)),
+            CancellationSource::new(),
         )
         .await
         .unwrap();
@@ -807,7 +849,7 @@ mod tests {
             "fixture/bge-model".into(),
             model_dir.clone(),
             &LocalEmbeddingSettings::default(),
-            Arc::new(AtomicBool::new(false)),
+            CancellationSource::new(),
         )
         .await
         .unwrap();
@@ -855,7 +897,7 @@ mod tests {
             "fixture/bge-m3".into(),
             dir.clone(),
             &LocalEmbeddingSettings::default(),
-            Arc::new(AtomicBool::new(false)),
+            CancellationSource::new(),
         )
         .await;
 
@@ -898,15 +940,18 @@ mod tests {
             "BAAI/bge-small-zh-v1.5".into(),
             model_dir,
             &settings,
-            Arc::new(AtomicBool::new(false)),
+            CancellationSource::new(),
         )
         .await
         .expect("open bge backend");
         let vectors = backend
-            .embed_documents(&[
-                "这是一段用于中文语义搜索的测试消息".into(),
-                "Rust Candle GPU embedding".into(),
-            ])
+            .embed_documents(
+                &[
+                    "这是一段用于中文语义搜索的测试消息".into(),
+                    "Rust Candle GPU embedding".into(),
+                ],
+                None,
+            )
             .await
             .expect("embed bge documents");
         assert_eq!(vectors.len(), 2);
@@ -915,5 +960,42 @@ mod tests {
             let norm = vector.iter().map(|value| value * value).sum::<f32>().sqrt();
             assert!((norm - 1.0).abs() < 5e-2, "unexpected norm {norm}");
         }
+    }
+
+    #[test]
+    fn truncation_preserves_cls_and_sep_at_the_limit() {
+        let ids = vec![101, 10, 11, 12, 13, 102];
+        assert_eq!(truncate_with_sep(ids, 4, 102), vec![101, 10, 11, 102]);
+    }
+
+    #[test]
+    fn truncation_does_not_change_short_input() {
+        let ids = vec![101, 10, 102];
+        assert_eq!(truncate_with_sep(ids.clone(), 4, 102), ids);
+    }
+
+    #[test]
+    fn truncation_does_not_change_input_exactly_at_limit() {
+        let ids = vec![101, 10, 11, 102];
+        assert_eq!(truncate_with_sep(ids.clone(), 4, 102), ids);
+    }
+
+    #[test]
+    fn truncation_of_oversized_input_keeps_length_cls_and_sep() {
+        let cls_id = 101u32;
+        let sep_id = 102u32;
+        let mut ids = vec![cls_id];
+        ids.extend((1000..1000 + 2 * MAX_SEQUENCE_LEN as u32).collect::<Vec<u32>>());
+        ids.push(sep_id);
+
+        let truncated = truncate_with_sep(ids, MAX_SEQUENCE_LEN, sep_id);
+        assert_eq!(truncated.len(), MAX_SEQUENCE_LEN);
+        assert_eq!(truncated.first(), Some(&cls_id));
+        assert_eq!(truncated.last(), Some(&sep_id));
+        assert_eq!(truncated[1], 1000);
+        assert_eq!(
+            truncated[MAX_SEQUENCE_LEN - 2],
+            1000 + MAX_SEQUENCE_LEN as u32 - 3
+        );
     }
 }

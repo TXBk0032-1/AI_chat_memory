@@ -9,6 +9,10 @@ use tokio::sync::{Mutex, Notify, RwLock};
 /// quarantined as 'error' and removed from the pending queue head.
 const MAX_CHUNK_FAILURES: usize = 3;
 
+/// Text embedded after a whole-batch failure to tell a poison chunk apart
+/// from a backend outage. It is never written to any table.
+const EMBEDDING_HEALTH_CANARY: &str = "semantic canary";
+
 use super::index;
 use crate::{
     embedding::EmbeddingManager,
@@ -132,14 +136,33 @@ impl SemanticEngine {
         Ok(())
     }
 
-    pub async fn clear_cancel_flag(&self) {
-        self.embeddings.read().await.clear_cancel();
+    /// Pre-loads the active local model in the background so the first embed
+    /// or search does not pay the weight-loading stall. Reads the current
+    /// manager at call time: if a reload swapped the backend first, this
+    /// warms the new backend instead. Failures are logged, never surfaced —
+    /// the regular lazy load path still covers them.
+    pub async fn warm_up_backend(&self) {
+        let manager = self.embeddings.read().await;
+        if !manager.settings().enabled || manager.is_ready() {
+            return;
+        }
+        let backend = manager.active();
+        drop(manager);
+        let started = std::time::Instant::now();
+        match backend.warm_up().await {
+            Ok(()) => tracing::info!(
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "semantic backend warmed up in background"
+            ),
+            Err(error) => tracing::warn!(
+                %error,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "semantic backend background warmup failed; falling back to lazy load"
+            ),
+        }
     }
 
     pub async fn request_session_index(&self, session_id: &str) -> Result<()> {
-        // A leftover latched cancel flag would make every embed abort
-        // immediately; new incremental work implies indexing is wanted again.
-        self.clear_cancel_flag().await;
         let identity = self.embeddings.read().await.identity();
         index::queue_session_chunks(&self.pool, session_id, &identity).await?;
         self.wake.notify_one();
@@ -156,7 +179,6 @@ impl SemanticEngine {
     ) -> Result<usize> {
         {
             let manager = self.embeddings.read().await;
-            manager.clear_cancel();
             crate::database::connection::ensure_embedding_vec_table(
                 &self.pool,
                 Some(manager.identity().dimensions),
@@ -379,20 +401,18 @@ impl SemanticEngine {
         &self,
         on_progress: Option<crate::embedding::local::DownloadProgressCallback>,
     ) -> Result<()> {
-        self.clear_cancel_flag().await;
-
         let settings = self.embeddings.read().await.settings().clone();
         if !matches!(settings.backend, crate::models::EmbeddingBackendKind::Local) {
             return Ok(());
         }
         let model_dir = crate::embedding::local_model_dir(&self.data_dir, &settings.local.model);
-        let cancel = self.embeddings.read().await.cancel_flag();
+        let cancellation = self.embeddings.read().await.cancellation_source();
         if crate::embedding::bge::is_bge_model(&settings.local.model) {
             let backend = crate::embedding::LocalBgeBackend::open(
                 settings.local.model.clone(),
                 model_dir,
                 &settings.local,
-                cancel,
+                cancellation,
             )
             .await?;
             backend
@@ -403,7 +423,7 @@ impl SemanticEngine {
                 settings.local.model.clone(),
                 model_dir,
                 &settings.local,
-                cancel,
+                cancellation,
             )
             .await?;
             backend
@@ -418,13 +438,13 @@ impl SemanticEngine {
     pub async fn import_local_model(&self, path: &Path) -> Result<()> {
         let mut settings = self.embeddings.read().await.settings().clone();
         let model_dir = crate::embedding::local_model_dir(&self.data_dir, &settings.local.model);
-        let cancel = self.embeddings.read().await.cancel_flag();
+        let cancellation = self.embeddings.read().await.cancellation_source();
         if crate::embedding::bge::is_bge_model(&settings.local.model) {
             let backend = crate::embedding::LocalBgeBackend::open(
                 settings.local.model.clone(),
                 model_dir,
                 &settings.local,
-                cancel,
+                cancellation,
             )
             .await?;
             backend.import_from_path(path).await?;
@@ -434,7 +454,7 @@ impl SemanticEngine {
                 settings.local.model.clone(),
                 model_dir,
                 &settings.local,
-                cancel,
+                cancellation,
             )
             .await?;
             backend.import_model_dir(path).await?;
@@ -632,9 +652,9 @@ impl SemanticEngine {
 
     /// Bumps the failure counter for each poison chunk and quarantines it as
     /// 'error' once the budget is exhausted, so the pending queue head can
-    /// move on. Chunks are only counted when a sibling in the same batch
-    /// succeeded — a whole-batch failure is a service-level outage and never
-    /// burns a chunk's budget.
+    /// move on. Chunks are only counted when the backend is known healthy —
+    /// a sibling in the same batch succeeded, or the health canary embedded
+    /// after a whole-batch failure. A backend outage never burns a budget.
     async fn record_chunk_failures(&self, failures: &[(i64, AppError)]) {
         for (chunk_id, error) in failures {
             let attempts = {
@@ -669,10 +689,37 @@ impl SemanticEngine {
         }
     }
 
+    /// True while `chunk_id` still holds an unexhausted failure budget, i.e.
+    /// it has failed at least once but has not been quarantined yet.
+    fn chunk_failure_is_active(&self, chunk_id: i64) -> bool {
+        self.chunk_failures.lock().unwrap().contains_key(&chunk_id)
+    }
+
+    /// Publishes the `cancelled` stage for a batch whose embed was aborted by
+    /// the user. Shared by the whole-batch path, the single-chunk probe loop
+    /// and the health canary so all three report the same event.
+    async fn publish_cancelled_progress(&self, pending_chunks: usize) {
+        self.publish_reindex_progress(
+            ReindexProgress {
+                stage: "cancelled".into(),
+                total_sessions: 0,
+                processed_sessions: 0,
+                total_chunks: 0,
+                ready_chunks: 0,
+                pending_chunks: pending_chunks as i64,
+                fraction: 0.0,
+                message: "索引编码已取消".into(),
+            },
+            None,
+        )
+        .await;
+    }
+
     async fn drain_pending_inner(&self) -> Result<()> {
-        // A previous user cancel latches the flag; a fresh drain means new
-        // work is expected, so clear the residue before consuming the queue.
-        self.clear_cancel_flag().await;
+        // One cancellation generation per drain: a cancel issued before this
+        // point does not touch this work, one issued during it aborts the
+        // current embed. Nothing needs to be "cleared" for the next drain.
+        let cancellation = self.embeddings.read().await.background_token();
         let generation = self.current_generation();
         'fetch: loop {
             if self.current_generation() != generation {
@@ -737,7 +784,10 @@ impl SemanticEngine {
                     .collect::<Vec<_>>();
                 let started = std::time::Instant::now();
                 let embed_started = std::time::Instant::now();
-                let (pending, vectors) = match backend.embed_documents(&texts).await {
+                let (pending, vectors) = match backend
+                    .embed_documents(&texts, Some(&cancellation))
+                    .await
+                {
                     Ok(vectors) => {
                         *self.last_error.write().await = None;
                         (pending, vectors)
@@ -752,20 +802,7 @@ impl SemanticEngine {
                         // the drain.
                         if matches!(error, AppError::Cancelled(_)) {
                             tracing::info!(%error, pending = pending.len(), "semantic embedding cancelled");
-                            self.publish_reindex_progress(
-                                ReindexProgress {
-                                    stage: "cancelled".into(),
-                                    total_sessions: 0,
-                                    processed_sessions: 0,
-                                    total_chunks: 0,
-                                    ready_chunks: 0,
-                                    pending_chunks: pending.len() as i64,
-                                    fraction: 0.0,
-                                    message: "索引编码已取消".into(),
-                                },
-                                None,
-                            )
-                            .await;
+                            self.publish_cancelled_progress(pending.len()).await;
                             break 'fetch;
                         }
                         // Probe the batch chunk-by-chunk: a single poison chunk
@@ -777,7 +814,10 @@ impl SemanticEngine {
                         let mut failures: Vec<(i64, AppError)> = Vec::new();
                         for item in &pending {
                             match backend
-                                .embed_documents(std::slice::from_ref(&item.text))
+                                .embed_documents(
+                                    std::slice::from_ref(&item.text),
+                                    Some(&cancellation),
+                                )
                                 .await
                             {
                                 Ok(mut vectors) if !vectors.is_empty() => {
@@ -792,12 +832,68 @@ impl SemanticEngine {
                                         ),
                                     ));
                                 }
-                                Err(single_error) => failures.push((item.id, single_error)),
+                                Err(single_error) => {
+                                    // A cancel is not a poison verdict. Stop the
+                                    // whole drain here: nothing is recorded
+                                    // against any chunk and the survivors
+                                    // collected so far are simply not stored —
+                                    // they remain pending and the next drain
+                                    // re-embeds them, which is cheaper than
+                                    // risking a wrong quarantine.
+                                    if matches!(single_error, AppError::Cancelled(_)) {
+                                        tracing::info!(%single_error, pending = pending.len(), "semantic embedding cancelled during single-chunk probe");
+                                        self.publish_cancelled_progress(pending.len()).await;
+                                        break 'fetch;
+                                    }
+                                    failures.push((item.id, single_error));
+                                }
                             }
                         }
                         if survivors.is_empty() {
-                            tracing::warn!(%error, pending = pending.len(), "semantic embedding failed for the whole batch; scheduling self retry");
-                            return Err(error);
+                            // Nothing in the batch embeds. A health canary
+                            // separates "every chunk here is poison" (backend
+                            // healthy, burn each chunk's budget) from a
+                            // backend outage (canary fails too, blame nobody).
+                            // The canary vector is discarded and never stored.
+                            let canary = [EMBEDDING_HEALTH_CANARY.to_owned()];
+                            match backend.embed_documents(&canary, Some(&cancellation)).await {
+                                Ok(vectors) if vectors.len() == 1 => {
+                                    self.record_chunk_failures(&failures).await;
+                                    if failures
+                                        .iter()
+                                        .any(|(id, _)| self.chunk_failure_is_active(*id))
+                                    {
+                                        tracing::warn!(%error, pending = pending.len(), "semantic embedding failed for the whole batch while backend is healthy; chunk failure recorded, scheduling self retry");
+                                        return Err(error);
+                                    }
+                                    // Every chunk in this batch has been
+                                    // quarantined: keep draining so the queue
+                                    // head is no longer blocked.
+                                    tracing::info!(
+                                        quarantined = failures.len(),
+                                        "whole poison batch quarantined; continuing drain"
+                                    );
+                                    continue;
+                                }
+                                Ok(_) => {
+                                    return Err(AppError::InvalidData(
+                                        "embedding canary returned no vector".into(),
+                                    ));
+                                }
+                                Err(AppError::Cancelled(cancel_error)) => {
+                                    // The user cancelled while the canary was in
+                                    // flight: not an outage, so do not hand off
+                                    // to the worker self-heal timer or surface
+                                    // the original batch error.
+                                    tracing::info!(%cancel_error, pending = pending.len(), "semantic embedding cancelled during health canary");
+                                    self.publish_cancelled_progress(pending.len()).await;
+                                    break 'fetch;
+                                }
+                                Err(canary_error) => {
+                                    tracing::warn!(%canary_error, %error, pending = pending.len(), "embedding canary failed; treating batch failure as backend outage, scheduling self retry");
+                                    return Err(error);
+                                }
+                            }
                         }
                         self.record_chunk_failures(&failures).await;
                         tracing::info!(
@@ -883,10 +979,10 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use sqlx::sqlite::SqlitePoolOptions;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use crate::{
-        embedding::{BackendIdentity, EmbeddingBackend},
+        embedding::{BackendIdentity, CancellationSource, CancellationToken, EmbeddingBackend},
         error::Result,
         models::{EmbeddingBackendKind, EmbeddingHealth, SemanticSearchSettings},
     };
@@ -906,7 +1002,11 @@ mod tests {
             }
         }
 
-        async fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        async fn embed_documents(
+            &self,
+            texts: &[String],
+            _cancellation: Option<&CancellationToken>,
+        ) -> Result<Vec<Vec<f32>>> {
             Ok(vec![vec![0.0; 8]; texts.len()])
         }
 
@@ -1048,7 +1148,11 @@ mod tests {
             }
         }
 
-        async fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        async fn embed_documents(
+            &self,
+            texts: &[String],
+            _cancellation: Option<&CancellationToken>,
+        ) -> Result<Vec<Vec<f32>>> {
             self.embed_calls.fetch_add(1, Ordering::SeqCst);
             Ok(vec![vec![0.0; 8]; texts.len()])
         }
@@ -1185,7 +1289,11 @@ mod tests {
             }
         }
 
-        async fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        async fn embed_documents(
+            &self,
+            texts: &[String],
+            _cancellation: Option<&CancellationToken>,
+        ) -> Result<Vec<Vec<f32>>> {
             self.embed_calls.fetch_add(1, Ordering::SeqCst);
             if texts.iter().any(|text| text.contains("poison")) {
                 return Err(AppError::Configuration("poison batch exploded".into()));
@@ -1299,37 +1407,35 @@ mod tests {
 
         // First drain: the batch containing the poison chunk fails, the probe
         // rescues both healthy chunks and burns the poison chunk's first
-        // failure credit. The trailing lone-poison re-fetch surfaces as Err
-        // (service-level) so the worker self-heal timer takes over.
+        // failure credit. The trailing lone-poison re-fetch fails again; the
+        // health canary succeeds, so a second credit is burned and the drain
+        // surfaces Err so the worker self-heal timer retries.
         engine.drain_pending().await.unwrap_err();
         assert_eq!(chunk_state(&pool, 2).await.0, "ready");
         assert_eq!(chunk_state(&pool, 3).await.0, "ready");
         assert_eq!(chunk_state(&pool, 1).await.0, "pending");
+        assert!(engine.chunk_failure_is_active(1));
 
-        // Second drain: the poison chunk is alone now, so its failure looks
-        // like a service-level outage and must NOT burn another credit.
-        engine.drain_pending().await.unwrap_err();
-        assert_eq!(chunk_state(&pool, 1).await.0, "pending");
-
-        // A healthy sibling re-arriving burns the remaining credits and then
-        // quarantines the poison chunk as 'error', unblocking the queue.
-        insert_drain_chunk(&pool, 4, "healthy text three").await;
-        engine.drain_pending().await.unwrap_err();
-        assert_eq!(chunk_state(&pool, 1).await.0, "pending");
-        assert_eq!(chunk_state(&pool, 4).await.0, "ready");
-
-        insert_drain_chunk(&pool, 5, "healthy text four").await;
+        // Second drain: the poison chunk is alone; the canary proves the
+        // backend is healthy, the last credit is burned and the chunk is
+        // quarantined as 'error'. The drain then continues, finds the queue
+        // empty and returns Ok — no healthy sibling is needed to unblock it.
         engine.drain_pending().await.unwrap();
         let (status, error) = chunk_state(&pool, 1).await;
         assert_eq!(status, "error");
         assert!(error.unwrap().contains("poison batch exploded"));
-        assert_eq!(chunk_state(&pool, 5).await.0, "ready");
+        assert!(!engine.chunk_failure_is_active(1));
+
+        // Later arrivals are indexed normally behind the quarantined chunk.
+        insert_drain_chunk(&pool, 4, "healthy text three").await;
+        engine.drain_pending().await.unwrap();
+        assert_eq!(chunk_state(&pool, 4).await.0, "ready");
     }
 
     #[tokio::test]
-    async fn cancel_flag_resets_for_incremental_and_drained_work() {
+    async fn lone_poison_chunk_is_quarantined_after_three_content_failures() {
         let pool = drain_test_pool().await;
-        insert_drain_chunk(&pool, 1, "text one").await;
+        insert_drain_chunk(&pool, 1, "poison text").await;
         let settings = SemanticSearchSettings {
             enabled: true,
             backend: EmbeddingBackendKind::Local,
@@ -1338,31 +1444,194 @@ mod tests {
         let manager = EmbeddingManager::from_backend_for_test(
             std::env::temp_dir(),
             settings,
-            Arc::new(LocalKindBackend {
+            Arc::new(PoisonBackend {
                 embed_calls: Arc::new(AtomicUsize::new(0)),
             }),
         );
         let engine = SemanticEngine::new(pool.clone(), std::env::temp_dir(), manager);
-        let flag_is_set = || async {
-            engine
-                .embeddings
-                .read()
-                .await
-                .cancel_flag()
-                .load(std::sync::atomic::Ordering::SeqCst)
-        };
 
-        engine.cancel_semantic_work().await.unwrap();
-        assert!(flag_is_set().await);
+        // The poison chunk is the only queue head. The batch and the probe both
+        // fail, but the canary embeds fine, so each drain burns one credit and
+        // hands off to the self-heal timer until the budget is exhausted.
+        engine.drain_pending().await.unwrap_err();
+        assert_eq!(chunk_state(&pool, 1).await.0, "pending");
+        assert!(engine.chunk_failure_is_active(1));
 
-        // Incremental import work implies indexing is wanted again.
-        engine.request_session_index("s1").await.unwrap();
-        assert!(!flag_is_set().await);
+        engine.drain_pending().await.unwrap_err();
+        assert_eq!(chunk_state(&pool, 1).await.0, "pending");
+        assert!(engine.chunk_failure_is_active(1));
 
-        // A fresh drain also clears any residue latched mid-cancel.
-        engine.cancel_semantic_work().await.unwrap();
+        // Third failure quarantines the chunk; the drain continues to an empty
+        // queue and returns Ok instead of Err.
         engine.drain_pending().await.unwrap();
-        assert!(!flag_is_set().await);
+        let (status, error) = chunk_state(&pool, 1).await;
+        assert_eq!(status, "error");
+        assert!(error.unwrap().contains("poison batch exploded"));
+        assert!(!engine.chunk_failure_is_active(1));
+    }
+
+    /// Fails every embedding request, including the health canary: a
+    /// service-level outage that must never blame a chunk.
+    struct OutageBackend;
+
+    #[async_trait]
+    impl EmbeddingBackend for OutageBackend {
+        fn identity(&self) -> BackendIdentity {
+            BackendIdentity {
+                backend: EmbeddingBackendKind::Local,
+                backend_id: "local".into(),
+                model_id: "test".into(),
+                dimensions: 8,
+            }
+        }
+
+        async fn embed_documents(
+            &self,
+            _texts: &[String],
+            _cancellation: Option<&CancellationToken>,
+        ) -> Result<Vec<Vec<f32>>> {
+            Err(AppError::Configuration("backend outage".into()))
+        }
+
+        async fn embed_queries(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            Ok(vec![vec![0.0; 8]; texts.len()])
+        }
+
+        async fn healthcheck(&self) -> Result<EmbeddingHealth> {
+            Ok(EmbeddingHealth {
+                ok: false,
+                backend: EmbeddingBackendKind::Local,
+                model_id: "test".into(),
+                dimensions: Some(8),
+                message: "outage".into(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn backend_outage_canary_does_not_consume_chunk_failure_budget() {
+        let pool = drain_test_pool().await;
+        insert_drain_chunk(&pool, 1, "healthy text one").await;
+        let settings = SemanticSearchSettings {
+            enabled: true,
+            backend: EmbeddingBackendKind::Local,
+            ..SemanticSearchSettings::default()
+        };
+        let manager = EmbeddingManager::from_backend_for_test(
+            std::env::temp_dir(),
+            settings,
+            Arc::new(OutageBackend),
+        );
+        let engine = SemanticEngine::new(pool.clone(), std::env::temp_dir(), manager);
+
+        // More drains than MAX_CHUNK_FAILURES: the canary fails too, so the
+        // chunk keeps its full budget and stays pending for the retry timer.
+        for _ in 0..MAX_CHUNK_FAILURES {
+            let error = engine.drain_pending().await.unwrap_err();
+            assert!(error.to_string().contains("backend outage"));
+            assert_eq!(chunk_state(&pool, 1).await.0, "pending");
+            assert!(!engine.chunk_failure_is_active(1));
+        }
+        assert!(engine.chunk_failures.lock().unwrap().is_empty());
+    }
+
+    /// Honors the caller-supplied cancellation token for document embedding
+    /// (like the real local backends) and counts query embeddings, which must
+    /// never be affected by background cancellation.
+    struct CancelAwareBackend {
+        embed_calls: Arc<AtomicUsize>,
+        query_calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl EmbeddingBackend for CancelAwareBackend {
+        fn identity(&self) -> BackendIdentity {
+            BackendIdentity {
+                backend: EmbeddingBackendKind::Local,
+                backend_id: "local".into(),
+                model_id: "test".into(),
+                dimensions: 8,
+            }
+        }
+
+        async fn embed_documents(
+            &self,
+            texts: &[String],
+            cancellation: Option<&CancellationToken>,
+        ) -> Result<Vec<Vec<f32>>> {
+            self.embed_calls.fetch_add(1, Ordering::SeqCst);
+            if cancellation.is_some_and(CancellationToken::is_cancelled) {
+                return Err(AppError::Cancelled("cancelled by test".into()));
+            }
+            Ok(vec![vec![0.0; 8]; texts.len()])
+        }
+
+        async fn embed_queries(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            self.query_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(vec![vec![0.0; 8]; texts.len()])
+        }
+
+        async fn healthcheck(&self) -> Result<EmbeddingHealth> {
+            Ok(EmbeddingHealth {
+                ok: true,
+                backend: EmbeddingBackendKind::Local,
+                model_id: "test".into(),
+                dimensions: Some(8),
+                message: "ok".into(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_background_generation_does_not_cancel_query_or_new_work() {
+        let pool = drain_test_pool().await;
+        insert_drain_chunk(&pool, 1, "text one").await;
+        let settings = SemanticSearchSettings {
+            enabled: true,
+            backend: EmbeddingBackendKind::Local,
+            ..SemanticSearchSettings::default()
+        };
+        let embed_calls = Arc::new(AtomicUsize::new(0));
+        let query_calls = Arc::new(AtomicUsize::new(0));
+        let manager = EmbeddingManager::from_backend_for_test(
+            std::env::temp_dir(),
+            settings,
+            Arc::new(CancelAwareBackend {
+                embed_calls: embed_calls.clone(),
+                query_calls: query_calls.clone(),
+            }),
+        );
+        let engine = SemanticEngine::new(pool.clone(), std::env::temp_dir(), manager);
+        let background_token = || async { engine.embeddings.read().await.background_token() };
+
+        // (a) Cancelling invalidates the token handed out before the cancel.
+        let old_token = background_token().await;
+        assert!(!old_token.is_cancelled());
+        engine.cancel_semantic_work().await.unwrap();
+        assert!(old_token.is_cancelled());
+
+        // (b) New incremental work gets a fresh, live token; nothing revives
+        // the old one.
+        engine.request_session_index("s1").await.unwrap();
+        let new_token = background_token().await;
+        assert!(
+            !new_token.is_cancelled(),
+            "work started after a cancel must not inherit the cancellation"
+        );
+        assert!(
+            old_token.is_cancelled(),
+            "starting new work must not revive cancelled work"
+        );
+
+        // (c) Interactive query embedding is never gated by background cancel,
+        // and a fresh drain embeds pending chunks with a live token.
+        engine.cancel_semantic_work().await.unwrap();
+        let vector = engine.embed_query("hello").await.unwrap();
+        assert!(vector.is_some(), "query embedding must not be cancelled");
+        assert_eq!(query_calls.load(Ordering::SeqCst), 1);
+
+        engine.drain_pending().await.unwrap();
+        assert_eq!(embed_calls.load(Ordering::SeqCst), 1);
         let identity = engine.embeddings.read().await.identity();
         assert_eq!(
             index::count_chunks(&pool, &identity, "ready")
@@ -1370,5 +1639,444 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    /// Simulates a user cancel that lands while a document embed is in
+    /// flight: the first `embed_documents` call cancels the current generation
+    /// through the manager's own `CancellationSource` (shared via `OnceLock`
+    /// because the backend is built before the manager) and then reports
+    /// `AppError::Cancelled`, exactly as the local backends do when they
+    /// observe a cancelled token mid-batch. Later calls honor the token.
+    struct InFlightCancelBackend {
+        embed_calls: Arc<AtomicUsize>,
+        source: Arc<std::sync::OnceLock<CancellationSource>>,
+    }
+
+    #[async_trait]
+    impl EmbeddingBackend for InFlightCancelBackend {
+        fn identity(&self) -> BackendIdentity {
+            BackendIdentity {
+                backend: EmbeddingBackendKind::Local,
+                backend_id: "local".into(),
+                model_id: "test".into(),
+                dimensions: 8,
+            }
+        }
+
+        async fn embed_documents(
+            &self,
+            texts: &[String],
+            cancellation: Option<&CancellationToken>,
+        ) -> Result<Vec<Vec<f32>>> {
+            let call = self.embed_calls.fetch_add(1, Ordering::SeqCst);
+            let token = cancellation.expect("drain must pass a background token");
+            if call == 0 {
+                assert!(
+                    !token.is_cancelled(),
+                    "token handed to the first embed must start live"
+                );
+                self.source
+                    .get()
+                    .expect("test must install the manager's cancellation source")
+                    .cancel_current();
+                assert!(
+                    token.is_cancelled(),
+                    "cancelling the current generation must invalidate the in-flight token"
+                );
+                return Err(AppError::Cancelled("cancelled mid-embed".into()));
+            }
+            if token.is_cancelled() {
+                return Err(AppError::Cancelled("cancelled by test".into()));
+            }
+            Ok(vec![vec![0.0; 8]; texts.len()])
+        }
+
+        async fn embed_queries(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            Ok(vec![vec![0.0; 8]; texts.len()])
+        }
+
+        async fn healthcheck(&self) -> Result<EmbeddingHealth> {
+            Ok(EmbeddingHealth {
+                ok: true,
+                backend: EmbeddingBackendKind::Local,
+                model_id: "test".into(),
+                dimensions: Some(8),
+                message: "ok".into(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn in_flight_cancel_stops_drain_and_keeps_chunk_pending() {
+        let pool = drain_test_pool().await;
+        insert_drain_chunk(&pool, 1, "text one").await;
+        let settings = SemanticSearchSettings {
+            enabled: true,
+            backend: EmbeddingBackendKind::Local,
+            ..SemanticSearchSettings::default()
+        };
+        let embed_calls = Arc::new(AtomicUsize::new(0));
+        let source_slot = Arc::new(std::sync::OnceLock::new());
+        let manager = EmbeddingManager::from_backend_for_test(
+            std::env::temp_dir(),
+            settings,
+            Arc::new(InFlightCancelBackend {
+                embed_calls: embed_calls.clone(),
+                source: source_slot.clone(),
+            }),
+        );
+        source_slot
+            .set(manager.cancellation_source())
+            .ok()
+            .expect("cancellation source installed once");
+        let engine = SemanticEngine::new(pool.clone(), std::env::temp_dir(), manager);
+
+        // First drain: the embed is cancelled mid-flight. The Cancelled branch
+        // breaks out of the fetch loop and returns Ok — no single-chunk probe,
+        // no poison accounting, chunk stays pending for the next drain.
+        engine.drain_pending().await.unwrap();
+        assert_eq!(
+            embed_calls.load(Ordering::SeqCst),
+            1,
+            "Cancelled must break the drain without probing or retrying"
+        );
+        assert_eq!(chunk_state(&pool, 1).await.0, "pending");
+        assert!(
+            engine.chunk_failures.lock().unwrap().is_empty(),
+            "a cancelled embed must not count against the chunk's poison budget"
+        );
+
+        // Second drain: a fresh generation token is live, so the chunk embeds.
+        engine.drain_pending().await.unwrap();
+        assert_eq!(embed_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(chunk_state(&pool, 1).await.0, "ready");
+    }
+
+    /// Fails every multi-text batch with an ordinary transient error so the
+    /// drain falls into the single-chunk probe loop, then cancels the current
+    /// generation from inside the second single-text probe and reports
+    /// `AppError::Cancelled`. Later calls honor the (now cancelled) token.
+    struct ProbeCancelBackend {
+        embed_calls: Arc<AtomicUsize>,
+        single_calls: Arc<AtomicUsize>,
+        source: Arc<std::sync::OnceLock<CancellationSource>>,
+    }
+
+    #[async_trait]
+    impl EmbeddingBackend for ProbeCancelBackend {
+        fn identity(&self) -> BackendIdentity {
+            BackendIdentity {
+                backend: EmbeddingBackendKind::Local,
+                backend_id: "local".into(),
+                model_id: "test".into(),
+                dimensions: 8,
+            }
+        }
+
+        async fn embed_documents(
+            &self,
+            texts: &[String],
+            cancellation: Option<&CancellationToken>,
+        ) -> Result<Vec<Vec<f32>>> {
+            self.embed_calls.fetch_add(1, Ordering::SeqCst);
+            let token = cancellation.expect("drain must pass a background token");
+            if token.is_cancelled() {
+                return Err(AppError::Cancelled("cancelled by test".into()));
+            }
+            if texts.len() > 1 {
+                return Err(AppError::Configuration("batch exploded".into()));
+            }
+            let single = self.single_calls.fetch_add(1, Ordering::SeqCst);
+            if single == 1 {
+                self.source
+                    .get()
+                    .expect("test must install the manager's cancellation source")
+                    .cancel_current();
+                return Err(AppError::Cancelled("cancelled mid-probe".into()));
+            }
+            Ok(vec![vec![0.0; 8]; texts.len()])
+        }
+
+        async fn embed_queries(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            Ok(vec![vec![0.0; 8]; texts.len()])
+        }
+
+        async fn healthcheck(&self) -> Result<EmbeddingHealth> {
+            Ok(EmbeddingHealth {
+                ok: true,
+                backend: EmbeddingBackendKind::Local,
+                model_id: "test".into(),
+                dimensions: Some(8),
+                message: "ok".into(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_during_probe_loop_does_not_burn_chunk_budget() {
+        let pool = drain_test_pool().await;
+        insert_drain_chunk(&pool, 1, "text one").await;
+        insert_drain_chunk(&pool, 2, "text two").await;
+        insert_drain_chunk(&pool, 3, "text three").await;
+        let settings = SemanticSearchSettings {
+            enabled: true,
+            backend: EmbeddingBackendKind::Local,
+            ..SemanticSearchSettings::default()
+        };
+        let embed_calls = Arc::new(AtomicUsize::new(0));
+        let single_calls = Arc::new(AtomicUsize::new(0));
+        let source_slot = Arc::new(std::sync::OnceLock::new());
+        let manager = EmbeddingManager::from_backend_for_test(
+            std::env::temp_dir(),
+            settings,
+            Arc::new(ProbeCancelBackend {
+                embed_calls: embed_calls.clone(),
+                single_calls: single_calls.clone(),
+                source: source_slot.clone(),
+            }),
+        );
+        source_slot
+            .set(manager.cancellation_source())
+            .ok()
+            .expect("cancellation source installed once");
+        let engine = SemanticEngine::new(pool.clone(), std::env::temp_dir(), manager);
+
+        // Batch fails (transient) -> probe: chunk 1 embeds, chunk 2 is
+        // cancelled mid-probe. A cancel is not a poison verdict: the drain
+        // must stop right there without probing chunk 3, without counting
+        // any chunk against its failure budget, and must return Ok.
+        engine
+            .drain_pending()
+            .await
+            .expect("user cancellation during the probe loop must not surface as a backend error");
+        assert_eq!(
+            single_calls.load(Ordering::SeqCst),
+            2,
+            "probe loop must stop at the cancelled chunk instead of probing the rest"
+        );
+        for chunk_id in 1..=3 {
+            let (status, error) = chunk_state(&pool, chunk_id).await;
+            assert_ne!(
+                status, "error",
+                "chunk {chunk_id} must not be quarantined by a cancel (error={error:?})"
+            );
+            assert!(
+                matches!(status.as_str(), "pending" | "ready"),
+                "chunk {chunk_id} has unexpected status {status}"
+            );
+            assert!(
+                !engine.chunk_failure_is_active(chunk_id),
+                "chunk {chunk_id} must not hold an active failure after a cancel"
+            );
+        }
+        assert!(
+            engine.chunk_failures.lock().unwrap().is_empty(),
+            "a cancelled probe must not count against any chunk's poison budget"
+        );
+    }
+
+    /// Fails every content text with an ordinary transient error and cancels
+    /// the current generation from inside the health-canary embed, reporting
+    /// `AppError::Cancelled` for it. Later calls honor the cancelled token.
+    struct CanaryCancelBackend {
+        canary_calls: Arc<AtomicUsize>,
+        source: Arc<std::sync::OnceLock<CancellationSource>>,
+    }
+
+    #[async_trait]
+    impl EmbeddingBackend for CanaryCancelBackend {
+        fn identity(&self) -> BackendIdentity {
+            BackendIdentity {
+                backend: EmbeddingBackendKind::Local,
+                backend_id: "local".into(),
+                model_id: "test".into(),
+                dimensions: 8,
+            }
+        }
+
+        async fn embed_documents(
+            &self,
+            texts: &[String],
+            cancellation: Option<&CancellationToken>,
+        ) -> Result<Vec<Vec<f32>>> {
+            let token = cancellation.expect("drain must pass a background token");
+            if token.is_cancelled() {
+                return Err(AppError::Cancelled("cancelled by test".into()));
+            }
+            if texts.len() == 1 && texts[0] == EMBEDDING_HEALTH_CANARY {
+                self.canary_calls.fetch_add(1, Ordering::SeqCst);
+                self.source
+                    .get()
+                    .expect("test must install the manager's cancellation source")
+                    .cancel_current();
+                return Err(AppError::Cancelled("cancelled mid-canary".into()));
+            }
+            Err(AppError::Configuration("content embed failed".into()))
+        }
+
+        async fn embed_queries(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            Ok(vec![vec![0.0; 8]; texts.len()])
+        }
+
+        async fn healthcheck(&self) -> Result<EmbeddingHealth> {
+            Ok(EmbeddingHealth {
+                ok: true,
+                backend: EmbeddingBackendKind::Local,
+                model_id: "test".into(),
+                dimensions: Some(8),
+                message: "ok".into(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_during_canary_breaks_instead_of_scheduling_retry() {
+        let pool = drain_test_pool().await;
+        insert_drain_chunk(&pool, 1, "text one").await;
+        let settings = SemanticSearchSettings {
+            enabled: true,
+            backend: EmbeddingBackendKind::Local,
+            ..SemanticSearchSettings::default()
+        };
+        let canary_calls = Arc::new(AtomicUsize::new(0));
+        let source_slot = Arc::new(std::sync::OnceLock::new());
+        let manager = EmbeddingManager::from_backend_for_test(
+            std::env::temp_dir(),
+            settings,
+            Arc::new(CanaryCancelBackend {
+                canary_calls: canary_calls.clone(),
+                source: source_slot.clone(),
+            }),
+        );
+        source_slot
+            .set(manager.cancellation_source())
+            .ok()
+            .expect("cancellation source installed once");
+        let engine = SemanticEngine::new(pool.clone(), std::env::temp_dir(), manager);
+
+        // Batch fails, probe fails, canary is cancelled. A cancelled canary is
+        // a user cancel, not an outage: the drain must return Ok (no 5s
+        // self-heal retry), leave the chunk pending and record no failure.
+        let result = engine.drain_pending().await;
+        assert!(
+            result.is_ok(),
+            "cancelled canary must break the drain, not schedule a retry: {result:?}"
+        );
+        assert_eq!(canary_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(chunk_state(&pool, 1).await.0, "pending");
+        assert!(
+            engine.chunk_failures.lock().unwrap().is_empty(),
+            "a cancelled canary must not count against the chunk's poison budget"
+        );
+        assert!(
+            engine.last_error.read().await.is_none(),
+            "a cancelled canary must not surface the original batch error as last_error"
+        );
+    }
+
+    /// Tracks warm_up calls and flips to ready after the first warm-up.
+    struct WarmTrackingBackend {
+        warmups: Arc<AtomicUsize>,
+        ready: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl EmbeddingBackend for WarmTrackingBackend {
+        fn identity(&self) -> BackendIdentity {
+            BackendIdentity {
+                backend: EmbeddingBackendKind::Local,
+                backend_id: "local".into(),
+                model_id: "test".into(),
+                dimensions: 8,
+            }
+        }
+
+        fn is_ready(&self) -> bool {
+            self.ready.load(Ordering::SeqCst)
+        }
+
+        async fn warm_up(&self) -> Result<()> {
+            self.warmups.fetch_add(1, Ordering::SeqCst);
+            self.ready.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn embed_documents(
+            &self,
+            texts: &[String],
+            _cancellation: Option<&CancellationToken>,
+        ) -> Result<Vec<Vec<f32>>> {
+            Ok(vec![vec![0.0; 8]; texts.len()])
+        }
+
+        async fn embed_queries(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+            Ok(vec![vec![0.0; 8]; texts.len()])
+        }
+
+        async fn healthcheck(&self) -> Result<EmbeddingHealth> {
+            Ok(EmbeddingHealth {
+                ok: true,
+                backend: EmbeddingBackendKind::Local,
+                model_id: "test".into(),
+                dimensions: Some(8),
+                message: "ok".into(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn warm_up_runs_once_until_backend_is_ready() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let warmups = Arc::new(AtomicUsize::new(0));
+        let ready = Arc::new(AtomicBool::new(false));
+        let manager = EmbeddingManager::from_backend_for_test(
+            std::env::temp_dir(),
+            SemanticSearchSettings {
+                enabled: true,
+                backend: EmbeddingBackendKind::Local,
+                ..SemanticSearchSettings::default()
+            },
+            Arc::new(WarmTrackingBackend {
+                warmups: warmups.clone(),
+                ready: ready.clone(),
+            }),
+        );
+        let engine = SemanticEngine::new(pool, std::env::temp_dir(), manager);
+
+        engine.warm_up_backend().await;
+        assert_eq!(warmups.load(Ordering::SeqCst), 1);
+        // Once the backend reports ready, repeated warm-ups are no-ops.
+        engine.warm_up_backend().await;
+        assert_eq!(warmups.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn warm_up_skips_when_semantic_disabled() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        let warmups = Arc::new(AtomicUsize::new(0));
+        let manager = EmbeddingManager::from_backend_for_test(
+            std::env::temp_dir(),
+            SemanticSearchSettings {
+                enabled: false,
+                backend: EmbeddingBackendKind::Local,
+                ..SemanticSearchSettings::default()
+            },
+            Arc::new(WarmTrackingBackend {
+                warmups: warmups.clone(),
+                ready: Arc::new(AtomicBool::new(false)),
+            }),
+        );
+        let engine = SemanticEngine::new(pool, std::env::temp_dir(), manager);
+
+        engine.warm_up_backend().await;
+        assert_eq!(warmups.load(Ordering::SeqCst), 0);
     }
 }

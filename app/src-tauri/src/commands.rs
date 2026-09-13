@@ -354,219 +354,14 @@ pub fn validate_file_path(
         }
     }
 
-    use std::path::Component;
-    let mut normalized = std::path::PathBuf::new();
-    for component in raw_path.components() {
-        match component {
-            Component::Prefix(prefix) => {
-                #[cfg(target_os = "windows")]
-                {
-                    if !matches!(prefix.kind(), std::path::Prefix::Disk(_)) {
-                        return Err("禁止使用网络共享、命名空间或非标准路径前缀".into());
-                    }
-                }
-                normalized.push(component);
-            }
-            Component::RootDir => normalized.push(component),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                return Err("路径包含非法目录遍历字符 (..)".into());
-            }
-            Component::Normal(c) => normalized.push(c),
-        }
-    }
-
-    if !normalized.is_absolute() {
-        return Err("路径必须为绝对路径".into());
-    }
-
-    let path_str_lower = normalized
-        .to_string_lossy()
-        .to_ascii_lowercase()
-        .replace('/', "\\");
-
-    let is_temp = [
-        std::env::var("TEMP").ok(),
-        std::env::var("TMP").ok(),
-        Some(std::env::temp_dir().to_string_lossy().into_owned()),
-    ]
-    .into_iter()
-    .flatten()
-    .any(|tmp| {
-        let tmp_lower = tmp.to_ascii_lowercase().replace('/', "\\");
-        !tmp_lower.is_empty() && path_str_lower.starts_with(&tmp_lower)
-    });
-
-    if !is_temp {
-        let forbidden_prefixes = [
-            "c:\\windows",
-            "c:\\program files",
-            "c:\\program files (x86)",
-            "c:\\programdata",
-        ];
-        for forbidden in forbidden_prefixes {
-            if path_str_lower.starts_with(forbidden) {
-                return Err(format!("禁止访问系统关键目录：{forbidden}"));
-            }
-        }
-
-        if let Ok(windir) = std::env::var("WINDIR") {
-            let windir_lower = windir.to_ascii_lowercase().replace('/', "\\");
-            if !windir_lower.is_empty() && path_str_lower.starts_with(&windir_lower) {
-                return Err("禁止访问系统 Windows 目录".into());
-            }
-        }
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            let appdata_lower = appdata.to_ascii_lowercase().replace('/', "\\");
-            if !appdata_lower.is_empty() && path_str_lower.starts_with(&appdata_lower) {
-                return Err("禁止访问用户 AppData 目录".into());
-            }
-        }
-        if let Ok(localappdata) = std::env::var("LOCALAPPDATA") {
-            let localappdata_lower = localappdata.to_ascii_lowercase().replace('/', "\\");
-            if !localappdata_lower.is_empty() && path_str_lower.starts_with(&localappdata_lower) {
-                return Err("禁止访问用户 LocalAppData 目录".into());
-            }
-        }
-
-        if let Ok(userprofile) = std::env::var("USERPROFILE") {
-            let userprofile_lower = userprofile.to_ascii_lowercase().replace('/', "\\");
-            if path_str_lower.starts_with("c:\\users\\")
-                && !path_str_lower.starts_with(&userprofile_lower)
-            {
-                return Err("禁止访问非当前登录用户的目录".into());
-            }
-
-            if path_str_lower.starts_with(&userprofile_lower) {
-                let rel = &path_str_lower[userprofile_lower.len()..];
-                let rel = rel.trim_start_matches('\\');
-                if let Some(first_seg) = rel.split('\\').next() {
-                    if first_seg.starts_with('.') {
-                        return Err(format!("禁止访问用户配置目录 ({first_seg})"));
-                    }
-                    if first_seg.eq_ignore_ascii_case("appdata") {
-                        return Err("禁止访问 AppData 目录".into());
-                    }
-                }
-            }
-        }
-
-        if path_str_lower.contains("\\startup") || path_str_lower.contains("\\start menu") {
-            return Err("禁止访问系统启动或开始菜单目录".into());
-        }
-    }
-
-    Ok(normalized)
+    crate::safe_path::validate_writable_destination(raw_path)
 }
 
 pub fn validate_directory_path(path_str: &str) -> Result<std::path::PathBuf, String> {
     if path_str.trim().is_empty() {
         return Err("目录路径不能为空".into());
     }
-    let raw_path = std::path::Path::new(path_str);
-    use std::path::Component;
-    let mut normalized = std::path::PathBuf::new();
-    for component in raw_path.components() {
-        match component {
-            Component::Prefix(prefix) => {
-                #[cfg(target_os = "windows")]
-                {
-                    if !matches!(prefix.kind(), std::path::Prefix::Disk(_)) {
-                        return Err("禁止使用网络共享、命名空间或非标准路径前缀".into());
-                    }
-                }
-                normalized.push(component);
-            }
-            Component::RootDir => normalized.push(component),
-            Component::CurDir => {}
-            Component::ParentDir => {
-                return Err("路径包含非法目录遍历字符 (..)".into());
-            }
-            Component::Normal(c) => normalized.push(c),
-        }
-    }
-
-    if !normalized.is_absolute() {
-        return Err("路径必须为绝对路径".into());
-    }
-
-    let path_str_lower = normalized
-        .to_string_lossy()
-        .to_ascii_lowercase()
-        .replace('/', "\\");
-
-    let is_temp = [
-        std::env::var("TEMP").ok(),
-        std::env::var("TMP").ok(),
-        Some(std::env::temp_dir().to_string_lossy().into_owned()),
-    ]
-    .into_iter()
-    .flatten()
-    .any(|tmp| {
-        let tmp_lower = tmp.to_ascii_lowercase().replace('/', "\\");
-        !tmp_lower.is_empty() && path_str_lower.starts_with(&tmp_lower)
-    });
-
-    if !is_temp {
-        let forbidden_prefixes = [
-            "c:\\windows",
-            "c:\\program files",
-            "c:\\program files (x86)",
-            "c:\\programdata",
-        ];
-        for forbidden in forbidden_prefixes {
-            if path_str_lower.starts_with(forbidden) {
-                return Err(format!("禁止访问系统关键目录：{forbidden}"));
-            }
-        }
-
-        if let Ok(windir) = std::env::var("WINDIR") {
-            let windir_lower = windir.to_ascii_lowercase().replace('/', "\\");
-            if !windir_lower.is_empty() && path_str_lower.starts_with(&windir_lower) {
-                return Err("禁止访问系统 Windows 目录".into());
-            }
-        }
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            let appdata_lower = appdata.to_ascii_lowercase().replace('/', "\\");
-            if !appdata_lower.is_empty() && path_str_lower.starts_with(&appdata_lower) {
-                return Err("禁止访问用户 AppData 目录".into());
-            }
-        }
-        if let Ok(localappdata) = std::env::var("LOCALAPPDATA") {
-            let localappdata_lower = localappdata.to_ascii_lowercase().replace('/', "\\");
-            if !localappdata_lower.is_empty() && path_str_lower.starts_with(&localappdata_lower) {
-                return Err("禁止访问用户 LocalAppData 目录".into());
-            }
-        }
-
-        if let Ok(userprofile) = std::env::var("USERPROFILE") {
-            let userprofile_lower = userprofile.to_ascii_lowercase().replace('/', "\\");
-            if path_str_lower.starts_with("c:\\users\\")
-                && !path_str_lower.starts_with(&userprofile_lower)
-            {
-                return Err("禁止访问非当前登录用户的目录".into());
-            }
-
-            if path_str_lower.starts_with(&userprofile_lower) {
-                let rel = &path_str_lower[userprofile_lower.len()..];
-                let rel = rel.trim_start_matches('\\');
-                if let Some(first_seg) = rel.split('\\').next() {
-                    if first_seg.starts_with('.') {
-                        return Err(format!("禁止访问用户配置目录 ({first_seg})"));
-                    }
-                    if first_seg.eq_ignore_ascii_case("appdata") {
-                        return Err("禁止访问 AppData 目录".into());
-                    }
-                }
-            }
-        }
-
-        if path_str_lower.contains("\\startup") || path_str_lower.contains("\\start menu") {
-            return Err("禁止访问系统启动或开始菜单目录".into());
-        }
-    }
-
-    Ok(normalized)
+    crate::safe_path::validate_writable_destination(std::path::Path::new(path_str))
 }
 
 #[tauri::command]
@@ -802,7 +597,40 @@ mod export_tests {
         std::fs::create_dir_all(&dir).unwrap();
         let safe = validate_directory_path(dir.to_string_lossy().as_ref())
             .expect("目录选择器给出的模型目录必须通过校验");
-        assert_eq!(safe, dir);
+        let canonical = std::fs::canonicalize(&dir).unwrap();
+        assert!(
+            crate::safe_path::path_is_within(&safe, &canonical)
+                && crate::safe_path::path_is_within(&canonical, &safe),
+            "{} != {}",
+            safe.display(),
+            canonical.display()
+        );
+        assert!(!safe.to_string_lossy().starts_with(r"\\?\"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn rejects_short_alias_into_protected_directories() {
+        if !std::path::Path::new(r"C:\PROGRA~1").exists() {
+            eprintln!("skip: C:\\PROGRA~1 alias is not available on this machine");
+            return;
+        }
+        assert!(validate_file_path(r"C:\PROGRA~1\acm-evil\test.md", &["md"]).is_err());
+        assert!(validate_directory_path(r"C:\PROGRA~1\acm-evil").is_err());
+    }
+
+    #[test]
+    fn returns_resolved_path_with_nonexistent_tail() {
+        let dir =
+            std::env::temp_dir().join(format!("ai-chat-memory-tail-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("missing").join("export.md");
+        let safe = validate_file_path(target.to_string_lossy().as_ref(), &["md"]).unwrap();
+        assert!(safe.ends_with(std::path::Path::new("missing/export.md")));
+        assert!(!safe.to_string_lossy().starts_with(r"\\?\"));
+        let canonical = std::fs::canonicalize(&dir).unwrap();
+        assert!(crate::safe_path::path_is_within(&safe, &canonical));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

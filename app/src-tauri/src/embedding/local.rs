@@ -4,11 +4,12 @@ use candle_nn::{Activation, Embedding, Linear, VarBuilder, linear_b as linear, o
 use hf_hub::api::tokio::{ApiBuilder, Progress};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use tokenizers::Tokenizer;
 use tokio::sync::Mutex;
 
-use super::{BackendIdentity, EmbeddingBackend, ensure_dimensions};
+use super::{
+    BackendIdentity, CancellationSource, CancellationToken, EmbeddingBackend, ensure_dimensions,
+};
 use crate::{
     error::{AppError, Result},
     models::{
@@ -41,7 +42,9 @@ pub struct LocalHarrierBackend {
     state: Arc<std::sync::Mutex<Option<LoadedModel>>>,
     runtime_device: Arc<std::sync::Mutex<String>>,
     runtime_dtype: Arc<std::sync::Mutex<String>>,
-    cancel_flag: Arc<AtomicBool>,
+    /// Shared cancellation source; model download takes a token per attempt
+    /// so a cancel only aborts downloads already in flight.
+    cancellation: CancellationSource,
 }
 
 struct LoadedModel {
@@ -61,7 +64,7 @@ impl LocalHarrierBackend {
         model_id: String,
         model_dir: PathBuf,
         settings: &LocalEmbeddingSettings,
-        cancel_flag: Arc<AtomicBool>,
+        cancellation: CancellationSource,
     ) -> Result<Self> {
         tokio::fs::create_dir_all(&model_dir)
             .await
@@ -77,7 +80,7 @@ impl LocalHarrierBackend {
             state: Arc::new(std::sync::Mutex::new(None)),
             runtime_device: Arc::new(std::sync::Mutex::new("unloaded".into())),
             runtime_dtype: Arc::new(std::sync::Mutex::new("unloaded".into())),
-            cancel_flag,
+            cancellation,
         })
     }
 
@@ -125,11 +128,14 @@ impl LocalHarrierBackend {
             }
             return Ok(());
         }
+        // Take the token at download start: a cancel issued before this call
+        // does not affect it, one issued during the download aborts it.
+        let cancellation = self.cancellation.token();
         download_model(
             &self.model_id,
             &self.model_dir,
             on_progress,
-            Some(self.cancel_flag.clone()),
+            Some(&cancellation),
         )
         .await
     }
@@ -207,11 +213,16 @@ impl LocalHarrierBackend {
         Ok(())
     }
 
-    async fn embed(&self, texts: &[String], is_query: bool) -> Result<Vec<Vec<f32>>> {
+    async fn embed(
+        &self,
+        texts: &[String],
+        is_query: bool,
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
-        if self.cancel_flag.load(Ordering::SeqCst) {
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
             return Err(AppError::Cancelled("本地编码已取消".into()));
         }
         self.ensure_loaded().await?;
@@ -246,12 +257,17 @@ impl EmbeddingBackend for LocalHarrierBackend {
         }
     }
 
-    async fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        self.embed(texts, false).await
+    async fn embed_documents(
+        &self,
+        texts: &[String],
+        cancellation: Option<&CancellationToken>,
+    ) -> Result<Vec<Vec<f32>>> {
+        self.embed(texts, false, cancellation).await
     }
 
     async fn embed_queries(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
-        self.embed(texts, true).await
+        // Interactive queries are never gated by background cancellation.
+        self.embed(texts, true, None).await
     }
 
     async fn healthcheck(&self) -> Result<EmbeddingHealth> {
@@ -308,7 +324,7 @@ async fn download_model(
     model_id: &str,
     model_dir: &Path,
     on_progress: Option<DownloadProgressCallback>,
-    cancel_flag: Option<Arc<AtomicBool>>,
+    cancellation: Option<&CancellationToken>,
 ) -> Result<()> {
     tokio::fs::create_dir_all(model_dir)
         .await
@@ -334,10 +350,7 @@ async fn download_model(
     let file_count = MODEL_FILES.len();
 
     for (file_index, file) in MODEL_FILES.iter().enumerate() {
-        if cancel_flag
-            .as_ref()
-            .is_some_and(|flag| flag.load(Ordering::SeqCst))
-        {
+        if cancellation.is_some_and(CancellationToken::is_cancelled) {
             return Err(AppError::Cancelled("模型下载已取消".into()));
         }
         if let Some(on_progress) = &on_progress {
@@ -365,10 +378,7 @@ async fn download_model(
             .download_with_progress(file, progress)
             .await
             .map_err(|error| {
-                if cancel_flag
-                    .as_ref()
-                    .is_some_and(|flag| flag.load(Ordering::SeqCst))
-                {
+                if cancellation.is_some_and(CancellationToken::is_cancelled) {
                     AppError::Cancelled("模型下载已取消".into())
                 } else {
                     AppError::Configuration(format!("download {file} failed: {error}"))
@@ -1551,17 +1561,20 @@ mod tests {
             "microsoft/harrier-oss-v1-270m".into(),
             model_dir,
             &settings,
-            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            CancellationSource::new(),
         )
         .await
         .expect("open local backend");
         let vectors = backend
-            .embed_documents(&[
-                "hello semantic search".into(),
-                "another chat about project planning and weekly goals".into(),
-                "short".into(),
-                "这是一条中文消息，用于验证批处理 padding 与 attention mask".into(),
-            ])
+            .embed_documents(
+                &[
+                    "hello semantic search".into(),
+                    "another chat about project planning and weekly goals".into(),
+                    "short".into(),
+                    "这是一条中文消息，用于验证批处理 padding 与 attention mask".into(),
+                ],
+                None,
+            )
             .await
             .expect("embed documents batch");
         assert_eq!(vectors.len(), 4);

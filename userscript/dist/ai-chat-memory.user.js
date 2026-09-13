@@ -39,7 +39,13 @@
         maxCompletionExchanges: 128,
         maxFileExchanges: 128,
         maxOtherExchanges: 64,
-        maxUnassignedExchanges: 64
+        maxUnassignedExchanges: 64,
+        // 导入分批：后端 /sessions/import 的 body 限制为 20 MiB，留 1 MiB 余量，避免 413 击穿整轮同步。
+        importBatchMaxItems: 100,
+        importBatchMaxBodyBytes: 19 * 1024 * 1024,
+        // 重试队列死信阈值：同一会话连续失败达到该次数后不再参与后续重试
+        // 轮次（见 SyncRetryStore.retryable），只留队列痕迹，等待自愈或清空。
+        syncMaxRetryAttempts: 5
     });
 
     const JsonTools = Object.freeze({
@@ -1487,9 +1493,168 @@
         }
     }
 
+    // 导入请求体按「完整 envelope 的 UTF-8 字节数」判定，不能用字符串 length：
+    // 中文与 emoji 单字符占 3-4 字节，用 length 判定会低估体积，再次撞上后端 20 MiB 限制。
+    function utf8ByteLength(text) {
+        return typeof TextEncoder === 'function' ? new TextEncoder().encode(text).byteLength : text.length;
+    }
+
+    function encodeImportBody(platform, sessions) {
+        const body = JSON.stringify({ platform, sessions });
+        return { body, bytes: utf8ByteLength(body) };
+    }
+
+    // envelope 前后缀字节数：JSON.stringify({ platform, sessions: [] }) 已含空数组的 "[]" 两个字节，
+    // 会话逐个填入 [] 内部，因此总字节 = 该前后缀 + Σ(单会话 JSON 字节) + (n-1) 个逗号，与整体序列化逐字节相等。
+    function importEnvelopePrefixBytes(platform) {
+        return utf8ByteLength(JSON.stringify({ platform, sessions: [] }));
+    }
+
+    // 单会话在数组中的序列化字节数；undefined/函数等数组元素会被 JSON.stringify 写成 null（4 字节）。
+    function importSessionBytes(session) {
+        const text = JSON.stringify(session);
+        return text === undefined ? 4 : utf8ByteLength(text);
+    }
+
+    // 线性算术版 encodeImportBody(...).bytes，每个会话只编码一次，供分批与等价性测试使用。
+    function estimateImportBodyBytes(platform, sessions) {
+        const list = Array.isArray(sessions) ? sessions : [];
+        let bytes = importEnvelopePrefixBytes(platform);
+        for (const session of list) bytes += importSessionBytes(session);
+        return bytes + Math.max(0, list.length - 1);
+    }
+
+    // 纯函数：把会话切成既不超过条目数、也不超过字节上限的批次。
+    // 单个会话连同 envelope 就超限的进入 oversized，不发送必然失败的请求。
+    // 体积按前后缀 + 逐会话字节累加计算（O(n)），不再每追加一个会话就重新序列化整批（O(n·batch)，
+    // 1000 个 40KB 会话曾冻结主线程十余秒）。
+    function buildImportBatches(platform, sessions, options = {}) {
+        const list = Array.isArray(sessions) ? sessions : [];
+        const maxItems = Math.max(1, Number(options.maxItems) || RuntimeConfig.importBatchMaxItems);
+        const maxBodyBytes = Math.max(1, Number(options.maxBodyBytes) || RuntimeConfig.importBatchMaxBodyBytes);
+        const prefixBytes = importEnvelopePrefixBytes(platform);
+        const batches = [];
+        const oversized = [];
+        let current = [];
+        let currentBytes = prefixBytes;
+        for (const session of list) {
+            const itemBytes = importSessionBytes(session);
+            if (prefixBytes + itemBytes > maxBodyBytes) {
+                oversized.push(session);
+                continue;
+            }
+            if (current.length >= maxItems) {
+                batches.push(current);
+                current = [];
+                currentBytes = prefixBytes;
+            }
+            // 非首个元素前多一个逗号；超限就封当前批，候选另起一批（单独成批已在上方确认合规）。
+            const nextBytes = currentBytes + itemBytes + (current.length ? 1 : 0);
+            if (nextBytes > maxBodyBytes) {
+                if (current.length) batches.push(current);
+                current = [session];
+                currentBytes = prefixBytes + itemBytes;
+            } else {
+                current.push(session);
+                currentBytes = nextBytes;
+            }
+        }
+        if (current.length) batches.push(current);
+        return { batches, oversized };
+    }
+
+    // 持久化失败重试队列（审计 #27）：失败会话只进内存 failed[] 时，后端游标已被同批成功会话推进，
+    // 下一轮增量按 last_updated_at 过滤后永远看不到它。队列按平台隔离，只存列表级元数据，不存正文。
+    class SyncRetryStore {
+        constructor(platform, getValue, setValue) {
+            this.key = `sync_retry_queue_v1:${platform}`;
+            this.getValue = getValue || ((key, fallback) => GM_getValue(key, fallback));
+            this.setValue = setValue || ((key, value) => GM_setValue(key, value));
+        }
+
+        load() {
+            let value = null;
+            try { value = this.getValue(this.key, null); } catch (err) { console.warn(`读取重试队列 ${this.key} 失败:`, err); return {}; }
+            if (value === null || value === undefined) return {};
+            const valid = typeof value === 'object' && !Array.isArray(value)
+                && value.version === 1
+                && value.entries && typeof value.entries === 'object' && !Array.isArray(value.entries);
+            if (!valid) {
+                console.warn(`重试队列 ${this.key} 数据损坏或版本不符，回退为空队列`);
+                return {};
+            }
+            return value.entries;
+        }
+
+        save(entries) {
+            this.setValue(this.key, { version: 1, entries });
+        }
+
+        static stripSession(session) {
+            if (!session || typeof session !== 'object') return session;
+            const { _conversation, ...meta } = session;
+            void _conversation;
+            return meta;
+        }
+
+        upsert(session, stage, message, id) {
+            const entries = this.load();
+            const key = id ?? session?.id;
+            if (key === null || key === undefined) return undefined;
+            const previous = entries[key];
+            const attempts = (Number(previous?.attempts) || 0) + 1;
+            entries[key] = {
+                id: key,
+                updated_at: session?.updated_at ?? null,
+                stage,
+                attempts,
+                message: String(message ?? '').slice(0, 500),
+                session: SyncRetryStore.stripSession(session)
+            };
+            this.save(entries);
+            return attempts;
+        }
+
+        remove(ids) {
+            const list = Array.isArray(ids) ? ids : [ids];
+            if (!list.length) return;
+            const entries = this.load();
+            let changed = false;
+            for (const id of list) {
+                if (id in entries) { delete entries[id]; changed = true; }
+            }
+            if (changed) this.save(entries);
+        }
+
+        sessions() {
+            return Object.values(this.load()).map(entry => entry?.session).filter(Boolean);
+        }
+
+        // 参与下一轮候选的条目：oversized 只是持久痕迹，重试也不会变小，不再重复抓详情。
+        // 它若作为新鲜候选再次出现且体积合规，正常导入后由 remove 出队（自愈）。
+        // attempts 达到 maxAttempts 的条目即死信：不再参与候选（避免永久失败
+        // 的会话每轮白耗一次详情抓取与导入尝试），仅留在队列里等待导入成功
+        // 自愈或用户经油猴菜单清空。maxAttempts 缺省时不设上限。
+        retryable(maxAttempts) {
+            const limit = Number(maxAttempts);
+            const capped = Number.isFinite(limit) && limit >= 1 ? limit : Infinity;
+            return Object.values(this.load())
+                .filter(entry => entry
+                    && entry.stage !== 'oversized'
+                    && Number(entry.attempts) < capped)
+                .map(entry => entry.session)
+                .filter(Boolean);
+        }
+
+        clear() {
+            this.save({});
+        }
+    }
+
     class SyncCoordinator {
         constructor(options = {}) {
             this.adapter = options.adapter;
+            this.config = { ...RuntimeConfig, ...(options.config || {}) };
             this.platform = options.platform || this.adapter?.platform || PLATFORM;
             this.bridge = options.bridgeClient || options.bridge || null;
             this.ui = options.ui || null;
@@ -1501,6 +1666,10 @@
             this.exportPollDelayMs = Math.max(0, Number(options.exportPollDelayMs ?? 5000));
             this.stopped = false;
             this.abortController = null;
+            const storage = options.storage || {};
+            this.getValue = options.getValue || options.gmGet || storage.get || ((key, fallback) => GM_getValue(key, fallback));
+            this.setValue = options.setValue || options.gmSet || storage.set || ((key, value) => GM_setValue(key, value));
+            this.retryStore = options.retryStore || new SyncRetryStore(this.platform, this.getValue, this.setValue);
         }
 
         _status(text) {
@@ -1582,15 +1751,42 @@
         }
 
         async selectSessions(lastUpdatedAt) {
+            let candidates;
             if (!lastUpdatedAt) {
                 this._status('本地为空，全量拉取...');
-                return this.adapter.fetchAllSessions();
-            }
-            if (this.platform === 'deepseek' && (this.adapter.fetchSessionPage || this.adapter._xhr)) {
+                candidates = await this.adapter.fetchAllSessions();
+            } else if (this.platform === 'deepseek' && (this.adapter.fetchSessionPage || this.adapter._xhr)) {
                 this._status('增量拉取...');
-                return this.fetchSessionsIncremental(lastUpdatedAt);
+                candidates = await this.fetchSessionsIncremental(lastUpdatedAt);
+            } else {
+                candidates = await this.adapter.fetchAllSessions();
             }
-            return this.adapter.fetchAllSessions();
+            return this._mergeRetryCandidates(candidates);
+        }
+
+        // 候选 = 正常候选 ∪ 本平台重试队列，按稳定 id 去重；正常候选优先（列表元数据更新），
+        // 重试项不受 last_updated_at 游标过滤，保证失败会话在游标推进后仍会被重新同步。
+        // 达到 syncMaxRetryAttempts 死信阈值的条目不再并入（见 SyncRetryStore.retryable）。
+        // 同时在 this._lastRetryIds 记录哪些候选仅来自重试队列，供 fetchDetailsAndPush 区分「新鲜候选全部失败」
+        // 与「纯重试轮次再次失败」：前者仍抛错，后者只告警，避免一个永久失败的会话让每轮同步都显示错误。
+        _mergeRetryCandidates(candidates) {
+            const list = Array.isArray(candidates) ? [...candidates] : [];
+            this._lastRetryIds = new Set();
+            let retries = [];
+            try { retries = this.retryStore?.retryable(this.config.syncMaxRetryAttempts) || []; } catch (err) { console.warn('读取重试队列失败:', err); }
+            if (!retries.length) return list;
+            const seen = new Set(list.map(session => this._sessionId(session)).filter(id => id !== null && id !== undefined));
+            let appended = 0;
+            for (const session of retries) {
+                const id = this._sessionId(session);
+                if (id === null || id === undefined || seen.has(id)) continue;
+                seen.add(id);
+                this._lastRetryIds.add(id);
+                list.push(session);
+                appended++;
+            }
+            if (appended) this._status(`合并 ${appended} 个待重试会话`);
+            return list;
         }
 
         _sessionId(session) {
@@ -1668,11 +1864,30 @@
             return data;
         }
 
+        _retryUpsert(session, id, stage, message) {
+            try {
+                const attempts = this.retryStore?.upsert(session, stage, message, id);
+                const max = Math.max(1, Number(this.config.syncMaxRetryAttempts) || Infinity);
+                if (Number.isFinite(attempts) && attempts >= max) {
+                    console.warn(`会话 ${id} 已连续失败 ${attempts} 次达到上限，停止自动重试；可用油猴菜单「清空同步重试队列」清理。`);
+                }
+            } catch (err) { console.warn(`写入重试队列失败 (${id}):`, err); }
+        }
+
+        _retryRemove(ids) {
+            const list = ids.filter(id => id !== null && id !== undefined);
+            if (!list.length) return;
+            try { this.retryStore?.remove(list); } catch (err) { console.warn('移除重试队列条目失败:', err); }
+        }
+
         async fetchDetailsAndPush(sessions) {
             if (!sessions.length) {
                 this._status('✅ 无新会话需要同步');
                 return { imported: 0, skipped: 0, sessions: [] };
             }
+            // 直接调用（未经 selectSessions）时没有重试来源信息，retryIds 为空，保持「全部失败即抛错」。
+            const retryIds = this._lastRetryIds instanceof Set ? this._lastRetryIds : new Set();
+            this._lastRetryIds = null;
             const queue = [...sessions];
             const results = [];
             const failed = [];
@@ -1697,9 +1912,13 @@
                             if (attempt === 0) console.warn(`会话 ${id} 获取失败，重试一次:`, err);
                         }
                     }
+                    // 用户停止导致的中断不是会话失败：不计入 failed 也不写入重试队列，下轮由正常候选或已有队列项覆盖。
+                    if (lastErr && this._isStopped()) break;
                     if (lastErr) {
                         console.warn(`会话 ${id} 重试后仍失败:`, lastErr);
-                        failed.push({ id, session, error: String(lastErr?.message || lastErr) });
+                        const message = String(lastErr?.message || lastErr);
+                        failed.push({ id, session, stage: 'detail', error: message });
+                        this._retryUpsert(session, id, 'detail', message);
                     } else {
                         results.push({ ...session, _conversation: conversation });
                     }
@@ -1710,21 +1929,111 @@
             if (this._isStopped()) return { state: 'stopped', sessions: results };
 
             if (!results.length && failed.length > 0) {
-                throw new Error(`全部 ${failed.length} 个会话获取详情失败: ${failed[0].error}`);
+                const retryOnly = failed.every(item => retryIds.has(item.id));
+                if (!retryOnly) throw new Error(`全部 ${failed.length} 个会话获取详情失败: ${failed[0].error}`);
+                this._status(`⚠️ ${failed.length} 个历史失败会话仍未同步`);
+                return { imported: 0, skipped: 0, sessions: [], failed };
             }
 
-            this._progress(1, 1, '推送到服务端...');
-            const response = await this.bridge.request('/sessions/import', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ platform: this.platform, sessions: results }),
-                signal: this.abortController?.signal
+            const maxBodyBytes = Math.max(1, Number(this.config.importBatchMaxBodyBytes) || RuntimeConfig.importBatchMaxBodyBytes);
+            // 来自重试队列的会话各自单独成批：一个后端永久拒绝的「毒丸」会话若与他人同批，会让整批每轮一起失败、
+            // 一起重新入队，永远出不去。新鲜候选仍按条目数/字节上限正常分批。
+            const fresh = results.filter(session => !retryIds.has(this._sessionId(session)));
+            const retrying = results.filter(session => retryIds.has(this._sessionId(session)));
+            const { batches, oversized } = buildImportBatches(this.platform, fresh, {
+                maxItems: this.config.importBatchMaxItems,
+                maxBodyBytes
             });
-            if (!response.ok) throw new Error(`导入失败 ${response.status}: ${await response.text()}`);
-            const data = await response.json();
+            for (const session of retrying) {
+                const single = buildImportBatches(this.platform, [session], { maxItems: 1, maxBodyBytes });
+                batches.push(...single.batches);
+                oversized.push(...single.oversized);
+            }
+            // 规格 5.2：超限会话计入失败结果并写入持久重试队列（stage 'oversized' 作为持久痕迹）；
+            // 该阶段不参与下一轮候选（见 SyncRetryStore.retryable），避免每轮重复抓详情再丢弃。
+            for (const session of oversized) {
+                const id = this._sessionId(session);
+                const message = `会话体积超过导入上限 ${maxBodyBytes} 字节`;
+                console.warn(`会话 ${id} 单体超过导入体积上限 ${maxBodyBytes} 字节，跳过`);
+                failed.push({ id, session, stage: 'oversized', error: message });
+                this._retryUpsert(session, id, 'oversized', message);
+            }
+
+            const accepted = [];
+            let imported = 0;
+            let skipped = 0;
+            let batchFailures = 0;
+            let lastBatchError = '';
+            // 用户停止时，已被选中却尚未被服务端确认的会话必须留在持久队列：前面的批次已让后端游标推进到
+            // 本轮 max(updated_at)，剩余会话在下一轮增量里将永远选不到。规格 5.3「只有被确认才移除」的对偶。
+            const queueUnpushed = fromIndex => {
+                for (const batch of batches.slice(fromIndex)) {
+                    for (const session of batch) this._retryUpsert(session, this._sessionId(session), 'import', '用户停止');
+                }
+            };
+            for (let index = 0; index < batches.length; index++) {
+                if (this._isStopped()) {
+                    queueUnpushed(index);
+                    return { state: 'stopped', imported, skipped, sessions: accepted, failed };
+                }
+                const batch = batches[index];
+                this._progress(index + 1, batches.length, `推送到服务端 ${index + 1}/${batches.length}`);
+                let response = null;
+                let transportError = null;
+                try {
+                    response = await this.bridge.request('/sessions/import', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: encodeImportBody(this.platform, batch).body,
+                        signal: this.abortController?.signal
+                    });
+                } catch (err) {
+                    // 传输异常里的 AbortError 属于用户停止而非导入失败：不计入 failed，但当前批及其后批次全部入队后再返回。
+                    if (this._isStopped()) {
+                        queueUnpushed(index);
+                        return { state: 'stopped', imported, skipped, sessions: accepted, failed };
+                    }
+                    transportError = err;
+                }
+                // 响应成功返回即表示服务端已导入该批：先记入 accepted/imported 再判断停止，
+                // 否则停止落在响应之后会少报已成功的会话，导致后续重试队列重复导入。
+                if (!transportError && response?.ok) {
+                    let data = {};
+                    try { data = await response.json(); } catch { data = {}; }
+                    imported += Number(data?.imported) || 0;
+                    skipped += Number(data?.skipped) || 0;
+                    accepted.push(...batch);
+                    // 服务端 imported 与 skipped 都视为已确认：该批会话立即从重试队列移除并持久化。
+                    this._retryRemove(batch.map(session => this._sessionId(session)));
+                    continue;
+                }
+                // 单批失败既不撤销已成功的批次，也不中断后续批次：只把该批会话记为 import 阶段失败。
+                let detail;
+                if (transportError) {
+                    detail = String(transportError?.message || transportError);
+                } else {
+                    let text = '';
+                    try { text = await response.text(); } catch { text = ''; }
+                    detail = `导入失败 ${response?.status}: ${text}`;
+                }
+                batchFailures++;
+                lastBatchError = detail;
+                console.warn(`第 ${index + 1}/${batches.length} 批导入失败:`, detail);
+                for (const session of batch) {
+                    const id = this._sessionId(session);
+                    failed.push({ id, session, stage: 'import', error: detail });
+                    this._retryUpsert(session, id, 'import', detail);
+                }
+            }
+
+            // 所有批次都失败时保持既有的「完全失败即抛错」行为，供 UI 显示错误。
+            if (batches.length && batchFailures === batches.length) {
+                throw new Error(lastBatchError);
+            }
+
             const failMsg = failed.length ? `, 失败 ${failed.length} 个` : '';
-            this._status(`✅ 导入 ${data.imported} 个, 跳过 ${data.skipped} 个${failMsg}`);
-            return { ...data, sessions: results, failed };
+            this._status(`✅ 导入 ${imported} 个, 跳过 ${skipped} 个${failMsg}`);
+            return { imported, skipped, sessions: accepted, failed };
         }
 
         async sync(fullSync = false) {
@@ -1732,6 +2041,7 @@
             if (this.syncing) return { state: 'already_syncing' };
             this.syncing = true;
             this.stopped = false;
+            this._lastRetryIds = null;
             this.abortController = typeof AbortController === 'function' ? new AbortController() : null;
             let connection;
             try {
@@ -1953,6 +2263,8 @@
 
     const testApi = Object.freeze({
         RuntimeConfig,
+        buildImportBatches,
+        estimateImportBodyBytes,
         JsonTools,
         CaptureRedactor,
         SseParser,
@@ -1966,6 +2278,7 @@
         DeepSeekAdapter,
         DoubaoAdapter,
         KimiAdapter,
+        SyncRetryStore,
         SyncCoordinator,
         SyncPanel
     });
@@ -2021,6 +2334,21 @@
             alert(`${PLATFORM} 令牌已清除，将自动捕获新的令牌。`);
         });
     }
+    // 死信出口：重试队列里达到 syncMaxRetryAttempts 的会话不再参与重试，
+    // 若一直无法自愈（如上游已删除），用户由此手动清空整条队列。
+    GM_registerMenuCommand('清空同步重试队列', () => {
+        try {
+            const store = coordinator?.retryStore;
+            if (!store) { alert('同步尚未初始化，无法清空重试队列。'); return; }
+            const count = Object.keys(store.load()).length;
+            if (!count) { alert('同步重试队列当前为空。'); return; }
+            if (!confirm(`清空 ${PLATFORM} 的同步重试队列？共 ${count} 条（含已停止重试的死信）。清空后不再自动重试；死信会话如仍需同步，请之后执行一次全量同步。`)) return;
+            store.clear();
+            alert('同步重试队列已清空。');
+        } catch (error) {
+            alert(`清空重试队列失败: ${error.message}`);
+        }
+    });
 
     let coordinator;
     const ui = new SyncPanel({

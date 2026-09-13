@@ -1,4 +1,5 @@
 import { nextTick } from 'vue'
+import { sanitizeMermaidSvg } from '../sanitizeMermaidSvg'
 
 const mermaidOptions = {
   startOnLoad: false,
@@ -67,7 +68,7 @@ export function useMermaidRenderer(effectiveTheme: () => 'light' | 'dark') {
         const source = normalizeMermaidSource(rawSource)
         if (!source) continue
         const { svg, bindFunctions } = await mermaid.render(`mermaid-${version}-${index}`, source)
-        element.innerHTML = svg
+        element.innerHTML = sanitizeMermaidSvg(svg)
         element.dataset.rendered = 'true'
         bindFunctions?.(element)
       } catch (reason) {
@@ -99,7 +100,7 @@ export function useMermaidRenderer(effectiveTheme: () => 'light' | 'dark') {
           if (!source) continue
           const { svg } = await mermaid.render(`export-mermaid-${++exportSequence}-${index}`, source)
           if (version !== exportRenderVersion) return
-          element.innerHTML = svg
+          element.innerHTML = sanitizeMermaidSvg(svg)
           element.dataset.rendered = 'true'
         } catch (reason) {
           if (version !== exportRenderVersion) return

@@ -1,6 +1,7 @@
 mod branch;
 mod commands;
 mod data_directory;
+mod data_directory_marker;
 mod database;
 mod embedding;
 mod error;
@@ -12,10 +13,13 @@ mod logging;
 mod mcp;
 mod models;
 mod normalizer;
+mod safe_path;
 mod semantic;
 mod service;
 mod settings;
 pub mod sync;
+#[cfg(test)]
+pub(crate) mod test_support;
 mod tray;
 mod window_lifecycle;
 

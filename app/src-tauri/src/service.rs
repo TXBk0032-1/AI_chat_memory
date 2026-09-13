@@ -253,6 +253,12 @@ pub struct AppService {
     settings: Arc<SettingsStore>,
     semantic: Arc<SemanticEngine>,
     role: ServiceRole,
+    /// The directory this service's database lives in. After
+    /// `move_data_directory` snapshots the database elsewhere, the redirect
+    /// marker is published here so old-pool readers (the still-running MCP
+    /// stdio process) can detect the move; `ensure_current_data_directory`
+    /// is the guard every MCP data read runs through first.
+    data_dir: Arc<PathBuf>,
     api_status: Arc<RwLock<ApiStatus>>,
     last_userscript_request_at: Arc<RwLock<Option<u64>>>,
     sync_store: SyncStore,
@@ -304,15 +310,32 @@ impl AppService {
         data_dir: PathBuf,
         role: ServiceRole,
     ) -> Result<Self> {
+        let build_started = std::time::Instant::now();
+        let data_dir = Arc::new(data_dir);
         let settings_value = settings.get().await;
-        let embeddings =
-            EmbeddingManager::from_settings(data_dir.clone(), settings_value.semantic_search)
-                .await?;
+        let semantic_enabled = settings_value.semantic_search.enabled;
+        let embeddings = {
+            let started = std::time::Instant::now();
+            let manager = EmbeddingManager::from_settings(
+                data_dir.as_ref().clone(),
+                settings_value.semantic_search,
+            )
+            .await;
+            tracing::info!(
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "service build: embedding manager ready"
+            );
+            manager?
+        };
         crate::database::connection::ensure_embedding_vec_table(
             &pool,
             Some(embeddings.identity().dimensions),
         )
         .await?;
+        tracing::info!(
+            elapsed_ms = build_started.elapsed().as_millis() as u64,
+            "service build: embedding vec table ready"
+        );
         let identity = embeddings.identity();
         crate::database::connection::activate_embedding_index(
             &pool,
@@ -320,9 +343,31 @@ impl AppService {
             &identity.model_id,
         )
         .await?;
-        let semantic = Arc::new(SemanticEngine::new(pool.clone(), data_dir, embeddings));
+        tracing::info!(
+            elapsed_ms = build_started.elapsed().as_millis() as u64,
+            "service build: embedding index activated"
+        );
+        let semantic = Arc::new(SemanticEngine::new(
+            pool.clone(),
+            data_dir.as_ref().clone(),
+            embeddings,
+        ));
+        tracing::info!(
+            elapsed_ms = build_started.elapsed().as_millis() as u64,
+            "service build: semantic engine constructed"
+        );
         if role == ServiceRole::Desktop {
             semantic.start_worker();
+        }
+        if semantic_enabled {
+            // Warm the local model concurrently with first-screen rendering so
+            // neither the first search nor the first index batch pays the
+            // weight-loading stall. Applies to MCP too: its search surface
+            // uses the same backend.
+            let semantic_for_warmup = Arc::clone(&semantic);
+            tauri::async_runtime::spawn(async move {
+                semantic_for_warmup.warm_up_backend().await;
+            });
         }
         let sync_store = SyncStore::new(pool.clone());
         let credentials: Arc<dyn CredentialStore> =
@@ -333,6 +378,7 @@ impl AppService {
             settings,
             semantic,
             role,
+            data_dir: Arc::clone(&data_dir),
             api_status: Arc::new(RwLock::new(ApiStatus::Starting)),
             last_userscript_request_at: Arc::new(RwLock::new(None)),
             sync_store,
@@ -345,6 +391,11 @@ impl AppService {
         if role == ServiceRole::Desktop {
             service.start_cloud_sync_worker(worker_receiver);
         }
+        tracing::info!(
+            elapsed_ms = build_started.elapsed().as_millis() as u64,
+            role = ?role,
+            "service build: finished"
+        );
         Ok(service)
     }
 
@@ -1872,6 +1923,22 @@ impl AppService {
         Ok(())
     }
 
+    /// 数据读取的统一迁移 guard：旧数据目录一旦出现 redirect marker，
+    /// 说明数据库已被 `move_data_directory` 搬到别处、本进程持有的旧池
+    /// 即将失效，读取必须立即拒绝并提示重启，而不是继续吐出陈旧数据。
+    /// 仅由 MCP 边界调用；桌面进程迁移后的内部读行为保持不变。
+    pub async fn ensure_current_data_directory(&self) -> Result<()> {
+        match crate::data_directory_marker::read_redirect(&self.data_dir).await? {
+            None => Ok(()),
+            // destination_hint 仅用于提示（见 marker schema 注释），读取方绝不
+            // 据此自动切换数据库池；报错带上新目录，用户不必去旧目录翻 marker。
+            Some(redirect) => Err(AppError::Cancelled(format!(
+                "数据目录已迁移，请重启 MCP 后重试（新数据目录：{}）",
+                redirect.destination_hint
+            ))),
+        }
+    }
+
     pub async fn move_data_directory(&self, directory: &Path) -> Result<()> {
         self.ensure_writable()?;
         // The destination probe and the VACUUM snapshot must run inside
@@ -1893,6 +1960,14 @@ impl AppService {
         let mut settings = self.settings().await;
         settings.data_directory = Some(directory.to_string_lossy().into_owned());
         self.settings.update(settings).await?;
+        // Publish the redirect marker in the old directory before setting the
+        // shutdown flag. A marker published only after VACUUM and settings
+        // both succeeded guarantees no half-written marker exists; if this
+        // publish fails the move returns Err without setting shutdown, so the
+        // UI never declares "migration fully succeeded" — the snapshot and
+        // settings are already on disk, and the next operation can surface
+        // the diagnostic instead of silently serving the moved-away data.
+        crate::data_directory_marker::publish_redirect(&self.data_dir, directory).await?;
         // The snapshot is complete and a restart has been requested. Set the
         // shutdown flag before releasing the sync_gate so every subsequent
         // write path observes it and rejects new work, leaving the old pool
@@ -2210,3 +2285,78 @@ fn validate_cloud_sync_update(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod policy_tests {
+    use super::*;
+    use crate::models::{CloudBackendKind, CloudSyncSettings};
+
+    #[test]
+    fn backend_switch_rotates_identity_once() {
+        let previous = CloudSyncSettings::default();
+        let mut s3 = previous.clone();
+        s3.backend = CloudBackendKind::S3;
+
+        assert!(prepare_cloud_sync_transition(&previous, &mut s3));
+        assert_ne!(s3.remote_id, previous.remote_id);
+        assert_ne!(s3.vault_id, previous.vault_id);
+        assert_ne!(s3.generation_id, previous.generation_id);
+
+        let switched = s3.clone();
+        assert!(!prepare_cloud_sync_transition(&switched, &mut s3));
+        assert_eq!(s3.remote_id, switched.remote_id);
+        assert_eq!(s3.vault_id, switched.vault_id);
+        assert_eq!(s3.generation_id, switched.generation_id);
+    }
+
+    #[test]
+    fn changing_remote_location_rotates_identity_and_requests_a_new_baseline() {
+        let mut previous = CloudSyncSettings {
+            backend: CloudBackendKind::S3,
+            ..CloudSyncSettings::default()
+        };
+        previous.s3.bucket = "first-bucket".into();
+        let mut moved = previous.clone();
+        moved.s3.bucket = "second-bucket".into();
+
+        assert!(prepare_cloud_sync_transition(&previous, &mut moved));
+        assert_ne!(moved.remote_id, previous.remote_id);
+        assert_ne!(moved.vault_id, previous.vault_id);
+        assert_ne!(moved.generation_id, previous.generation_id);
+    }
+
+    #[test]
+    fn unverified_new_or_changed_connection_cannot_be_enabled() {
+        let previous = CloudSyncSettings::default();
+        let mut forged = previous.clone();
+        forged.enabled = true;
+        forged.connection_verified = true;
+        assert!(validate_cloud_sync_update(&previous, &mut forged, false).is_err());
+        assert!(!forged.connection_verified);
+
+        let mut enabled = previous.clone();
+        enabled.enabled = true;
+        assert!(validate_cloud_sync_update(&previous, &mut enabled, false).is_err());
+
+        enabled.connection_verified = true;
+        assert!(validate_cloud_sync_update(&previous, &mut enabled, true).is_ok());
+
+        let mut changed = enabled.clone();
+        changed.s3.bucket = "another-bucket".into();
+        changed.backend = CloudBackendKind::S3;
+        assert!(validate_cloud_sync_update(&enabled, &mut changed, false).is_err());
+        assert!(!changed.connection_verified);
+    }
+
+    #[test]
+    fn enabled_legacy_webdav_connection_remains_usable() {
+        let previous = CloudSyncSettings {
+            enabled: true,
+            ..CloudSyncSettings::default()
+        };
+        let mut next = previous.clone();
+
+        assert!(validate_cloud_sync_update(&previous, &mut next, false).is_ok());
+        assert!(next.connection_verified);
+    }
+}

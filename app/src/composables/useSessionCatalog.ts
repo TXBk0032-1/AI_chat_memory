@@ -30,7 +30,7 @@ export function useSessionCatalog(
   const filtered = computed(() => Boolean(query.value || platform.value || dateFrom.value || dateTo.value || searchMode.value !== 'hybrid'))
   let generation = 0
 
-  async function loadSessions(reset = true) {
+  async function loadSessions(reset = true, requestedPage = reset ? 0 : page.value): Promise<boolean> {
     const started = performance.now()
     const requestGeneration = ++generation
     loading.value = true
@@ -43,7 +43,6 @@ export function useSessionCatalog(
     // set is a safe superset of "still-visible" sessions for a refresh.
     const priorVisibleIds = reset ? new Set(sessions.value.map((session) => session.id)) : null
     if (reset) {
-      page.value = 0
       committedQuery.value = query.value.trim()
     }
     console.log(`%c[PERF:CATALOG] loadSessions(platform="${platform.value}", q="${committedQuery.value}") started (gen=${requestGeneration})`, 'color: #059669')
@@ -54,17 +53,21 @@ export function useSessionCatalog(
         date_from: epoch(dateFrom.value),
         date_to: epoch(dateTo.value, true),
         limit: PAGE_SIZE,
-        offset: page.value * PAGE_SIZE,
+        offset: requestedPage * PAGE_SIZE,
         mode: searchMode.value,
       })
       if (requestGeneration !== generation) {
         console.warn(`[PERF:CATALOG] loadSessions discarded due to generation mismatch (req: ${requestGeneration}, cur: ${generation})`)
-        return
+        return false
       }
       sessions.value = reset ? result.sessions : [...sessions.value, ...result.sessions]
       total.value = result.total
       semanticStatus.value = result.semantic_status
       searchElapsed.value = committedQuery.value ? performance.now() - started : null
+      // The page number is committed only after a successful, non-stale
+      // response, so a failed loadMore retries the same candidate page
+      // instead of skipping over it.
+      page.value = reset ? 0 : requestedPage
       if (reset) {
         // Merge the new first page with the previously loaded catalog so a
         // selection on a later loaded page survives the refresh.
@@ -75,11 +78,13 @@ export function useSessionCatalog(
         onSelectionInvalidated(visibleIds)
       }
       console.log(`%c[PERF:CATALOG] loadSessions completed: count=${result.sessions.length}, total=${result.total}, elapsed=${(performance.now() - started).toFixed(2)}ms`, 'color: #059669')
+      return true
     } catch (reason) {
       if (requestGeneration === generation) {
         error.value = String(reason)
         console.error(`[PERF:CATALOG] loadSessions failed:`, reason)
       }
+      return false
     } finally {
       if (requestGeneration === generation) {
         loading.value = false
@@ -89,8 +94,8 @@ export function useSessionCatalog(
 
   async function loadMore() {
     if (loading.value || sessions.value.length >= total.value) return
-    page.value += 1
-    await loadSessions(false)
+    const candidatePage = page.value + 1
+    await loadSessions(false, candidatePage)
   }
 
   function resetFilters() {
