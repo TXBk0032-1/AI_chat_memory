@@ -117,7 +117,18 @@ pub fn run() {
                 let _ = window.unminimize();
                 let _ = window.set_focus();
             } else {
-                tracing::warn!("second instance requested but main window not found");
+                let windows = app.webview_windows();
+                let window_count = windows.len();
+                tracing::warn!("second instance requested but main window not found, window_count={window_count}");
+                for (label, window) in &windows {
+                    tracing::info!(
+                        label = %label,
+                        title = ?window.title(),
+                        visible = ?window.is_visible(),
+                        minimized = ?window.is_minimized(),
+                        "existing webview window"
+                    );
+                }
             }
         }))
         .plugin(tauri_plugin_opener::init())
