@@ -29,7 +29,7 @@
 
 ## 技术栈
 
-- 桌面端：Tauri 2 + Rust 1.97.0（Edition 2024）
+- 桌面端：Tauri 2 + Rust 1.98.1（Edition 2024）
 - 前端：Vue 3 + TypeScript + Vite
 - 本地服务：Axum（userscript API `127.0.0.1:19820`；MCP `127.0.0.1:19821`）
 - 数据库：SQLx + SQLite
@@ -37,7 +37,7 @@
 
 ## 开发
 
-前置环境：Rust 1.97.0、Node.js 22+、Visual Studio C++ Build Tools、WebView2。
+前置环境：Rust 1.98.1、Node.js 22+、Visual Studio C++ Build Tools、WebView2。
 
 ```powershell
 cd app

@@ -34,7 +34,7 @@ if (-not (Test-Path -LiteralPath $ciCacheHelper -PathType Leaf)) {
     throw "CI cache helper missing: $ciCacheHelper"
 }
 . $ciCacheHelper
-$env:RUSTUP_TOOLCHAIN = "1.97.0"
+$env:RUSTUP_TOOLCHAIN = "1.98.1"
 $env:CARGO_TERM_COLOR = "always"
 
 function Initialize-CudaBuildEnvironment {
@@ -148,8 +148,8 @@ foreach ($command in $requiredCommands) {
 $rustVersion = $null
 if ($Stage -ne "quick") {
     $rustVersion = (& rustc --version 2>&1) -join " "
-    if ($rustVersion -notmatch '^rustc 1\.97\.') {
-        throw "Expected Rust 1.97.x, found: $rustVersion"
+    if ($rustVersion -notmatch '^rustc 1\.98\.') {
+        throw "Expected Rust 1.98.x, found: $rustVersion"
     }
 }
 

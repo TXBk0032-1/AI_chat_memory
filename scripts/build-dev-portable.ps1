@@ -65,7 +65,7 @@ foreach ($Command in "cargo", "npm") {
     }
 }
 
-$env:RUSTUP_TOOLCHAIN = "1.97.0"
+$env:RUSTUP_TOOLCHAIN = "1.98.1"
 
 # Detect CUDA Toolkit: prefer $env:CUDA_PATH, otherwise pick the newest installed toolkit.
 $CudaRoot = $env:CUDA_PATH
