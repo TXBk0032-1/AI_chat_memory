@@ -42,6 +42,7 @@ try {
     & git -C $tempTestDir init --quiet
     & git -C $tempTestDir config user.name "CI Tester"
     & git -C $tempTestDir config user.email "ci-test@example.com"
+    & git -C $tempTestDir config core.autocrlf false
 
     $gitIgnore = Join-Path $tempTestDir ".gitignore"
     Set-Content -LiteralPath $gitIgnore -Value ".ci-cache/`nartifacts/`napp/`n" -Encoding utf8
@@ -80,17 +81,20 @@ try {
     Remove-Item -LiteralPath $fileC -Force
 
     # Non-ASCII / Chinese filename handling
-    $fileChinese = Join-Path $tempTestDir "测试 文件.txt"
-    Set-Content -LiteralPath $fileChinese -Value "中文内容" -Encoding utf8
+    $chineseFilename = -join [char[]]@(0x6D4B, 0x8BD5, 0x0020, 0x6587, 0x4EF6, 0x002E, 0x0074, 0x0078, 0x0074) # "ceshi wenjian.txt"
+    $fileChinese = Join-Path $tempTestDir $chineseFilename
+    $contentChinese1 = -join [char[]]@(0x4E2D, 0x6587, 0x5185, 0x5BB9) # "zhongwen neirong"
+    $contentChinese2 = -join [char[]]@(0x4FEE, 0x6539, 0x540E, 0x7684, 0x4E2D, 0x6587, 0x5185, 0x5BB9) # "xiugaihou de zhongwen neirong"
+    Set-Content -LiteralPath $fileChinese -Value $contentChinese1 -Encoding utf8
     & git -C $tempTestDir add .
     & git -C $tempTestDir commit -m "add chinese file" --quiet
-    $fpChinese1 = Get-InputFingerprint -RepoRoot $tempTestDir -Paths @("测试 文件.txt")
-    Set-Content -LiteralPath $fileChinese -Value "修改后的中文内容" -Encoding utf8
-    $fpChinese2 = Get-InputFingerprint -RepoRoot $tempTestDir -Paths @("测试 文件.txt")
+    $fpChinese1 = Get-InputFingerprint -RepoRoot $tempTestDir -Paths @($chineseFilename)
+    Set-Content -LiteralPath $fileChinese -Value $contentChinese2 -Encoding utf8
+    $fpChinese2 = Get-InputFingerprint -RepoRoot $tempTestDir -Paths @($chineseFilename)
     if ($fpChinese1 -eq $fpChinese2) {
         throw "fingerprint must change when non-ASCII file is modified"
     }
-    & git -C $tempTestDir checkout -- "测试 文件.txt"
+    & git -C $tempTestDir checkout -- $chineseFilename
 
     # Git rename handling (R  old -> new) must not crash with illegal characters
     & git -C $tempTestDir mv fileA.txt fileA_renamed.txt

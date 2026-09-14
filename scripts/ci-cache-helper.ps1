@@ -9,10 +9,10 @@ function Get-InputFingerprint {
         [Parameter(Mandatory)][string[]]$Paths
     )
 
-    # 1. 获取跟踪文件的 git blob hash (禁用 quotepath 避免非 ASCII 字符被转义为八进制)
+    # 1. Get git blob hash of tracked files (disable quotepath to avoid octal escapes on non-ASCII paths)
     $entries = @(git -C $RepoRoot -c core.quotepath=false ls-files -s -- $Paths 2>$null)
 
-    # 2. 检查工作区修改与未跟踪文件
+    # 2. Check working tree modifications and untracked files
     $dirty = @(git -C $RepoRoot -c core.quotepath=false status --porcelain -uall -- $Paths 2>$null)
     if ($dirty.Count -gt 0) {
         $dirtyMap = @{}
@@ -21,7 +21,7 @@ function Get-InputFingerprint {
             $statusCode = $line.Substring(0, 2).Trim()
             $rawPath = $line.Substring(3).Trim()
 
-            # 处理重命名或复制场景: "orig -> dest"
+            # Handle rename or copy: "orig -> dest"
             $targetPath = $rawPath
             $oldPath = $null
             if ($rawPath.Contains(' -> ')) {
