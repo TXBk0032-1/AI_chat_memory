@@ -150,17 +150,26 @@ fn parse_deepseek_zip(archive: &mut ZipArchive<Cursor<Vec<u8>>>) -> Result<Impor
 // topic/message 表，message.data JSON 的 parts[] 按 type 拆 content/thinking/tool_calls。
 // ---------------------------------------------------------------------------
 
-const MAX_SQLITE_ENTRY_BYTES: usize = 512 * 1024 * 1024;
+const MAX_SQLITE_ENTRY_BYTES: u64 = 512 * 1024 * 1024;
+const SQLITE_ENTRY_TOO_LARGE: &str = "cherrystudio.sqlite 超过 512 MB 限制";
 
 async fn parse_cherry_zip(archive: &mut ZipArchive<Cursor<Vec<u8>>>) -> Result<ImportedArchive> {
+    let file = archive.by_name("cherrystudio.sqlite")?;
+    // 与 parse_deepseek_zip 同一套 zip bomb 防护：先按中央目录声明的解压尺寸
+    // 与压缩比拒绝，再带上限读取。顺序不能颠倒——`read_to_end` 之后才检查
+    // 长度，等于先把炸弹解进内存。
+    if file.size() > MAX_SQLITE_ENTRY_BYTES {
+        return Err(AppError::InvalidData(SQLITE_ENTRY_TOO_LARGE.into()));
+    }
+    if file.compressed_size() > 0 && file.size() / file.compressed_size() > 200 {
+        return Err(AppError::InvalidData("ZIP 压缩比异常".into()));
+    }
+    // 声明尺寸可以伪造，实际读取仍需封顶：take 到上限 +1 字节，超出即拒。
     let mut sqlite_bytes = Vec::new();
-    archive
-        .by_name("cherrystudio.sqlite")?
+    file.take(MAX_SQLITE_ENTRY_BYTES.saturating_add(1))
         .read_to_end(&mut sqlite_bytes)?;
-    if sqlite_bytes.len() > MAX_SQLITE_ENTRY_BYTES {
-        return Err(AppError::InvalidData(
-            "cherrystudio.sqlite 超过 512 MB 限制".into(),
-        ));
+    if sqlite_bytes.len() as u64 > MAX_SQLITE_ENTRY_BYTES {
+        return Err(AppError::InvalidData(SQLITE_ENTRY_TOO_LARGE.into()));
     }
     let workdir = std::env::temp_dir().join(format!("acm-import-{}", Uuid::new_v4()));
     tokio::fs::create_dir_all(&workdir).await?;
@@ -1188,6 +1197,30 @@ mod tests {
         assert_eq!(tool_calls[0]["name"], "web_search");
         assert_eq!(tool_calls[0]["args"]["q"], "x");
         assert_eq!(tool_calls[0]["result"], "found");
+    }
+
+    /// zip bomb 防护：`cherrystudio.sqlite` 条目必须在解压进内存之前按声明的
+    /// 解压尺寸与压缩比拒绝，而不是先 `read_to_end` 膨胀完再检查长度。
+    #[tokio::test]
+    async fn rejects_cherry_zip_entry_with_abnormal_compression_ratio() {
+        // 20 MB 全零 deflate 后约 20 KB，压缩比 ~1000:1，远超 200 的阈值。
+        let bomb = vec![0u8; 20 * 1024 * 1024];
+        let bytes = build_zip(&[
+            text_entry("metadata.json", r#"{"appName":"Cherry Studio"}"#),
+            ("cherrystudio.sqlite".to_owned(), bomb),
+        ]);
+
+        let message = match parse_import_history(bytes).await {
+            Ok(archive) => panic!(
+                "高压缩比的 cherrystudio.sqlite 必须被拒绝，却解析出 {} 个会话",
+                archive.sessions.len()
+            ),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            message.contains("压缩比"),
+            "必须因压缩比异常被拒，而不是解压后才发现不是数据库：{message}"
+        );
     }
 
     #[tokio::test]
