@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 mod ptx {
     include!(concat!(env!("OUT_DIR"), "/ptx.rs"));
 }
