@@ -65,7 +65,15 @@ foreach ($Command in "cargo", "npm") {
     }
 }
 
-$env:RUSTUP_TOOLCHAIN = "1.98.1"
+$pinnedToolchain = "1.98.1"
+$toolchainFile = Join-Path $Root "rust-toolchain.toml"
+if (Test-Path -LiteralPath $toolchainFile -PathType Leaf) {
+    $toolchainContent = Get-Content -LiteralPath $toolchainFile -Raw
+    if ($toolchainContent -match 'channel\s*=\s*"([^"]+)"') {
+        $pinnedToolchain = $Matches[1].Trim()
+    }
+}
+$env:RUSTUP_TOOLCHAIN = $pinnedToolchain
 
 # Detect CUDA Toolkit: prefer $env:CUDA_PATH, otherwise pick the newest installed toolkit.
 $CudaRoot = $env:CUDA_PATH

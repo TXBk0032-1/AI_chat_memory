@@ -37,6 +37,9 @@ if ($workflowSource -notmatch 'name:\s+ai-chat-memory-windows-release') {
 if ($workflowSource -notmatch 'CUDA_COMPUTE_CAP:\s+["'']89["'']') {
     throw "Workflow does not set the CUDA compute capability for GPU-less runners"
 }
+if ($workflowSource -notmatch 'actions-rust-lang/setup-rust-toolchain') {
+    throw "Workflow does not use actions-rust-lang/setup-rust-toolchain to dynamically detect rust-toolchain.toml"
+}
 
 $planJson = & $Builder -PlanOnly
 if ($LASTEXITCODE -ne 0) {

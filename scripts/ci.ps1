@@ -34,7 +34,15 @@ if (-not (Test-Path -LiteralPath $ciCacheHelper -PathType Leaf)) {
     throw "CI cache helper missing: $ciCacheHelper"
 }
 . $ciCacheHelper
-$env:RUSTUP_TOOLCHAIN = "1.98.1"
+$pinnedToolchain = "1.98.1"
+$toolchainFile = Join-Path $Root "rust-toolchain.toml"
+if (Test-Path -LiteralPath $toolchainFile -PathType Leaf) {
+    $toolchainContent = Get-Content -LiteralPath $toolchainFile -Raw
+    if ($toolchainContent -match 'channel\s*=\s*"([^"]+)"') {
+        $pinnedToolchain = $Matches[1].Trim()
+    }
+}
+$env:RUSTUP_TOOLCHAIN = $pinnedToolchain
 $env:CARGO_TERM_COLOR = "always"
 
 function Initialize-CudaBuildEnvironment {
@@ -107,7 +115,7 @@ function Initialize-CudaBuildEnvironment {
     # CUDA 13.x CCCL requires MSVC's conforming preprocessor.
     $env:NVCC_APPEND_FLAGS = "-Xcompiler=/Zc:preprocessor"
     # CUDA 13 ships runtime DLLs under bin\x64; keep both for nvcc and runtime load.
-    $cargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
+    $cargoBin = if ($env:CARGO_HOME) { Join-Path $env:CARGO_HOME "bin" } else { Join-Path $env:USERPROFILE ".cargo\bin" }
     if (Test-Path -LiteralPath $cargoBin) {
         $env:PATH = "$cudaRoot\bin\x64;$cudaRoot\bin;$msvcBin;$cargoBin;$env:PATH"
     } else {
@@ -147,9 +155,15 @@ foreach ($command in $requiredCommands) {
 
 $rustVersion = $null
 if ($Stage -ne "quick") {
-    $rustVersion = (& rustc --version 2>&1) -join " "
-    if ($rustVersion -notmatch '^rustc 1\.98\.') {
-        throw "Expected Rust 1.98.x, found: $rustVersion"
+    $rustOutput = & rustc --version 2>&1
+    $rustVersion = ($rustOutput | ForEach-Object { [string]$_ } | Where-Object { $_ -match '^rustc \d+\.' } | Select-Object -Last 1)
+    if ($rustVersion) {
+        $rustVersion = $rustVersion.Trim()
+    }
+    $expectedMajorMinor = ($pinnedToolchain -split '\.')[0..1] -join '.'
+    if (-not $rustVersion -or $rustVersion -notmatch "^rustc $([regex]::Escape($expectedMajorMinor))\.") {
+        $detail = ($rustOutput | ForEach-Object { [string]$_ }) -join " "
+        throw "Expected Rust $expectedMajorMinor.x, found: $detail"
     }
 }
 

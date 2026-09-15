@@ -109,11 +109,25 @@ function Write-ReleaseManifest {
 
     $resolvedRustVersion = $RustVersion
     if (-not $RustVersion) {
-        $rustOutput = ((& rustc --version 2>&1) -join " ").Trim()
-        if ($LASTEXITCODE -ne 0) {
-            throw "Failed to resolve the Rust version: $rustOutput"
+        $rustcCmd = Get-Command rustc -ErrorAction SilentlyContinue
+        if (-not $rustcCmd) {
+            $cargoBin = if ($env:CARGO_HOME) { Join-Path $env:CARGO_HOME "bin" } else { Join-Path $env:USERPROFILE ".cargo\bin" }
+            $fallbackRustc = Join-Path $cargoBin "rustc.exe"
+            if (Test-Path -LiteralPath $fallbackRustc) {
+                $rustcCmd = $fallbackRustc
+            }
         }
-        $resolvedRustVersion = $rustOutput
+        $rustExec = if ($rustcCmd) { if ($rustcCmd -is [string]) { $rustcCmd } else { $rustcCmd.Source } } else { "rustc" }
+        $rustOutput = & $rustExec --version 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to resolve the Rust version: $($rustOutput -join ' ')"
+        }
+        $matched = ($rustOutput | ForEach-Object { [string]$_ } | Where-Object { $_ -match '^rustc \d+\.' } | Select-Object -Last 1)
+        if ($matched) {
+            $resolvedRustVersion = $matched.Trim()
+        } else {
+            $resolvedRustVersion = (($rustOutput -join " ")).Trim()
+        }
     }
     $commit = ((& git -C $Root rev-parse HEAD 2>&1) -join " ").Trim()
     if ($LASTEXITCODE -ne 0) {
