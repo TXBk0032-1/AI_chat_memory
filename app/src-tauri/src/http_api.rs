@@ -151,28 +151,6 @@ fn authorization_error(
     if !secret_ok {
         return Err("invalid_secret");
     }
-    // Write endpoints require a valid secret even when secret gating is
-    // disabled. A whitelisted origin is forgeable by any script on that
-    // page, so importing sessions must additionally prove knowledge of the
-    // shared secret. Without this, a malicious or hijacked third-party script on
-    // a whitelisted chat site could inject fabricated sessions. Read endpoints
-    // (sync-status, health) remain open under the origin+client checks.
-    let is_write = *method == Method::POST;
-    if is_write {
-        let configured = settings
-            .secret
-            .as_deref()
-            .filter(|secret| !secret.is_empty());
-        let has_valid_secret = configured.is_some_and(|secret| {
-            headers
-                .get(SECRET_HEADER)
-                .and_then(|value| value.to_str().ok())
-                .is_some_and(|header_secret| constant_time_eq(header_secret, secret))
-        });
-        if !has_valid_secret {
-            return Err("invalid_secret");
-        }
-    }
     Ok(())
 }
 
@@ -290,6 +268,44 @@ mod tests {
         headers.remove(CLIENT_HEADER);
         assert!(is_authorized(
             &Method::OPTIONS,
+            Some("https://chat.deepseek.com"),
+            &headers,
+            &settings
+        ));
+    }
+
+    #[test]
+    fn secret_toggle_alone_gates_write_requests() {
+        let mut settings = AppSettings::default();
+        let mut headers = HeaderMap::new();
+        headers.insert(CLIENT_HEADER, HeaderValue::from_static(CLIENT_VALUE));
+
+        assert_eq!(
+            authorization_error(
+                &Method::POST,
+                Some("https://chat.deepseek.com"),
+                &headers,
+                &settings
+            ),
+            Ok(()),
+            "密钥开关关闭时，导入等写请求不得再要求密钥"
+        );
+
+        settings.secret_enabled = true;
+        settings.secret = Some("secret".into());
+        assert_eq!(
+            authorization_error(
+                &Method::POST,
+                Some("https://chat.deepseek.com"),
+                &headers,
+                &settings
+            ),
+            Err("invalid_secret"),
+            "密钥开关打开时，缺少密钥头的写请求必须被拒"
+        );
+        headers.insert(SECRET_HEADER, HeaderValue::from_static("secret"));
+        assert!(is_authorized(
+            &Method::POST,
             Some("https://chat.deepseek.com"),
             &headers,
             &settings
