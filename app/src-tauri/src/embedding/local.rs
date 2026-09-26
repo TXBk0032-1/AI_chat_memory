@@ -1586,10 +1586,12 @@ mod tests {
         let device = backend.runtime_device_label();
         let dtype = backend.runtime_dtype_label();
         eprintln!("local harrier runtime device={device} dtype={dtype}");
-        if matches!(
-            settings.device,
-            LocalEmbeddingDevice::Auto | LocalEmbeddingDevice::Cuda
-        ) {
+        if cfg!(feature = "cuda")
+            && matches!(
+                settings.device,
+                LocalEmbeddingDevice::Auto | LocalEmbeddingDevice::Cuda
+            )
+        {
             assert!(
                 device.starts_with("CUDA"),
                 "expected CUDA runtime after driver upgrade, got {device}/{dtype}"

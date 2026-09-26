@@ -64,12 +64,18 @@ aws-sdk-s3 = { version = "1.144.0", default-features = false, features = ["behav
       "transport-io",
       "macros",
     ] }
-    candle-core = { version = "0.9.1", features = ["cuda"] }
-candle-nn = { version = "0.9.1", features = ["cuda"] }
+    candle-core = { version = "0.9.1" }
+candle-nn = { version = "0.9.1" }
 candle-transformers = { version = "0.9.1" }
 hf-hub = { version = "0.4", default-features = false, features = ["tokio", "rustls-tls"] }
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 unicode-segmentation = "1.12"
+
+[features]
+default = ["cuda"]
+# 本地嵌入的 CUDA 加速。以 --no-default-features 编译可去掉对 CUDA Toolkit
+# (nvcc) 的构建期依赖，运行时本地嵌入固定使用 CPU。
+cuda = ["candle-core/cuda", "candle-nn/cuda"]
 
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38"
