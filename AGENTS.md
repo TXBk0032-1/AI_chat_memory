@@ -23,6 +23,7 @@
 
 - The toolchain is pinned to Rust `1.98.1` and Node `22` in repository config/CI.
 - Every `ci.ps1` stage initializes CUDA and requires the repository machine layout: CUDA 13.3 at `C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3` and Visual Studio 2022 Community MSVC `14.44.35207`. A missing or differently installed toolkit fails even frontend-only pipeline stages.
+- CUDA is the default Cargo feature `cuda`. Pass `-NoCuda` to `ci.ps1`, `finish-task.ps1`, or `build-dev-portable.ps1` (or `--no-default-features` to cargo) to build without the CUDA Toolkit; local embeddings then run on CPU only.
 - `app/src-tauri/Cargo.toml` patches `glib` to `app/src-tauri/vendor/glib`; keep the vendored patch intact when changing dependencies.
 - `app/dist/` and `artifacts/` are generated. Do not commit release output.
 

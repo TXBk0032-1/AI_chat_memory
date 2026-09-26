@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [switch]$Force,
-    [switch]$Clean
+    [switch]$Clean,
+    [switch]$NoCuda
 )
 
 $ErrorActionPreference = "Stop"
@@ -25,6 +26,7 @@ Write-Host "==> Task changes are committed; starting release verification" -Fore
 $pipelineArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $Pipeline, "release")
 if ($Force) { $pipelineArgs += "-Force" }
 if ($Clean) { $pipelineArgs += "-Clean" }
+if ($NoCuda) { $pipelineArgs += "-NoCuda" }
 
 & powershell.exe @pipelineArgs
 if ($LASTEXITCODE -ne 0) {

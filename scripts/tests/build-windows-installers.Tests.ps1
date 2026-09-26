@@ -69,6 +69,9 @@ foreach ($installer in $installers) {
 # The builder must validate the portable executable's PE header ('MZ')
 # before packaging it into the portable ZIP, mirroring build-dev-portable.ps1.
 $builderSource = Get-Content -LiteralPath $Builder -Raw
+if (-not $builderSource.Contains('if ($NoCuda) { @("--", "--no-default-features") }')) {
+    throw "Installer builder does not forward -NoCuda to cargo as --no-default-features"
+}
 foreach ($peCheckFragment in @(
     "ReadByte() -ne [byte][char]'M'",
     "ReadByte() -ne [byte][char]'Z'",

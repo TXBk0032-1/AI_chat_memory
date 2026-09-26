@@ -36,6 +36,10 @@ $reuseExpectedAction = if (Test-Path -LiteralPath $frontendEntry) { "reuse" } el
 Assert-Equal $reuseExpectedAction $reusePlan.frontend_action "explicit reuse frontend action"
 Assert-Equal "embedded" $reusePlan.frontend_runtime "reused frontend runtime"
 
+Assert-Equal "True" ([string]$defaultPlan.cuda) "default plan enables CUDA"
+$noCudaPlan = & $Builder -PlanOnly -NoCuda | ConvertFrom-Json
+Assert-Equal "False" ([string]$noCudaPlan.cuda) "-NoCuda plan disables CUDA"
+
 $source = Get-Content -LiteralPath $Builder -Raw
 $embeddedRuntimeFragments = @(
     '$PreviousTauriConfig = $env:TAURI_CONFIG',
@@ -55,6 +59,9 @@ if ($source -match 'Compress-Archive|System\.IO\.Compression|\.zip') {
 }
 if ($source -notmatch 'cargo\s+build') {
     throw "Development builder does not invoke cargo build"
+}
+if (-not $source.Contains('if ($NoCuda) { "--no-default-features" }')) {
+    throw "Development builder does not map -NoCuda to --no-default-features"
 }
 
 Write-Host "PASS build-dev-portable contract" -ForegroundColor Green

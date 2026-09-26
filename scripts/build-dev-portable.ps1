@@ -7,12 +7,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-dev-portable.p
 
 .EXAMPLE
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-dev-portable.ps1 -ReuseFrontend
+
+.EXAMPLE
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-dev-portable.ps1 -NoCuda
 #>
 [CmdletBinding()]
 param(
     [switch]$ReuseFrontend,
     [switch]$PlanOnly,
-    [string]$OutputDirectory
+    [string]$OutputDirectory,
+    # 关闭 cuda feature（--no-default-features），不需要 CUDA Toolkit。
+    [switch]$NoCuda
 )
 
 $ErrorActionPreference = "Stop"
@@ -50,6 +55,7 @@ $Plan = [ordered]@{
     frontend_action = $FrontendAction
     frontend_runtime = "embedded"
     cargo_profile = "debug"
+    cuda = -not $NoCuda
     output_name = $OutputName
     output_path = Join-Path $OutputDirectory $OutputName
     output_file_count = 1
@@ -76,16 +82,20 @@ if (Test-Path -LiteralPath $toolchainFile -PathType Leaf) {
 $env:RUSTUP_TOOLCHAIN = $pinnedToolchain
 
 # Detect CUDA Toolkit: prefer $env:CUDA_PATH, otherwise pick the newest installed toolkit.
-$CudaRoot = $env:CUDA_PATH
-if (-not $CudaRoot -or -not (Test-Path -LiteralPath (Join-Path $CudaRoot "bin\nvcc.exe"))) {
-    $cudaBase = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA"
-    $CudaRoot = Get-ChildItem -LiteralPath $cudaBase -Directory -ErrorAction SilentlyContinue |
-        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "bin\nvcc.exe") } |
-        Sort-Object Name -Descending |
-        Select-Object -First 1 -ExpandProperty FullName
-}
-if (-not $CudaRoot -or -not (Test-Path -LiteralPath (Join-Path $CudaRoot "bin\nvcc.exe"))) {
-    throw "CUDA Toolkit (nvcc) was not found. Set CUDA_PATH or install it under $cudaBase"
+# -NoCuda builds without the cuda feature and never needs nvcc.
+$CudaRoot = $null
+if (-not $NoCuda) {
+    $CudaRoot = $env:CUDA_PATH
+    if (-not $CudaRoot -or -not (Test-Path -LiteralPath (Join-Path $CudaRoot "bin\nvcc.exe"))) {
+        $cudaBase = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA"
+        $CudaRoot = Get-ChildItem -LiteralPath $cudaBase -Directory -ErrorAction SilentlyContinue |
+            Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName "bin\nvcc.exe") } |
+            Sort-Object Name -Descending |
+            Select-Object -First 1 -ExpandProperty FullName
+    }
+    if (-not $CudaRoot -or -not (Test-Path -LiteralPath (Join-Path $CudaRoot "bin\nvcc.exe"))) {
+        throw "CUDA Toolkit (nvcc) was not found. Set CUDA_PATH or install it under $cudaBase, or pass -NoCuda"
+    }
 }
 
 # Detect Visual Studio 2022 via vswhere so the MSVC patch version is not hardcoded.
@@ -120,11 +130,14 @@ if (-not (Get-Command cl.exe -ErrorAction SilentlyContinue)) {
 }
 
 $MsvcBin = Split-Path -Parent (Get-Command cl.exe -ErrorAction Stop).Source
-$env:CUDA_PATH = $CudaRoot
-$env:CUDA_HOME = $CudaRoot
-$env:NVCC_CCBIN = $MsvcBin
-$env:NVCC_APPEND_FLAGS = "-Xcompiler=/Zc:preprocessor"
-$env:PATH = "$CudaRoot\bin\x64;$CudaRoot\bin;$MsvcBin;$env:PATH"
+if ($CudaRoot) {
+    $env:CUDA_PATH = $CudaRoot
+    $env:CUDA_HOME = $CudaRoot
+    $env:NVCC_CCBIN = $MsvcBin
+    $env:NVCC_APPEND_FLAGS = "-Xcompiler=/Zc:preprocessor"
+    $env:PATH = "$CudaRoot\bin\x64;$CudaRoot\bin;$MsvcBin;$env:PATH"
+}
+$CargoFeatureArgs = if ($NoCuda) { "--no-default-features" } else { "--all-features" }
 
 if ($FrontendAction -eq "build") {
     Write-Host "==> Build frontend" -ForegroundColor Cyan
@@ -144,7 +157,7 @@ Push-Location $Rust
 $PreviousTauriConfig = $env:TAURI_CONFIG
 try {
     $env:TAURI_CONFIG = '{"build":{"devUrl":null}}'
-    & cargo build --all-features --bin ai-chat-memory-desktop
+    & cargo build $CargoFeatureArgs --bin ai-chat-memory-desktop
     if ($LASTEXITCODE -ne 0) { throw "Cargo build failed with exit code $LASTEXITCODE" }
 } finally {
     $env:TAURI_CONFIG = $PreviousTauriConfig

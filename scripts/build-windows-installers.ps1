@@ -7,7 +7,9 @@ param(
     [Parameter(Mandatory, ParameterSetName = "Manifest")]
     [string]$SourceDirectory,
     [string]$ArtifactsDirectory,
-    [string]$RustVersion
+    [string]$RustVersion,
+    # 关闭 cuda feature 构建（--no-default-features），不需要 CUDA Toolkit。
+    [switch]$NoCuda
 )
 
 $ErrorActionPreference = "Stop"
@@ -180,6 +182,7 @@ function Write-ReleaseManifest {
             commit = $commit
             built_at_utc = [DateTime]::UtcNow.ToString("o")
             rust = $resolvedRustVersion
+            cuda = -not $NoCuda
             artifacts = $artifactRecords
         }
         $manifestJson = $manifest | ConvertTo-Json -Depth 5
@@ -268,7 +271,9 @@ try {
         Write-Host "`n==> Build $($installer.variant) ($($installer.webview_install_mode))" -ForegroundColor Cyan
         Push-Location $App
         try {
-            & npm.cmd run tauri -- build --bundles nsis --config $overridePath --ci
+            # tauri build 把 `--` 之后的参数原样转交给 cargo。
+            $cargoArgs = if ($NoCuda) { @("--", "--no-default-features") } else { @() }
+            & npm.cmd run tauri -- build --bundles nsis --config $overridePath --ci @cargoArgs
             if ($LASTEXITCODE -ne 0) {
                 throw "Tauri build failed for $($installer.variant) with exit code $LASTEXITCODE"
             }

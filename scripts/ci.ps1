@@ -3,7 +3,10 @@ param(
     [ValidateSet("check", "test", "release", "quick")]
     [string]$Stage = "check",
     [switch]$Clean,
-    [switch]$Force
+    [switch]$Force,
+    # 以 --no-default-features 编译 Rust（关闭 cuda feature），不再需要 CUDA Toolkit；
+    # 本地嵌入运行时固定使用 CPU。
+    [switch]$NoCuda
 )
 
 $ErrorActionPreference = "Stop"
@@ -131,10 +134,12 @@ function Initialize-CudaBuildEnvironment {
 }
 
 # 'quick' is the CUDA-free fallback stage invoked by the pre-push hook on
-# machines without the CUDA toolkit; every other stage still requires CUDA.
-if ($Stage -ne "quick") {
+# machines without the CUDA toolkit; -NoCuda runs every other stage without the
+# cuda feature, so neither needs nvcc. cargo/cc still locate MSVC on their own.
+if ($Stage -ne "quick" -and -not $NoCuda) {
     Initialize-CudaBuildEnvironment
 }
+$cargoFeatureArgs = if ($NoCuda) { "--no-default-features" } else { "--all-features" }
 
 function Invoke-Step {
     param([string]$Name, [scriptblock]$Action)
@@ -279,11 +284,11 @@ $userscriptPath = Join-Path $Root "userscript\dist\ai-chat-memory.user.js"
 $userscriptTestPath = Join-Path $Root "userscript\tests\capture.test.mjs"
 
 $frontendCmd = "npm run build"
-$rustCmd = "node --check `"$userscriptPath`" && node --test `"$userscriptTestPath`" && powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$installerContractTest`" && powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$portableContractTest`" && powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$ciCacheContractTest`" && cargo fmt --check && cargo clippy --all-targets --all-features -- -D warnings"
+$rustCmd = "node --check `"$userscriptPath`" && node --test `"$userscriptTestPath`" && powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$installerContractTest`" && powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$portableContractTest`" && powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$ciCacheContractTest`" && cargo fmt --check && cargo clippy --all-targets $cargoFeatureArgs -- -D warnings"
 
 if ($Stage -in "test", "release") {
     $frontendCmd = "npm run build && npm test"
-    $rustCmd = "$rustCmd && cargo test --all-features"
+    $rustCmd = "$rustCmd && cargo test $cargoFeatureArgs"
 }
 
 $frontendPaths = @(
@@ -299,6 +304,8 @@ $rustPaths = @(
 
 $frontendFingerprint = Get-InputFingerprint -RepoRoot $Root -Paths $frontendPaths
 $rustFingerprint = Get-InputFingerprint -RepoRoot $Root -Paths $rustPaths
+# 有无 CUDA 的构建产物不同，缓存不能互相满足。
+if ($NoCuda) { $rustFingerprint = "$rustFingerprint-nocuda" }
 $packageVersion = (Get-Content -LiteralPath (Join-Path $App "package.json") -Raw | ConvertFrom-Json).version
 
 $frontendSkipped = Test-FrontendCacheValid -CacheDir $CacheDir -CurrentFingerprint $frontendFingerprint -AppDir $App -Stage $Stage
@@ -384,7 +391,7 @@ if ($Stage -eq "release") {
             $previousModulePath = $env:PSModulePath
             $env:PSModulePath = $win51ModulePath
             try {
-                & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $InstallerBuilder -ArtifactsDirectory $Artifacts -RustVersion $rustVersion
+                & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $InstallerBuilder -ArtifactsDirectory $Artifacts -RustVersion $rustVersion -NoCuda:$NoCuda
             } finally {
                 $env:PSModulePath = $previousModulePath
             }
