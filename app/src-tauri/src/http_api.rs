@@ -31,7 +31,7 @@ pub async fn serve(service: AppService) -> crate::error::Result<()> {
             post(import_zip).layer(DefaultBodyLimit::max(128 * 1024 * 1024)),
         )
         .route("/api/v1/sessions/sync-status", get(sync_status))
-        .fallback(options)
+        .fallback(not_found)
         .layer(DefaultBodyLimit::max(128 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(service.clone(), authorize))
         .layer(middleware::from_fn(log_request))
@@ -70,14 +70,17 @@ async fn authorize(
         tracing::warn!(method=%request.method(), path=request.uri().path(), origin=origin.unwrap_or("<missing>"), reason, "local API request rejected");
         return (StatusCode::FORBIDDEN, reason).into_response();
     }
-    if request.method() != Method::OPTIONS {
-        service.mark_userscript_request().await;
-    }
-    let mut response = if request.method() == Method::OPTIONS {
+    let method = request.method().clone();
+    let mut response = if method == Method::OPTIONS {
         StatusCode::NO_CONTENT.into_response()
     } else {
         next.run(request).await
     };
+    // 只有命中已知路由的真实请求才刷新「油猴脚本已连接」状态，
+    // 避免打到未知路径的探测请求也让 UI 显示已连接。
+    if method != Method::OPTIONS && response.status() != StatusCode::NOT_FOUND {
+        service.mark_userscript_request().await;
+    }
     if let Some(origin) = origin.and_then(|o| HeaderValue::from_str(o).ok()) {
         response
             .headers_mut()
@@ -189,8 +192,10 @@ async fn sync_status(
         Err(e) => error_response(e),
     }
 }
-async fn options() -> StatusCode {
-    StatusCode::NO_CONTENT
+// OPTIONS 预检在 authorize 中间件里已统一返回 204，不会到达此处；
+// 其余方法打到未知路径一律 404，避免任意路径都返回 204 扩大探测面。
+async fn not_found() -> StatusCode {
+    StatusCode::NOT_FOUND
 }
 fn api_result(result: crate::error::Result<crate::models::ImportResponse>) -> Response {
     match result {
