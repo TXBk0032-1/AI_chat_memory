@@ -391,7 +391,11 @@ if ($Stage -eq "release") {
             $previousModulePath = $env:PSModulePath
             $env:PSModulePath = $win51ModulePath
             try {
-                & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $InstallerBuilder -ArtifactsDirectory $Artifacts -RustVersion $rustVersion -NoCuda:$NoCuda
+                # powershell.exe -File 会把 `-NoCuda:$false` 当作字符串 "False" 传入，
+                # 无法绑定到 switch；因此只在需要时追加开关。
+                $installerArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $InstallerBuilder, "-ArtifactsDirectory", $Artifacts, "-RustVersion", $rustVersion)
+                if ($NoCuda) { $installerArgs += "-NoCuda" }
+                & powershell.exe @installerArgs
             } finally {
                 $env:PSModulePath = $previousModulePath
             }
