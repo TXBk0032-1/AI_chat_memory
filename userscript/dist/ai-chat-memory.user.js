@@ -9,7 +9,10 @@
 // @match        https://kimi.com/*
 // @match        https://www.kimi.com/*
 // @run-at       document-start
-// @connect      *
+// @connect      chat.dеepseek.com
+// @connect      dеepseek.com
+// @connect      localhost
+// @connect      127.0.0.1
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @grant        GM_deleteValue
@@ -25,7 +28,9 @@
         captureSchemaVersion: 1,
         captureStorageKey: 'deepseek_web_capture_v1',
         referenceStorageKey: 'deepseek_reference_cache_v1',
-        defaultBridgeUrl: 'http://localhost:19820/api/v1',
+        // 后端只绑定 127.0.0.1（http_api.rs），不要用 localhost：
+        // Windows 上 localhost 常优先解析为 ::1 导致连接直接失败。
+        defaultBridgeUrl: 'http://127.0.0.1:19820/api/v1',
         bridgeUrlKey: 'bridge_url',
         bridgeSecretKey: 'bridge_secret',
         tokenTtlMs: 24 * 60 * 60 * 1000,
@@ -129,7 +134,7 @@
             return text
                 .replace(/"(authorization|proxy-authorization|cookie|set-cookie|secret|token|access_token|refresh_token|x-settings-token|device_id|did|device_token|fingerprint|password|email|phone|mobile)"\s*:\s*"[^"]+"/gi, '"$1":"{REDACTED}"')
                 .replace(/(Bearer\s+)[a-zA-Z0-9_\-\.]{16,}/gi, '$1{REDACTED}')
-                .replace(/(pow.*(?:response|answer))\s*:\s*"[^"]+"/gi, '"$1":"{REDACTED}"');
+                .replace(/"(pow[^"]*(?:response|answer))"\s*:\s*"[^"]+"/gi, '"$1":"{REDACTED}"');
         }
 
         function redactExchange(exchange) {
@@ -1316,9 +1321,19 @@
 
         extractOfficialZipUrl(json) {
             const seen = new Set();
+            // 仅信任 DеepSeek 自有域名的下载地址，防止服务端响应中攻击者可控的
+            // 字段把导出流量（连同 GM_xmlhttpRequest 的跨域能力）引到任意主机。
+            const isTrustedHost = (value) => {
+                try {
+                    const host = new URL(value).hostname;
+                    return host === 'chat.dеepseek.com' || host === 'dеepseek.com' || host.endsWith('.dеepseek.com');
+                } catch {
+                    return false;
+                }
+            };
             const findZip = (value) => {
                 if (typeof value === 'string') {
-                    return /^https?:\/\/.+(?:\.zip(?:\?|$)|(?:\/download|\/export)(?:[/?#]|$))/.test(value) ? value : null;
+                    return /^https?:\/\/.+(?:\.zip(?:\?|$)|(?:\/download|\/export)(?:[/?#]|$))/.test(value) && isTrustedHost(value) ? value : null;
                 }
                 if (!value || typeof value !== 'object') return null;
                 if (seen.has(value)) return null;

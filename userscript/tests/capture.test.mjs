@@ -36,7 +36,9 @@ function plain(value) {
 
 test('metadata block declares @connect so GM_xmlhttpRequest survives strict managers', () => {
     const head = readFileSync(userscriptPath, 'utf8').split(/\r?\n/).slice(0, 50).join('\n');
-    assert.match(head, /^\/\/\s*@connect\s+\*\s*$/m, 'the metadata block must whitelist cross-origin download hosts via @connect *');
+    assert.doesNotMatch(head, /^\/\/\s*@connect\s+\*\s*$/m, '@connect * grants cross-origin access to any host and must stay removed');
+    assert.match(head, /^\/\/\s*@connect\s+chat\.dеepseek\.com\s*$/m, 'the ZIP download host must be whitelisted via @connect');
+    assert.match(head, /^\/\/\s*@connect\s+127\.0\.0\.1\s*$/m, 'the local bridge host must be whitelisted via @connect');
     assert.match(head, /^\/\/\s*@grant\s+GM_xmlhttpRequest\s*$/m, 'the ZIP download relies on GM_xmlhttpRequest');
 });
 
@@ -396,7 +398,7 @@ test('BridgeClient adds the client header and optional local secret through one 
     });
     const response = await client.request('/sessions/import', { headers: { 'Content-Type': 'application/json' } });
     assert.equal(response.status, 200);
-    assert.equal(calls[0].url, 'http://localhost:19820/api/v1/sessions/import');
+    assert.equal(calls[0].url, 'http://127.0.0.1:19820/api/v1/sessions/import');
     assert.equal(calls[0].options.headers['X-AI-Chat-Memory-Client'], 'userscript-v1');
     assert.equal(calls[0].options.headers['X-AI-Chat-Memory-Secret'], 'local-secret');
     assert.equal(calls[0].options.headers['Content-Type'], 'application/json');
