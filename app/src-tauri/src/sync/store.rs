@@ -83,12 +83,25 @@ pub struct SyncStore {
     write_gate: Arc<Mutex<()>>,
 }
 
+/// 按数据库文件路径共享的写闸门。`SyncStore::new` 会被多个调用点
+/// （AppService、delete_session、import 等）各自实例化，若每个实例
+/// 持有独立的 Mutex，互斥就形同虚设，只能靠 SQLite busy_timeout 兜底，
+/// 高并发下以 SQLITE_BUSY 报错而非排队。这里以数据库路径为键复用同
+/// 一把锁，保证同一数据库的所有实例真正互斥。
+fn shared_write_gate(pool: &SqlitePool) -> Arc<Mutex<()>> {
+    static GATES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, Arc<Mutex<()>>>>,
+    > = std::sync::OnceLock::new();
+    let key = pool.connect_options().get_filename().to_path_buf();
+    let gates = GATES.get_or_init(Default::default);
+    let mut map = gates.lock().expect("write gate registry poisoned");
+    map.entry(key).or_default().clone()
+}
+
 impl SyncStore {
     pub fn new(pool: SqlitePool) -> Self {
-        Self {
-            pool,
-            write_gate: Arc::new(Mutex::new(())),
-        }
+        let write_gate = shared_write_gate(&pool);
+        Self { pool, write_gate }
     }
 
     pub fn pool(&self) -> &SqlitePool {
