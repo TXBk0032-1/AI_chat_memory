@@ -73,7 +73,7 @@ if (-not $builderSource.Contains('if ($NoCuda) { @("--", "--no-default-features"
     throw "Installer builder does not forward -NoCuda to cargo as --no-default-features"
 }
 $ciSource = Get-Content -LiteralPath (Join-Path $Root "scripts\ci.ps1") -Raw
-if ($ciSource -match '-NoCuda:\$') {
+if ($ciSource -match '(?m)^[^#\r\n]*-File[^\r\n#]*-NoCuda:\$') {
     throw "ci.ps1 must not pass -NoCuda:`$value through powershell.exe -File (it arrives as a string and fails to bind)"
 }
 if (-not $ciSource.Contains('if ($NoCuda) { $installerArgs += "-NoCuda" }')) {
