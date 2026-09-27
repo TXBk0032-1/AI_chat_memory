@@ -194,6 +194,20 @@ pub fn run() {
             })?;
             app.manage(service.clone());
 
+            let codex_service = service.clone();
+            tauri::async_runtime::spawn(async move {
+                if codex_service.settings().await.codex.auto_watch {
+                    match codex_service.import_codex().await {
+                        Ok(resp) => tracing::info!(
+                            imported = resp.imported,
+                            updated = resp.updated,
+                            "codex 启动增量导入完成"
+                        ),
+                        Err(error) => tracing::warn!(%error, "codex 启动增量导入失败"),
+                    }
+                }
+            });
+
             let manager = local_services::LocalServiceManager::new();
             let mcp_service = service.clone();
             tauri::async_runtime::block_on(async {
@@ -257,7 +271,10 @@ pub fn run() {
             commands::move_data_directory,
             commands::confirm_close_behavior,
             commands::write_export_file,
-            commands::print_to_pdf
+            commands::print_to_pdf,
+            commands::import_codex,
+            commands::get_codex_work,
+            commands::list_child_sessions
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");
