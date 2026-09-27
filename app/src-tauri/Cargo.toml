@@ -4,6 +4,10 @@ version = "0.1.0"
 description = "Local-first cross-platform AI conversation archive"
 authors = ["AI Chat Memory contributors"]
 edition = "2024"
+# 新增 src/bin/ai-chat-memory-mcp.rs 后 crate 内有两个 bin target；
+# `tauri dev` 通过不带 --bin 的 `cargo run` 启动桌面应用，需显式声明默认二进制。
+# `cargo run --bin ai-chat-memory-mcp` 仍可显式运行 MCP stdio 服务器。
+default-run = "ai-chat-memory-desktop"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
