@@ -6,6 +6,12 @@ function fakeApi(searchSessions: DesktopApi['searchSessions']): DesktopApi {
   return { searchSessions } as DesktopApi
 }
 
+function makeApi(): DesktopApi {
+  return {
+    searchSessions: vi.fn().mockResolvedValue({ sessions: [], total: 0, search_mode: 'hybrid', semantic_status: 'ready' }),
+  } as unknown as DesktopApi
+}
+
 describe('useSessionCatalog', () => {
   it('owns query pagination and bound date filters', async () => {
     const searchSessions = vi.fn().mockResolvedValue({ sessions: [], total: 0, search_mode: 'hybrid', semantic_status: 'ready' })
@@ -74,5 +80,21 @@ describe('useSessionCatalog', () => {
     await catalog.loadMore()
     expect(searchSessions.mock.calls.map(([query]) => query.offset)).toEqual([0, 100, 100])
     expect(catalog.sessions.value[catalog.sessions.value.length - 1]?.id).toBe('p2-0')
+  })
+
+  it('lazily loads and caches child sessions per parent', async () => {
+    const api = makeApi()
+    api.listChildSessions = vi.fn().mockResolvedValue([
+      { id: 'c1', platform: 'codex', platform_session_id: 'child-1', title: '子代理会话' },
+    ])
+    const catalog = useSessionCatalog(api as never)
+
+    const first = await catalog.loadChildSessions('parent-1')
+    const second = await catalog.loadChildSessions('parent-1')
+
+    expect(first).toHaveLength(1)
+    expect(second).toBe(first)
+    expect(api.listChildSessions).toHaveBeenCalledTimes(1)
+    expect(catalog.childSessions.value.get('parent-1')?.[0].id).toBe('c1')
   })
 })
