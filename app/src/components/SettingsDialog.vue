@@ -122,6 +122,7 @@ const emit = defineEmits<{
   cloudSyncNow: []
   cloudSyncRewrite: []
   cloudSyncRemoveDevice: [deviceId: string]
+  importCodex: []
 }>()
 
 function cloudCredentials(): CloudCredentialInput {
@@ -502,6 +503,18 @@ function onDeleteCustomTheme(id: string) {
               <section class="setting-group behavior-settings">
                 <label><span>{{ t('settings.closeBehavior') }}</span><AppSelect v-model="settings.close_behavior" :options="closeBehaviorOptions" block /></label>
                 <label><span>{{ t('settings.trayClick') }}</span><AppSelect v-model="settings.tray_click_behavior" :options="trayClickOptions" block /></label>
+              </section>
+              <section class="setting-group codex-settings">
+                <h3>{{ t('settings.codexTitle') }}</h3>
+                <label class="setting-row switch-row">
+                  <span>{{ t('settings.codexAutoWatch') }}</span>
+                  <input type="checkbox" v-model="settings.codex.auto_watch" />
+                </label>
+                <label class="setting-row">
+                  <span>{{ t('settings.codexHome') }}</span>
+                  <input type="text" v-model="settings.codex.codex_home" :placeholder="t('settings.codexHomePlaceholder')" />
+                </label>
+                <button class="codex-import-now" @click="emit('importCodex')">{{ t('settings.codexImportNow') }}</button>
               </section>
             </section>
 

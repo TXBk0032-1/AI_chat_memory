@@ -40,6 +40,7 @@ Thumbs.db
 
 # Local assistant settings
 .claude/settings.local.json
+.claude/launch.json
 hatch-runs/
 artifacts/
 .ci-cache/

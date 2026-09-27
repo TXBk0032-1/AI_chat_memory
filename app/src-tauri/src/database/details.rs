@@ -17,7 +17,7 @@ pub async fn open_session(
     id: &str,
     anchor_seq: Option<i64>,
 ) -> Result<SessionOpen> {
-    let row = sqlx::query("SELECT id, platform, platform_session_id, title, created_at, updated_at, imported_at, raw_data FROM sessions WHERE id = ?")
+    let row = sqlx::query("SELECT id, platform, platform_session_id, title, created_at, updated_at, imported_at, raw_data, project FROM sessions WHERE id = ?")
         .bind(id).fetch_optional(pool).await?.ok_or_else(|| AppError::NotFound("session".into()))?;
     let references = row
         .try_get::<Option<String>, _>("raw_data")?

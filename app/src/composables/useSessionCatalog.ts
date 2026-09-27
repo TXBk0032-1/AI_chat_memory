@@ -1,4 +1,4 @@
-import { computed, ref } from 'vue'
+import { computed, ref, shallowRef } from 'vue'
 import { desktopApi, type DesktopApi, type SearchMode, type SemanticStatus } from '../desktop-api'
 import type { SessionSummary } from '../conversation'
 
@@ -27,6 +27,31 @@ export function useSessionCatalog(
   const searchElapsed = ref<number | null>(null)
   const searchMode = ref<SearchMode>('hybrid')
   const semanticStatus = ref<SemanticStatus>('disabled')
+  const childSessions = shallowRef(new Map<string, SessionSummary[]>())
+  const childPending = new Map<string, Promise<SessionSummary[]>>()
+
+  async function loadChildSessions(parentPlatformSessionId: string): Promise<SessionSummary[]> {
+    const cached = childSessions.value.get(parentPlatformSessionId)
+    if (cached) return cached
+    const inflight = childPending.get(parentPlatformSessionId)
+    if (inflight) return inflight
+    const request = api.listChildSessions(parentPlatformSessionId)
+      .then((children) => {
+        // 复用同一 Map 实例并重新赋值以触发响应式；缓存空数组同样命中，避免重复 IPC。
+        const next = new Map(childSessions.value)
+        next.set(parentPlatformSessionId, children)
+        childSessions.value = next
+        return children
+      })
+      .finally(() => childPending.delete(parentPlatformSessionId))
+    childPending.set(parentPlatformSessionId, request)
+    return request
+  }
+
+  function invalidateChildSessions() {
+    childSessions.value = new Map()
+    childPending.clear()
+  }
   const filtered = computed(() => Boolean(query.value || platform.value || dateFrom.value || dateTo.value || searchMode.value !== 'hybrid'))
   let generation = 0
 
@@ -44,6 +69,7 @@ export function useSessionCatalog(
     const priorVisibleIds = reset ? new Set(sessions.value.map((session) => session.id)) : null
     if (reset) {
       committedQuery.value = query.value.trim()
+      invalidateChildSessions()
     }
     console.log(`%c[PERF:CATALOG] loadSessions(platform="${platform.value}", q="${committedQuery.value}") started (gen=${requestGeneration})`, 'color: #059669')
     try {
@@ -123,5 +149,6 @@ export function useSessionCatalog(
     sessions, loading, error, query, committedQuery, platform, dateFrom, dateTo,
     showFilters, total, searchElapsed, filtered, searchMode, semanticStatus,
     loadSessions, loadMore, resetFilters, selectPlatform, setSearchMode,
+    childSessions, loadChildSessions, invalidateChildSessions,
   }
 }

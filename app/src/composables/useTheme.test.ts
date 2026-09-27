@@ -26,6 +26,7 @@ function createTestSettings(): SettingsModel {
       openai_compatible: { base_url: '', model: '' },
     },
     mcp_enabled: true,
+    codex: { auto_watch: false },
     cloud_sync: {
       backend: 'webdav',
       enabled: false,

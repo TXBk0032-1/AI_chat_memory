@@ -37,6 +37,7 @@ function defaultSettings(): SettingsModel {
     theme: 'system',
     language: 'system',
     mcp_enabled: false,
+    codex: { auto_watch: false },
     cloud_sync: { enabled: false, backend: 'webdav', webdav: { url: '', username: '', password: '' }, s3: {} as never, password: '' } as never,
     semantic_search: { enabled: false, backend: 'local', model_path: '', ollama: { base_url: '', model: '', dimensions: undefined }, llama_cpp: { base_url: '', model: '', dimensions: undefined }, openai_compatible: { base_url: '', api_key: '', model: '', dimensions: undefined } } as never,
   }

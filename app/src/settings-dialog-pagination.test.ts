@@ -43,6 +43,7 @@ function settingsFixture(): SettingsModel {
       openai_compatible: { base_url: 'https://example.test/v1', model: 'test-model' },
     },
     mcp_enabled: true,
+    codex: { auto_watch: false },
     cloud_sync: { backend: 'webdav', enabled: false, connection_verified: false, base_url: '', root_path: '', username: '', encryption_enabled: false, s3: { endpoint_url: '', region: 'us-east-1', bucket: '', prefix: '', force_path_style: false }, remote_id: 'default', vault_id: 'default', generation_id: 'generation-1' },
   }
 }

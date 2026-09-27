@@ -5,9 +5,9 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use crate::{
     models::{
         AppSettings, BranchOverview, CloudConnectionTestResult, CloudCredentialInput,
-        CloudSyncSettings, CloudSyncStatus, DesktopApiStatus, EmbeddingHealth, ImportResponse,
-        Message, SearchMode, SearchQuery, SemanticRuntimeStatus, SessionList, SessionOpen,
-        SessionSearchHit, SupportedLocale,
+        CloudSyncSettings, CloudSyncStatus, CodexImportResponse, DesktopApiStatus, EmbeddingHealth,
+        ImportResponse, Message, SearchMode, SearchQuery, SemanticRuntimeStatus, SessionList,
+        SessionOpen, SessionSearchHit, SessionSummary, SupportedLocale, WorkItem,
     },
     service::AppService,
 };
@@ -638,4 +638,28 @@ mod export_tests {
 #[tauri::command]
 pub async fn cancel_semantic_work(service: State<'_, AppService>) -> Result<(), String> {
     service.cancel_semantic_work().await.map_err(message)
+}
+
+#[tauri::command]
+pub async fn import_codex(service: State<'_, AppService>) -> Result<CodexImportResponse, String> {
+    service.import_codex().await.map_err(message)
+}
+
+#[tauri::command]
+pub async fn get_codex_work(
+    service: State<'_, AppService>,
+    thread_id: String,
+) -> Result<Vec<WorkItem>, String> {
+    service.get_codex_work(&thread_id).await.map_err(message)
+}
+
+#[tauri::command]
+pub async fn list_child_sessions(
+    service: State<'_, AppService>,
+    parent_platform_session_id: String,
+) -> Result<Vec<SessionSummary>, String> {
+    service
+        .list_child_sessions(&parent_platform_session_id)
+        .await
+        .map_err(message)
 }

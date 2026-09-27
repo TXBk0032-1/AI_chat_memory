@@ -85,6 +85,9 @@ pub fn normalize_session(platform: &str, raw: &Value) -> Result<NormalizedSessio
         imported_at: Utc::now().to_rfc3339(),
         messages,
         raw_data: raw.clone(),
+        project: None,
+        parent_platform_session_id: None,
+        agent_label: None,
     })
 }
 
@@ -376,6 +379,9 @@ pub fn normalize_deepseek_export(raw: &Value) -> Result<NormalizedSession> {
         imported_at: Utc::now().to_rfc3339(),
         messages,
         raw_data: raw.clone(),
+        project: None,
+        parent_platform_session_id: None,
+        agent_label: None,
     })
 }
 

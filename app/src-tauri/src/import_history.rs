@@ -289,6 +289,9 @@ fn cherry_sessions(topics: &[Value], messages: &[Value]) -> Vec<NormalizedSessio
                 .map(|message| cherry_message(message))
                 .collect(),
             raw_data,
+            project: None,
+            parent_platform_session_id: None,
+            agent_label: None,
         });
         let _ = index;
     }
@@ -472,6 +475,9 @@ fn chatbox_session(value: &Value, fallback_id: &str, raw_data: Value) -> Normali
             .map(|messages| messages.iter().map(chatbox_message).collect())
             .unwrap_or_default(),
         raw_data,
+        project: None,
+        parent_platform_session_id: None,
+        agent_label: None,
     }
 }
 
@@ -602,6 +608,9 @@ fn parse_kelivo(value: &Value) -> Result<Vec<NormalizedSession>> {
                 .map(|message| kelivo_message(message, &events_by_id))
                 .collect(),
             raw_data,
+            project: None,
+            parent_platform_session_id: None,
+            agent_label: None,
         });
     }
     Ok(sessions)
@@ -768,6 +777,9 @@ fn parse_gemini_takeout(html: &str) -> Result<ImportedArchive> {
                 "activity_time": activity_time,
                 "html": chunk.trim().chars().take(64 * 1024).collect::<String>(),
             }),
+            project: None,
+            parent_platform_session_id: None,
+            agent_label: None,
         });
     }
     if sessions.is_empty() {

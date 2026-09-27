@@ -308,3 +308,33 @@ describe('MessageBlock rendered notifications and code copy', () => {
     }
   })
 })
+
+describe('MessageBlock codex work items', () => {
+  it('renders the work panel instead of the thinking dropdown when work items exist', async () => {
+    const items = [{ work_seq: 0, seq: 0, kind: 'command' as const, title: 'ls', body: 'total 0', expandable: true, truncated: false }]
+    document.body.innerHTML = '<div id="app"></div>'
+    const openSubagent = vi.fn()
+    const Root = defineComponent({
+      setup: () => () => h(MessageBlock, {
+        message: messageFixture({ metadata: { thinking: '被抑制的思考' } }),
+        references: new Map(),
+        query: '',
+        expanded: true,
+        formattedDate: '2026-09-27',
+        roleLabel: '助手',
+        workItems: items,
+        onOpenSubagent: openSubagent,
+      }),
+    })
+    const app = createApp(Root)
+    app.mount(document.getElementById('app')!)
+    try {
+      await nextTick()
+      expect(document.querySelector('.codex-work')).toBeTruthy()
+      expect(document.querySelector('.thinking-toggle')).toBeNull()
+    } finally {
+      app.unmount()
+      document.body.innerHTML = ''
+    }
+  })
+})

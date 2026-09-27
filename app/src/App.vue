@@ -44,6 +44,8 @@ import {
   type BranchOverview,
   type SearchMatch,
   type Message,
+  type SessionSummary,
+  type WorkItem,
 } from './conversation'
 import {
   exportDate,
@@ -109,7 +111,63 @@ const exportRenderModel = ref<ConversationExport | null>(null)
 const exportDocumentRef = ref<InstanceType<typeof ExportDocument> | null>(null)
 const pendingCloseBehavior = ref<'hide_to_tray' | 'exit' | null>(null)
 const expandedThinking = ref(new Set<string>())
-const settings = ref<SettingsModel>(props.initialSettings ?? { setup_complete: false, secret_enabled: false, allowed_origins: [], close_behavior: 'ask', tray_click_behavior: 'show_menu', theme: 'system', light_theme_id: 'green', dark_theme_id: 'black', custom_themes: [], language: 'system', semantic_search: { enabled: true, default_mode: 'hybrid', backend: 'local', local: { model: 'BAAI/bge-small-zh-v1.5', device: 'auto', dtype: 'auto' }, ollama: { base_url: 'http://127.0.0.1:11434', model: 'nomic-embed-text' }, llama_cpp: { base_url: 'http://127.0.0.1:8080/v1', model: 'bge-small-zh-v1.5' }, openai_compatible: { base_url: 'https://api.openai.com/v1', model: 'text-embedding-3-small' } }, mcp_enabled: false, cloud_sync: { backend: 'webdav', enabled: false, connection_verified: false, base_url: '', root_path: '', username: '', encryption_enabled: false, s3: { endpoint_url: '', region: 'us-east-1', bucket: '', prefix: '', force_path_style: false }, remote_id: 'default', vault_id: 'default', generation_id: 'generation-1' } })
+const codexWorkBySeq = ref(new Map<number, WorkItem[]>())
+const expandedParents = ref(new Set<string>())
+
+async function toggleChildren(parentId: string) {
+  const next = new Set(expandedParents.value)
+  if (next.has(parentId)) {
+    next.delete(parentId)
+    expandedParents.value = next
+    return
+  }
+  next.add(parentId)
+  expandedParents.value = next
+  const parent = sessions.value.find((s) => s.id === parentId)
+  if (parent) await loadChildSessions(parent.platform_session_id)
+}
+
+async function handleImportCodex() {
+  try {
+    const result = await desktopApi.importCodex()
+    console.log('[CODEX] import result:', result)
+    await loadSessions()
+  } catch (reason) {
+    console.error('[CODEX] import failed:', reason)
+  }
+}
+
+const childSessionsByParentId = computed(() => {
+  const view = new Map<string, SessionSummary[]>()
+  for (const session of sessions.value) {
+    const kids = childSessions.value.get(session.platform_session_id)
+    if (kids) view.set(session.id, kids)
+  }
+  return view
+})
+
+async function loadCodexWork(session: { platform: string; platform_session_id: string }) {
+  codexWorkBySeq.value = new Map()
+  if (session.platform !== 'codex') return
+  // 快速切换会话时旧请求可能后返回：记录目标会话，await 后若当前选中已变则丢弃结果。
+  const targetId = session.platform_session_id
+  try {
+    const items = await desktopApi.getCodexWork(session.platform_session_id)
+    if (selected.value?.platform_session_id !== targetId) return
+    const grouped = new Map<number, WorkItem[]>()
+    for (const item of items) {
+      const bucket = grouped.get(item.seq)
+      if (bucket) bucket.push(item)
+      else grouped.set(item.seq, [item])
+    }
+    // 组内按 work_seq 稳定排序，保证时间序渲染。
+    for (const bucket of grouped.values()) bucket.sort((a, b) => a.work_seq - b.work_seq)
+    codexWorkBySeq.value = grouped
+  } catch (reason) {
+    console.error('[CODEX] failed to load work items:', reason)
+  }
+}
+const settings = ref<SettingsModel>(props.initialSettings ?? { setup_complete: false, secret_enabled: false, allowed_origins: [], close_behavior: 'ask', tray_click_behavior: 'show_menu', theme: 'system', light_theme_id: 'green', dark_theme_id: 'black', custom_themes: [], language: 'system', semantic_search: { enabled: true, default_mode: 'hybrid', backend: 'local', local: { model: 'BAAI/bge-small-zh-v1.5', device: 'auto', dtype: 'auto' }, ollama: { base_url: 'http://127.0.0.1:11434', model: 'nomic-embed-text' }, llama_cpp: { base_url: 'http://127.0.0.1:8080/v1', model: 'bge-small-zh-v1.5' }, openai_compatible: { base_url: 'https://api.openai.com/v1', model: 'text-embedding-3-small' } }, mcp_enabled: false, codex: { auto_watch: false }, cloud_sync: { backend: 'webdav', enabled: false, connection_verified: false, base_url: '', root_path: '', username: '', encryption_enabled: false, s3: { endpoint_url: '', region: 'us-east-1', bucket: '', prefix: '', force_path_style: false }, remote_id: 'default', vault_id: 'default', generation_id: 'generation-1' } })
 const cloudSyncActiveProfile = ref<CloudSyncSettings | null>(null)
 
 function cloneCloudSyncSettings(value: CloudSyncSettings): CloudSyncSettings {
@@ -208,12 +266,13 @@ function clearSelectedSession() {
   conversationSearch.reset()
   branches.reset()
   expandedThinking.value = new Set()
+  codexWorkBySeq.value = new Map()
 }
 
 const {
   sessions, loading, error, query, committedQuery, platform, dateFrom, dateTo,
   showFilters, total, searchElapsed, filtered, searchMode, semanticStatus, loadSessions, loadMore, resetFilters,
-  selectPlatform, setSearchMode,
+  selectPlatform, setSearchMode, loadChildSessions, childSessions,
 } = useSessionCatalog(desktopApi, (visibleIds) => {
   if (exportBusy.value) return
   if (selected.value && !visibleIds.has(selected.value.id)) {
@@ -553,6 +612,7 @@ async function selectSession(id: string) {
   const { readingPosition, generation } = result
   const opened = selected.value
   try {
+    void loadCodexWork(opened)
     let overview: BranchOverview | null = null
     if (opened.has_branches) {
       const tBranchStart = performance.now()
@@ -661,6 +721,22 @@ function toggleThinking(messageId: string) {
   if (next.has(messageId)) next.delete(messageId)
   else next.add(messageId)
   expandedThinking.value = next
+}
+
+async function openSubagentSession(agentThreadId: string) {
+  // 子会话以 platform_session_id === agent_thread_id 存储；优先在已加载目录中找，
+  // 命中则直接切换（selectSession 内部会按 id 打开）。
+  const child = sessions.value.find((s) => s.platform_session_id === agentThreadId)
+  if (child) {
+    await selectSession(child.id)
+    return
+  }
+  // 目录未包含（子会话默认折叠未加载）：拉取当前父会话的子列表再匹配。
+  if (selected.value) {
+    const children = await loadChildSessions(selected.value.platform_session_id)
+    const match = children.find((s) => s.platform_session_id === agentThreadId)
+    if (match) await selectSession(match.id)
+  }
 }
 
 async function removeSession() {
@@ -956,8 +1032,11 @@ onBeforeUnmount(() => {
           :selected-id="selected?.id"
           :filtered="filtered"
           :query="committedQuery"
+          :child-sessions="childSessionsByParentId"
+          :expanded-parents="expandedParents"
           @select="selectSession"
           @load-more="loadMore"
+          @toggle-children="toggleChildren"
         />
 
         <div class="pane-resizer" role="separator" :aria-label="t('app.paneResize')" aria-orientation="vertical" tabindex="0" @pointerdown="startPaneResize" @pointermove="resizePanes" @pointerup="stopPaneResize" @pointercancel="stopPaneResize"></div>
@@ -1026,8 +1105,10 @@ onBeforeUnmount(() => {
                       :expanded="expandedThinking.has(messageSlots[displayedMessageSeqs[virtualMessage.index]]!.id)"
                       :formatted-date="formatDate(messageSlots[displayedMessageSeqs[virtualMessage.index]]!.created_at, true)"
                       :role-label="roleName(messageSlots[displayedMessageSeqs[virtualMessage.index]]!.role)"
+                      :work-items="codexWorkBySeq.get(messageSlots[displayedMessageSeqs[virtualMessage.index]]!.seq)"
                       @toggle-thinking="toggleThinking"
                       @content-rendered="renderMermaidDiagrams"
+                      @open-subagent="openSubagentSession"
                     />
                     <div v-else class="message-placeholder" @vue:mounted="void ensureMessageLoaded(displayedMessageSeqs[virtualMessage.index]).catch(() => {})"><LoaderCircle class="spinning" :size="16" /><span>{{ t('app.loadMessage') }}</span></div>
                   </div>
@@ -1079,6 +1160,7 @@ onBeforeUnmount(() => {
       @cloud-sync-now="cloudSyncNow"
       @cloud-sync-rewrite="cloudSyncRewrite"
       @cloud-sync-remove-device="cloudSyncRemoveDevice"
+      @import-codex="handleImportCodex"
     />
 
     <SessionDialogs

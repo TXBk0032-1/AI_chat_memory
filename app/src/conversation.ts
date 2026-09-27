@@ -6,6 +6,8 @@ export type SessionSummary = {
   created_at?: string
   updated_at?: string
   imported_at?: string
+  project?: string
+  child_count?: number
 }
 
 export type Message = {
@@ -28,6 +30,18 @@ export type ToolCall = {
   name: string
   result?: string
   results_count?: number
+}
+
+export type WorkItem = {
+  work_seq: number
+  seq: number
+  kind: 'commentary' | 'reasoning' | 'command' | 'mcp_tool' | 'file_change' | 'subagent' | 'plan' | 'output'
+  title: string
+  body?: string
+  expandable: boolean
+  truncated: boolean
+  agent_thread_id?: string
+  agent_label?: string
 }
 
 export type SessionOpen = SessionSummary & {

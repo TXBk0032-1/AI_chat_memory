@@ -1,4 +1,6 @@
 mod branch;
+mod codex;
+mod codex_watch;
 mod commands;
 mod data_directory;
 mod data_directory_marker;
@@ -193,6 +195,24 @@ pub fn run() {
             })?;
             app.manage(service.clone());
 
+            let codex_service = service.clone();
+            tauri::async_runtime::spawn(async move {
+                if codex_service.settings().await.codex.auto_watch {
+                    // 先保留原有的启动一次性增量导入行为
+                    match codex_service.import_codex().await {
+                        Ok(resp) => tracing::info!(
+                            imported = resp.imported,
+                            updated = resp.updated,
+                            "codex 启动增量导入完成"
+                        ),
+                        Err(error) => tracing::warn!(%error, "codex 启动增量导入失败"),
+                    }
+                    // 再拉起常驻 notify 实时监听（防抖后增量导入）。
+                    // 仅在启动时按 auto_watch 拉起；未实现设置变更时的动态启停（YAGNI）。
+                    codex_watch::spawn(codex_service);
+                }
+            });
+
             let manager = local_services::LocalServiceManager::new();
             let mcp_service = service.clone();
             tauri::async_runtime::block_on(async {
@@ -256,7 +276,10 @@ pub fn run() {
             commands::move_data_directory,
             commands::confirm_close_behavior,
             commands::write_export_file,
-            commands::print_to_pdf
+            commands::print_to_pdf,
+            commands::import_codex,
+            commands::get_codex_work,
+            commands::list_child_sessions
         ])
         .run(tauri::generate_context!())
         .expect("error while running Tauri application");

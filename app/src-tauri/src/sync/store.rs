@@ -246,6 +246,9 @@ impl SyncStore {
                 imported_at: imported_at.unwrap_or_default(),
                 messages,
                 raw_data: parse_stored_json(raw_data)?,
+                project: None,
+                parent_platform_session_id: None,
+                agent_label: None,
             };
             self.queue_local_upsert_in(&mut tx, snapshot_from_normalized_session(&session), now_ms)
                 .await?;
@@ -336,6 +339,9 @@ impl SyncStore {
                 imported_at: imported_at.unwrap_or_default(),
                 messages,
                 raw_data: parse_stored_json(raw_data)?,
+                project: None,
+                parent_platform_session_id: None,
+                agent_label: None,
             };
             self.queue_local_upsert_in(&mut tx, snapshot_from_normalized_session(&session), now_ms)
                 .await?;
