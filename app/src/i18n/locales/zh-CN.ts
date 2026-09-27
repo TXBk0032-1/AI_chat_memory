@@ -105,6 +105,7 @@ const zhCN = {
     loading: '加载中',
     loadMore: '加载更多（剩余 {count} 条）',
     messageCount: '{count} 条消息',
+    project: '项目',
   },
   export: {
     dialogTitle: '导出聊天记录',
@@ -372,6 +373,11 @@ const zhCN = {
     selectDataDirectory: '选择数据保存目录',
     moveDataConfirmation: '应用将把当前数据库复制到新目录并立即重启。是否继续？',
     selectModelDirectory: '选择本地 embedding 模型目录',
+    codexTitle: 'Codex 导入',
+    codexAutoWatch: '启动时自动导入 Codex 会话',
+    codexHome: 'Codex 目录',
+    codexHomePlaceholder: '默认 %USERPROFILE%\\.codex',
+    codexImportNow: '立即导入',
   },
   progress: {
     vectorizing: '正在向量化（就绪 {ready}/{total}，剩余 {pending}）',
