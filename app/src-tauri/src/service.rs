@@ -2097,7 +2097,12 @@ impl AppService {
 
     /// 默认 Codex 数据根：设置里显式配置优先，否则 %USERPROFILE%\.codex。
     fn resolve_codex_home(settings: &AppSettings) -> Option<std::path::PathBuf> {
-        if let Some(dir) = settings.codex.codex_home.as_deref().filter(|s| !s.trim().is_empty()) {
+        if let Some(dir) = settings
+            .codex
+            .codex_home
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
             return Some(std::path::PathBuf::from(dir));
         }
         Self::user_home_dir().map(|home| home.join(".codex"))
@@ -2120,18 +2125,19 @@ impl AppService {
         let work_dir = self.codex_work_dir();
 
         // 磁盘 IO + 解析放到阻塞线程池
-        let threads = tokio::task::spawn_blocking(move || -> Result<Vec<crate::codex::CodexThread>> {
-            let mut all = Vec::new();
-            for sub in ["sessions", "archived_sessions"] {
-                let dir = codex_home.join(sub);
-                if dir.is_dir() {
-                    all.extend(crate::codex::scan_dir(&dir)?);
+        let threads =
+            tokio::task::spawn_blocking(move || -> Result<Vec<crate::codex::CodexThread>> {
+                let mut all = Vec::new();
+                for sub in ["sessions", "archived_sessions"] {
+                    let dir = codex_home.join(sub);
+                    if dir.is_dir() {
+                        all.extend(crate::codex::scan_dir(&dir)?);
+                    }
                 }
-            }
-            Ok(all)
-        })
-        .await
-        .map_err(|e| AppError::Configuration(e.to_string()))??;
+                Ok(all)
+            })
+            .await
+            .map_err(|e| AppError::Configuration(e.to_string()))??;
 
         if threads.is_empty() {
             return Ok(crate::models::CodexImportResponse::default());
@@ -2146,7 +2152,9 @@ impl AppService {
                 .collect();
             let _ = tokio::task::spawn_blocking(move || {
                 for (thread_id, items) in payload {
-                    if let Err(error) = crate::codex::write_work_items(&work_dir, &thread_id, &items) {
+                    if let Err(error) =
+                        crate::codex::write_work_items(&work_dir, &thread_id, &items)
+                    {
                         tracing::warn!(%thread_id, %error, "codex 工作文件写入失败");
                     }
                 }
@@ -2154,7 +2162,8 @@ impl AppService {
             .await;
         }
 
-        let normalized: Vec<NormalizedSession> = threads.iter().map(|t| t.session.clone()).collect();
+        let normalized: Vec<NormalizedSession> =
+            threads.iter().map(|t| t.session.clone()).collect();
         let counts = {
             let _guard = self.sync_gate.lock().await;
             import_local_sessions_counted(&self.pool, &normalized).await?
@@ -2190,14 +2199,15 @@ impl AppService {
     pub async fn get_codex_work(&self, thread_id: &str) -> Result<Vec<WorkItem>> {
         let work_dir = self.codex_work_dir();
         let thread_id = thread_id.to_string();
-        tokio::task::spawn_blocking(move || {
-            crate::codex::read_work_items(&work_dir, &thread_id)
-        })
-        .await
-        .map_err(|e| AppError::Configuration(e.to_string()))
+        tokio::task::spawn_blocking(move || crate::codex::read_work_items(&work_dir, &thread_id))
+            .await
+            .map_err(|e| AppError::Configuration(e.to_string()))
     }
 
-    pub async fn list_child_sessions(&self, parent_platform_session_id: &str) -> Result<Vec<SessionSummary>> {
+    pub async fn list_child_sessions(
+        &self,
+        parent_platform_session_id: &str,
+    ) -> Result<Vec<SessionSummary>> {
         database::list_child_sessions(&self.pool, parent_platform_session_id).await
     }
 

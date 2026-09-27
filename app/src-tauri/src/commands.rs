@@ -641,9 +641,7 @@ pub async fn cancel_semantic_work(service: State<'_, AppService>) -> Result<(), 
 }
 
 #[tauri::command]
-pub async fn import_codex(
-    service: State<'_, AppService>,
-) -> Result<CodexImportResponse, String> {
+pub async fn import_codex(service: State<'_, AppService>) -> Result<CodexImportResponse, String> {
     service.import_codex().await.map_err(message)
 }
 

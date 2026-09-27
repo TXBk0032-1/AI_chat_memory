@@ -72,8 +72,7 @@ pub fn parse_lines(
     let parent_platform_session_id = parent_hint
         .map(str::to_owned)
         .or_else(|| as_str(meta.get("parent_thread_id")));
-    let agent_label = as_str(meta.get("agent_nickname"))
-        .or_else(|| as_str(meta.get("agent_role")));
+    let agent_label = as_str(meta.get("agent_nickname")).or_else(|| as_str(meta.get("agent_role")));
     let subagent_start = meta
         .get("subagent_history_start_ordinal")
         .and_then(Value::as_i64);
@@ -82,7 +81,9 @@ pub fn parse_lines(
     let mut seen_ordinals = std::collections::HashSet::new();
     let mut lines: Vec<RolloutLine> = Vec::new();
     for raw in raw_lines {
-        let Some(kind) = as_str(line_field(raw, "type")) else { continue };
+        let Some(kind) = as_str(line_field(raw, "type")) else {
+            continue;
+        };
         if kind == "session_meta" {
             continue;
         }
@@ -125,7 +126,10 @@ pub fn parse_lines(
     }
 
     let title = builder.derive_title();
-    let updated_at = builder.last_timestamp.clone().or_else(|| created_at.clone());
+    let updated_at = builder
+        .last_timestamp
+        .clone()
+        .or_else(|| created_at.clone());
     let session = NormalizedSession {
         id: uuid::Uuid::new_v4().to_string(),
         platform: "codex".into(),
@@ -160,7 +164,14 @@ impl ThreadBuilder {
         Self::default()
     }
 
-    fn push_work(&mut self, seq: i64, kind: &str, title: String, body: Option<String>, expandable: bool) {
+    fn push_work(
+        &mut self,
+        seq: i64,
+        kind: &str,
+        title: String,
+        body: Option<String>,
+        expandable: bool,
+    ) {
         let (body, truncated) = match body {
             Some(text) => {
                 let (t, tr) = truncate_on_char_boundary(&text, WORK_ITEM_MAX_BYTES);
@@ -222,8 +233,15 @@ impl ThreadBuilder {
                 self.push_message("user", text.to_string(), ts);
             }
             "AgentMessage" => {
-                let phase = item.get("phase").and_then(Value::as_str).unwrap_or("final_answer");
-                let text = item.get("text").and_then(Value::as_str).unwrap_or_default().to_string();
+                let phase = item
+                    .get("phase")
+                    .and_then(Value::as_str)
+                    .unwrap_or("final_answer");
+                let text = item
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
                 match phase {
                     "commentary" => {
                         // 过程说明：既进 DB（可搜索）又进工作栏时间线
@@ -251,20 +269,42 @@ impl ThreadBuilder {
                     format!("思考 · {}", summary.lines().next().unwrap_or("").trim())
                 };
                 // 明文可展开；加密只留一行不可展开
-                self.push_work(seq, "reasoning", title, raw.filter(|s| !s.is_empty()), !encrypted);
+                self.push_work(
+                    seq,
+                    "reasoning",
+                    title,
+                    raw.filter(|s| !s.is_empty()),
+                    !encrypted,
+                );
             }
             "CommandExecution" => {
-                let cmd = item.get("command").and_then(Value::as_str).unwrap_or_default();
-                let out = item.get("aggregated_output").and_then(Value::as_str).map(str::to_owned);
+                let cmd = item
+                    .get("command")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let out = item
+                    .get("aggregated_output")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
                 self.push_work(seq, "command", format!("$ {cmd}"), out, true);
             }
             "McpToolCall" => {
-                let name = item.get("tool").or_else(|| item.get("name")).and_then(Value::as_str).unwrap_or("tool");
-                let body = item.get("result").map(compact_json).or_else(|| item.get("arguments").map(compact_json));
+                let name = item
+                    .get("tool")
+                    .or_else(|| item.get("name"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("tool");
+                let body = item
+                    .get("result")
+                    .map(compact_json)
+                    .or_else(|| item.get("arguments").map(compact_json));
                 self.push_work(seq, "mcp_tool", format!("MCP · {name}"), body, true);
             }
             "FunctionCallOutput" => {
-                let body = item.get("output").and_then(Value::as_str).map(str::to_owned)
+                let body = item
+                    .get("output")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
                     .or_else(|| Some(compact_json(item)));
                 self.push_work(seq, "output", "工具输出".into(), body, true);
             }
@@ -274,9 +314,19 @@ impl ThreadBuilder {
             }
             "SubAgentActivity" => {
                 let kind = item.get("kind").and_then(Value::as_str).unwrap_or("update");
-                let agent_thread_id = item.get("agent_thread_id").and_then(Value::as_str).map(str::to_owned);
-                let label = item.get("agent_nickname").and_then(Value::as_str).unwrap_or("子代理");
-                let verb = if kind.eq_ignore_ascii_case("start") { "已开始工作" } else { "已更新" };
+                let agent_thread_id = item
+                    .get("agent_thread_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned);
+                let label = item
+                    .get("agent_nickname")
+                    .and_then(Value::as_str)
+                    .unwrap_or("子代理");
+                let verb = if kind.eq_ignore_ascii_case("start") {
+                    "已开始工作"
+                } else {
+                    "已更新"
+                };
                 self.work_items.push(WorkItem {
                     work_seq: self.work_seq,
                     seq,
@@ -291,7 +341,11 @@ impl ThreadBuilder {
                 self.work_seq += 1;
             }
             "Plan" => {
-                let text = item.get("text").and_then(Value::as_str).unwrap_or_default().to_string();
+                let text = item
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
                 self.push_work(seq, "plan", "计划".into(), Some(text), true);
             }
             // ContextCompaction 等忽略
@@ -317,7 +371,10 @@ fn render_file_change(item: &Value) -> String {
     };
     let mut out = String::new();
     for (path, change) in changes {
-        let kind = change.get("type").and_then(Value::as_str).unwrap_or("update");
+        let kind = change
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("update");
         out.push_str(&format!("[{kind}] {path}\n"));
         if let Some(diff) = change.get("unified_diff").and_then(Value::as_str) {
             out.push_str(diff);
@@ -366,21 +423,39 @@ impl ThreadBuilder {
                     }
                 }
                 "reasoning" => {
-                    let summary = p.get("summary").and_then(Value::as_array)
-                        .map(|a| a.iter().filter_map(|s| s.get("text").and_then(Value::as_str)).collect::<Vec<_>>().join("\n"))
+                    let summary = p
+                        .get("summary")
+                        .and_then(Value::as_array)
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|s| s.get("text").and_then(Value::as_str))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        })
                         .unwrap_or_default();
                     let body = p.get("content").and_then(Value::as_str).map(str::to_owned);
                     let encrypted = p.get("encrypted_content").is_some() && body.is_none();
-                    let title = if summary.is_empty() { "思考".into() } else { format!("思考 · {}", summary.lines().next().unwrap_or("").trim()) };
+                    let title = if summary.is_empty() {
+                        "思考".into()
+                    } else {
+                        format!("思考 · {}", summary.lines().next().unwrap_or("").trim())
+                    };
                     self.push_work(seq, "reasoning", title, body, !encrypted);
                 }
                 "function_call" | "custom_tool_call" => {
                     let name = p.get("name").and_then(Value::as_str).unwrap_or("tool");
-                    let args = p.get("arguments").or_else(|| p.get("input")).map(compact_json);
+                    let args = p
+                        .get("arguments")
+                        .or_else(|| p.get("input"))
+                        .map(compact_json);
                     self.push_work(seq, "command", format!("$ {name}"), args, true);
                 }
                 "function_call_output" | "custom_tool_call_output" => {
-                    let out = p.get("output").and_then(Value::as_str).map(str::to_owned).or_else(|| Some(compact_json(p)));
+                    let out = p
+                        .get("output")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .or_else(|| Some(compact_json(p)));
                     self.push_work(seq, "output", "工具输出".into(), out, true);
                 }
                 _ => {}
@@ -457,11 +532,9 @@ pub fn scan_dir(dir: &Path) -> crate::error::Result<Vec<CodexThread>> {
     for (thread_id, (parent, mut paths)) in groups {
         // 窗口文件名后缀 _0/_1 决定顺序；按后缀数值排序（避免字典序把 _10 排到 _2 前），
         // 无法解析窗口序号时回退字典序保持稳定。
-        paths.sort_by(|a, b| {
-            match (window_ordinal(a), window_ordinal(b)) {
-                (Some(x), Some(y)) => x.cmp(&y).then_with(|| a.cmp(b)),
-                _ => a.cmp(b),
-            }
+        paths.sort_by(|a, b| match (window_ordinal(a), window_ordinal(b)) {
+            (Some(x), Some(y)) => x.cmp(&y).then_with(|| a.cmp(b)),
+            _ => a.cmp(b),
         });
         let mut all_lines = Vec::new();
         for p in &paths {
@@ -476,10 +549,16 @@ pub fn scan_dir(dir: &Path) -> crate::error::Result<Vec<CodexThread>> {
 }
 
 /// 把某线程的工作项写入 `<work_dir>/<thread_id>.jsonl`（每行一个 WorkItem）。
-pub fn write_work_items(work_dir: &Path, thread_id: &str, items: &[WorkItem]) -> std::io::Result<()> {
+pub fn write_work_items(
+    work_dir: &Path,
+    thread_id: &str,
+    items: &[WorkItem],
+) -> std::io::Result<()> {
     use std::io::Write;
     std::fs::create_dir_all(work_dir)?;
-    let path = work_dir.join(sanitize_thread_id(thread_id)).with_extension("jsonl");
+    let path = work_dir
+        .join(sanitize_thread_id(thread_id))
+        .with_extension("jsonl");
     let tmp = path.with_extension("jsonl.tmp");
     {
         let mut f = std::fs::File::create(&tmp)?;
@@ -495,7 +574,9 @@ pub fn write_work_items(work_dir: &Path, thread_id: &str, items: &[WorkItem]) ->
 
 /// 读取某线程工作项（文件缺失返回空）。
 pub fn read_work_items(work_dir: &Path, thread_id: &str) -> Vec<WorkItem> {
-    let path = work_dir.join(sanitize_thread_id(thread_id)).with_extension("jsonl");
+    let path = work_dir
+        .join(sanitize_thread_id(thread_id))
+        .with_extension("jsonl");
     let Ok(content) = std::fs::read_to_string(&path) else {
         return Vec::new();
     };
@@ -507,7 +588,9 @@ pub fn read_work_items(work_dir: &Path, thread_id: &str) -> Vec<WorkItem> {
 }
 
 pub fn delete_work_items(work_dir: &Path, thread_id: &str) {
-    let path = work_dir.join(sanitize_thread_id(thread_id)).with_extension("jsonl");
+    let path = work_dir
+        .join(sanitize_thread_id(thread_id))
+        .with_extension("jsonl");
     let _ = std::fs::remove_file(path);
 }
 
@@ -515,7 +598,13 @@ pub fn delete_work_items(work_dir: &Path, thread_id: &str) {
 fn sanitize_thread_id(thread_id: &str) -> String {
     thread_id
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 

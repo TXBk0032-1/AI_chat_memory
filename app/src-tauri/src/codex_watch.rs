@@ -95,9 +95,9 @@ async fn run(service: AppService) -> crate::error::Result<()> {
     while rx.recv().await.is_some() {
         loop {
             match tokio::time::timeout(DEBOUNCE, rx.recv()).await {
-                Ok(Some(())) => continue,      // 窗口内又有变更：重置静默计时
-                Ok(None) => return Ok(()),     // 通道关闭（watcher 已释放）
-                Err(_) => break,               // 静默满 DEBOUNCE：触发导入
+                Ok(Some(())) => continue,  // 窗口内又有变更：重置静默计时
+                Ok(None) => return Ok(()), // 通道关闭（watcher 已释放）
+                Err(_) => break,           // 静默满 DEBOUNCE：触发导入
             }
         }
         match service.import_codex().await {

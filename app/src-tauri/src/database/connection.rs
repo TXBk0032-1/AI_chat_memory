@@ -1131,15 +1131,21 @@ mod tests {
             .unwrap();
         // 初次建库后应含新列
         initialize_schema(&pool).await.unwrap();
-        let cols: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('sessions')")
-            .fetch_all(&pool).await.unwrap();
+        let cols: Vec<String> =
+            sqlx::query_scalar("SELECT name FROM pragma_table_info('sessions')")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
         for c in ["project", "parent_platform_session_id", "agent_label"] {
             assert!(cols.contains(&c.to_string()), "缺少列 {c}");
         }
         // codex_import_state 表存在
         let n: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='codex_import_state'",
-        ).fetch_one(&pool).await.unwrap();
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(n, 1);
         // 二次调用不报错（幂等）
         ensure_codex_columns(&pool).await.unwrap();
