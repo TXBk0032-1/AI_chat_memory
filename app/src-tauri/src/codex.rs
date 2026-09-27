@@ -17,13 +17,11 @@ pub(crate) const WORK_ITEM_MAX_BYTES: usize = 130 * 1024;
 pub struct CodexThread {
     pub session: NormalizedSession,
     pub work_items: Vec<WorkItem>,
-    pub parent_platform_session_id: Option<String>,
 }
 
 /// rollout 单行。
 #[derive(Debug, Clone)]
 struct RolloutLine {
-    ordinal: Option<i64>,
     kind: String,
     timestamp: Option<String>,
     payload: Value,
@@ -100,7 +98,6 @@ pub fn parse_lines(
             continue; // 分页窗口重叠，保留首个
         }
         lines.push(RolloutLine {
-            ordinal,
             kind,
             timestamp: as_str(raw.get("timestamp")),
             payload: raw.get("payload").cloned().unwrap_or(Value::Null),
@@ -140,13 +137,12 @@ pub fn parse_lines(
         messages: builder.messages,
         raw_data: serde_json::json!({ "source": "codex", "thread_id": thread_id }),
         project,
-        parent_platform_session_id: parent_platform_session_id.clone(),
+        parent_platform_session_id,
         agent_label,
     };
     Ok(CodexThread {
         session,
         work_items: builder.work_items,
-        parent_platform_session_id,
     })
 }
 
@@ -154,7 +150,6 @@ pub fn parse_lines(
 struct ThreadBuilder {
     messages: Vec<NormalizedMessage>,
     work_items: Vec<WorkItem>,
-    seq: i64,
     work_seq: i64,
     first_user_text: Option<String>,
     last_timestamp: Option<String>,
@@ -163,12 +158,6 @@ struct ThreadBuilder {
 impl ThreadBuilder {
     fn new() -> Self {
         Self::default()
-    }
-
-    fn next_seq(&mut self) -> i64 {
-        let s = self.seq;
-        self.seq += 1;
-        s
     }
 
     fn push_work(&mut self, seq: i64, kind: &str, title: String, body: Option<String>, expandable: bool) {
@@ -215,7 +204,12 @@ impl ThreadBuilder {
             self.last_timestamp = Some(t.to_string());
         }
         let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
-        let seq = self.next_seq();
+        // 工作项挂到"它所归属的消息"的 DB 消息序号：捕获在任何 push_message /
+        // push_work 之前的 messages.len()。work-only 项（思考/命令/工具/文件/计划/
+        // 子代理）此刻 len = 即将产生的那条最终答复消息索引；commentary 先 push_message
+        // 再 push_work，seq 即该 commentary 自身索引。与 imports.rs 的 message.seq
+        // （messages.iter().enumerate()）对齐。
+        let seq = self.messages.len() as i64;
         match item_type {
             "UserMessage" => {
                 let text = item.get("text").and_then(Value::as_str).unwrap_or_default();
@@ -351,7 +345,7 @@ impl ThreadBuilder {
             }
             let p = &l.payload;
             let rtype = p.get("type").and_then(Value::as_str).unwrap_or_default();
-            let seq = self.next_seq();
+            let seq = self.messages.len() as i64;
             match rtype {
                 "message" => {
                     let role = p.get("role").and_then(Value::as_str).unwrap_or("assistant");
@@ -461,8 +455,14 @@ pub fn scan_dir(dir: &Path) -> crate::error::Result<Vec<CodexThread>> {
     }
     let mut threads = Vec::new();
     for (thread_id, (parent, mut paths)) in groups {
-        // 窗口文件名后缀 _0/_1 决定顺序；无后缀者视为单窗口
-        paths.sort();
+        // 窗口文件名后缀 _0/_1 决定顺序；按后缀数值排序（避免字典序把 _10 排到 _2 前），
+        // 无法解析窗口序号时回退字典序保持稳定。
+        paths.sort_by(|a, b| {
+            match (window_ordinal(a), window_ordinal(b)) {
+                (Some(x), Some(y)) => x.cmp(&y).then_with(|| a.cmp(b)),
+                _ => a.cmp(b),
+            }
+        });
         let mut all_lines = Vec::new();
         for p in &paths {
             all_lines.extend(read_rollout_values(p));
@@ -517,6 +517,14 @@ fn sanitize_thread_id(thread_id: &str) -> String {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
         .collect()
+}
+
+/// 提取窗口文件名末尾的窗口序号（如 `rollout-...-uuid_10.jsonl` → 10），
+/// 用于分页窗口的数值排序；无 `_数字` 后缀时返回 None（回退字典序）。
+fn window_ordinal(path: &Path) -> Option<i64> {
+    let stem = path.file_stem().and_then(|s| s.to_str())?;
+    let suffix = stem.rsplit_once('_')?.1;
+    suffix.parse::<i64>().ok()
 }
 
 fn response_message_text(p: &Value) -> String {

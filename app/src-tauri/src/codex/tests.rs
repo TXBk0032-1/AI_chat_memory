@@ -55,6 +55,53 @@ fn reasoning_and_command_go_to_work_items_only() {
     assert!(thread.work_items.iter().any(|w| w.kind == "command" && w.title.contains("cargo test")));
 }
 
+#[test]
+fn work_item_seq_points_at_owning_message_index() {
+    // 交错两轮：用户→思考(work)→命令(work)→assistant 最终答复 / 用户→思考(work)→assistant 答复
+    let lines = vec![
+        line(r#"{"type":"session_meta","payload":{"id":"T-seq","cwd":"/x/proj"}}"#),
+        line(r#"{"ordinal":1,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","text":"第一问"}}}"#),
+        line(r#"{"ordinal":2,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"Reasoning","summary_text":["想想"],"raw_content":["细节一"]}}}"#),
+        line(r#"{"ordinal":3,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","command":"ls","aggregated_output":"a"}}}"#),
+        line(r#"{"ordinal":4,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","phase":"final_answer","text":"答一"}}}"#),
+        line(r#"{"ordinal":5,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","text":"第二问"}}}"#),
+        line(r#"{"ordinal":6,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"Reasoning","summary_text":["再想"],"raw_content":["细节二"]}}}"#),
+        line(r#"{"ordinal":7,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","phase":"final_answer","text":"答二"}}}"#),
+    ];
+    let thread = parse_lines("T-seq", &lines, None).unwrap();
+    // DB messages: [user 第一问, assistant 答一, user 第二问, assistant 答二]
+    let contents: Vec<&str> = thread.session.messages.iter().map(|m| m.content.as_str()).collect();
+    assert_eq!(contents, vec!["第一问", "答一", "第二问", "答二"]);
+    let msg_count = thread.session.messages.len() as i64;
+    // 每个工作项的 seq 都落在合法消息索引范围内
+    for w in &thread.work_items {
+        assert!(
+            w.seq >= 0 && w.seq < msg_count,
+            "work seq {} 越界 [0,{})",
+            w.seq,
+            msg_count
+        );
+    }
+    // 第一轮 reasoning/command → 指向第一条 assistant 答复索引（=1）
+    let round1: Vec<i64> = thread
+        .work_items
+        .iter()
+        .filter(|w| w.kind == "reasoning" || w.kind == "command")
+        .filter(|w| w.body.as_deref() == Some("细节一") || w.title.contains("ls"))
+        .map(|w| w.seq)
+        .collect();
+    assert!(!round1.is_empty());
+    assert!(round1.iter().all(|&s| s == 1), "第一轮工作项 seq 应为 1，实得 {round1:?}");
+    // 第二轮 reasoning → 指向第二条 assistant 答复索引（=3）
+    let round2: Vec<i64> = thread
+        .work_items
+        .iter()
+        .filter(|w| w.body.as_deref() == Some("细节二"))
+        .map(|w| w.seq)
+        .collect();
+    assert_eq!(round2, vec![3], "第二轮工作项 seq 应为 3");
+}
+
 use std::io::Write;
 
 fn write_rollout(dir: &std::path::Path, name: &str, lines: &[&str]) -> PathBuf {
