@@ -33,6 +33,8 @@ describe('English first-run surfaces', () => {
       loading: false,
       filtered: false,
       query: '',
+      childSessions: new Map(),
+      expandedParents: new Set(),
     })
 
     expect(root.textContent).toContain('No conversations yet')
