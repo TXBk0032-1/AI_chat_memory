@@ -1,4 +1,5 @@
 mod branch;
+mod codex;
 mod commands;
 mod data_directory;
 mod data_directory_marker;
