@@ -2082,6 +2082,112 @@ impl AppService {
         })
     }
 
+    /// 工作 JSONL 根目录：<数据目录>/codex-work。
+    pub(crate) fn codex_work_dir(&self) -> std::path::PathBuf {
+        self.data_dir.as_ref().join("codex-work")
+    }
+
+    /// 默认 Codex 数据根：设置里显式配置优先，否则 %USERPROFILE%\.codex。
+    fn resolve_codex_home(settings: &AppSettings) -> Option<std::path::PathBuf> {
+        if let Some(dir) = settings.codex.codex_home.as_deref().filter(|s| !s.trim().is_empty()) {
+            return Some(std::path::PathBuf::from(dir));
+        }
+        Self::user_home_dir().map(|home| home.join(".codex"))
+    }
+
+    /// 不引新依赖，直接读环境变量定位用户主目录。
+    fn user_home_dir() -> Option<std::path::PathBuf> {
+        std::env::var_os("USERPROFILE")
+            .filter(|v| !v.is_empty())
+            .or_else(|| std::env::var_os("HOME").filter(|v| !v.is_empty()))
+            .map(std::path::PathBuf::from)
+    }
+
+    pub async fn import_codex(&self) -> Result<crate::models::CodexImportResponse> {
+        self.ensure_writable()?;
+        let settings = self.settings().await;
+        let Some(codex_home) = Self::resolve_codex_home(&settings) else {
+            return Err(AppError::InvalidData("无法定位 Codex 数据目录".into()));
+        };
+        let work_dir = self.codex_work_dir();
+
+        // 磁盘 IO + 解析放到阻塞线程池
+        let threads = tokio::task::spawn_blocking(move || -> Result<Vec<crate::codex::CodexThread>> {
+            let mut all = Vec::new();
+            for sub in ["sessions", "archived_sessions"] {
+                let dir = codex_home.join(sub);
+                if dir.is_dir() {
+                    all.extend(crate::codex::scan_dir(&dir)?);
+                }
+            }
+            Ok(all)
+        })
+        .await
+        .map_err(|e| AppError::Configuration(e.to_string()))??;
+
+        if threads.is_empty() {
+            return Ok(crate::models::CodexImportResponse::default());
+        }
+
+        // 先落工作 JSONL（失败仅告警，不阻断入库）
+        {
+            let work_dir = work_dir.clone();
+            let payload: Vec<(String, Vec<WorkItem>)> = threads
+                .iter()
+                .map(|t| (t.session.platform_session_id.clone(), t.work_items.clone()))
+                .collect();
+            let _ = tokio::task::spawn_blocking(move || {
+                for (thread_id, items) in payload {
+                    if let Err(error) = crate::codex::write_work_items(&work_dir, &thread_id, &items) {
+                        tracing::warn!(%thread_id, %error, "codex 工作文件写入失败");
+                    }
+                }
+            })
+            .await;
+        }
+
+        let normalized: Vec<NormalizedSession> = threads.iter().map(|t| t.session.clone()).collect();
+        let imported = {
+            let _guard = self.sync_gate.lock().await;
+            import_local_sessions(&self.pool, &normalized).await?
+        };
+        for session in &normalized {
+            if let Ok(Some(id)) = sqlx::query_scalar::<_, String>(
+                "SELECT id FROM sessions WHERE platform = ? AND platform_session_id = ?",
+            )
+            .bind(&session.platform)
+            .bind(&session.platform_session_id)
+            .fetch_optional(&self.pool)
+            .await
+            {
+                let _ = self.semantic.request_session_index(&id).await;
+            }
+        }
+        let total = normalized.len();
+        tracing::info!(total, imported, "codex import completed");
+        self.notify_local_sync();
+        Ok(crate::models::CodexImportResponse {
+            imported,
+            updated: total.saturating_sub(imported),
+            skipped: 0,
+            failed: 0,
+        })
+    }
+
+    pub async fn get_codex_work(&self, thread_id: &str) -> Result<Vec<WorkItem>> {
+        let work_dir = self.codex_work_dir();
+        let thread_id = thread_id.to_string();
+        Ok(tokio::task::spawn_blocking(move || {
+            crate::codex::read_work_items(&work_dir, &thread_id)
+        })
+        .await
+        .map_err(|e| AppError::Configuration(e.to_string()))?)
+    }
+
+    pub async fn list_child_sessions(&self, parent_platform_session_id: &str) -> Result<Vec<SessionSummary>> {
+        database::list_child_sessions(&self.pool, parent_platform_session_id).await
+    }
+
     pub async fn list(&self, query: SearchQuery) -> Result<SessionList> {
         self.semantic.search_sessions(query).await
     }
@@ -2116,11 +2222,21 @@ impl AppService {
 
     pub async fn delete(&self, id: &str) -> Result<()> {
         self.ensure_writable()?;
+        let key = database::session_platform_key(&self.pool, id).await?;
         {
             let _guard = self.sync_gate.lock().await;
             delete_local_session(&self.pool, id).await?;
         }
         let _ = self.semantic.delete_session(id).await;
+        if let Some((platform, platform_session_id)) = key
+            && platform == "codex"
+        {
+            let work_dir = self.codex_work_dir();
+            let _ = tokio::task::spawn_blocking(move || {
+                crate::codex::delete_work_items(&work_dir, &platform_session_id)
+            })
+            .await;
+        }
         tracing::info!("session deleted");
         self.notify_local_sync();
         Ok(())
