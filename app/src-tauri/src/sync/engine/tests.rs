@@ -913,6 +913,9 @@ fn normalized_session(index: usize, title: &str, local_prefix: &str) -> Normaliz
         imported_at: "2026-07-29T00:00:00Z".into(),
         messages: vec![],
         raw_data: json!({"fixture": index}),
+        project: None,
+        parent_platform_session_id: None,
+        agent_label: None,
     }
 }
 
@@ -1542,6 +1545,9 @@ async fn publish_is_idempotent_and_acknowledges_outbox_after_head_update() {
         imported_at: "2026-07-29T00:00:00Z".into(),
         messages: vec![],
         raw_data: json!({"fixture": true}),
+        project: None,
+        parent_platform_session_id: None,
+        agent_label: None,
     };
     import_sessions(&pool, &[session], true).await.unwrap();
     let server = TestWebDav::start("user", "pass").await;
@@ -1822,6 +1828,9 @@ async fn two_devices_pull_remote_bundle_without_echo_outbox() {
         imported_at: "2026-07-29T00:00:00Z".into(),
         messages: vec![],
         raw_data: json!({"fixture": true}),
+        project: None,
+        parent_platform_session_id: None,
+        agent_label: None,
     };
     import_sessions(&pool_a, &[session], true).await.unwrap();
     let server = TestWebDav::start("user", "pass").await;
@@ -3629,6 +3638,9 @@ async fn rewrite_generation_publishes_every_entity_and_preserves_the_outbox() {
             imported_at: "2026-07-29T00:00:00Z".into(),
             messages: vec![],
             raw_data: json!({"fixture": index}),
+            project: None,
+            parent_platform_session_id: None,
+            agent_label: None,
         })
         .collect::<Vec<_>>();
     import_sessions(&pool, &sessions, true).await.unwrap();
@@ -3727,6 +3739,9 @@ async fn rotate_generation_pulls_with_old_protector_and_seals_with_new_protector
                 imported_at: "2026-07-29T00:00:00Z".into(),
                 messages: vec![],
                 raw_data: json!({"fixture": title}),
+                project: None,
+                parent_platform_session_id: None,
+                agent_label: None,
             }],
             true,
         )
@@ -3836,6 +3851,9 @@ async fn rotate_generation_can_disable_encryption_after_old_protected_pull() {
             imported_at: "2026-07-29T00:00:00Z".into(),
             messages: vec![],
             raw_data: json!({"fixture": true}),
+            project: None,
+            parent_platform_session_id: None,
+            agent_label: None,
         }],
         true,
     )
@@ -3986,6 +4004,9 @@ async fn rotate_generation_cas_failure_keeps_old_generation_readable() {
             imported_at: "2026-07-29T00:00:00Z".into(),
             messages: vec![],
             raw_data: json!({"fixture": true}),
+            project: None,
+            parent_platform_session_id: None,
+            agent_label: None,
         }],
         true,
     )

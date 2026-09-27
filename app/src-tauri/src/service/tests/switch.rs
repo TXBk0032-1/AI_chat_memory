@@ -182,6 +182,9 @@ async fn webdav_to_s3_switch_publishes_live_sessions_and_tombstones_without_touc
             imported_at: "2026-08-05T00:00:00Z".into(),
             messages: Vec::new(),
             raw_data: serde_json::json!({"source": "switch-test"}),
+            project: None,
+            parent_platform_session_id: None,
+            agent_label: None,
         }],
     )
     .await
