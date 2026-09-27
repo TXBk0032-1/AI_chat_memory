@@ -139,6 +139,21 @@ describe('desktopApi', () => {
     expect(invoke).toHaveBeenLastCalledWith('set_native_locale', { locale: 'en-US' })
   })
 
+  it('maps codex commands to stable Tauri payloads', async () => {
+    invoke.mockResolvedValue({ imported: 0, updated: 0, skipped: 0, failed: 0 })
+    const { desktopApi } = await import('./desktop-api')
+
+    await desktopApi.importCodex()
+    expect(invoke).toHaveBeenLastCalledWith('import_codex')
+
+    invoke.mockResolvedValue([])
+    await desktopApi.getCodexWork('thread-abc')
+    expect(invoke).toHaveBeenLastCalledWith('get_codex_work', { threadId: 'thread-abc' })
+
+    await desktopApi.listChildSessions('parent-xyz')
+    expect(invoke).toHaveBeenLastCalledWith('list_child_sessions', { parentPlatformSessionId: 'parent-xyz' })
+  })
+
   it('invokes print_to_pdf with path and compact options', async () => {
     invoke.mockResolvedValue(undefined)
     const { desktopApi } = await import('./desktop-api')

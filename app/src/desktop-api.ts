@@ -1,9 +1,22 @@
 
 import { invoke } from '@tauri-apps/api/core'
-import type { BranchOverview, Message, SearchHit, SessionOpen, SessionSummary } from './conversation'
+import type { BranchOverview, Message, SearchHit, SessionOpen, SessionSummary, WorkItem } from './conversation'
 import type { LanguagePreference, SupportedLocale } from './i18n/locale'
 
 export type { LanguagePreference, SupportedLocale } from './i18n/locale'
+export type { WorkItem } from './conversation'
+
+export type CodexImportResponse = {
+  imported: number
+  updated: number
+  skipped: number
+  failed: number
+}
+
+export type CodexSettings = {
+  auto_watch: boolean
+  codex_home?: string
+}
 
 export type ThemePreference = 'system' | 'light' | 'dark'
 export type CloseBehavior = 'ask' | 'hide_to_tray' | 'exit'
@@ -53,6 +66,7 @@ export type SettingsModel = {
   semantic_search: SemanticSearchSettings
   mcp_enabled: boolean
   cloud_sync: CloudSyncSettings
+  codex: CodexSettings
   custom_themes?: ThemeDefinition[]
 }
 
@@ -191,6 +205,9 @@ export interface DesktopApi {
   syncNow(): Promise<CloudSyncStatus>
   rewriteCloudArchive(): Promise<CloudSyncStatus>
   removeCloudDeviceRecord(deviceId: string): Promise<CloudSyncStatus>
+  importCodex(): Promise<CodexImportResponse>
+  getCodexWork(threadId: string): Promise<WorkItem[]>
+  listChildSessions(parentPlatformSessionId: string): Promise<SessionSummary[]>
   setNativeLocale(locale: SupportedLocale): Promise<void>
 }
 
@@ -221,5 +238,8 @@ export const desktopApi: DesktopApi = {
   syncNow: () => invoke('sync_now'),
   rewriteCloudArchive: () => invoke('rewrite_cloud_archive'),
   removeCloudDeviceRecord: (deviceId) => invoke('remove_cloud_device_record', { deviceId }),
+  importCodex: () => invoke('import_codex'),
+  getCodexWork: (threadId) => invoke('get_codex_work', { threadId }),
+  listChildSessions: (parentPlatformSessionId) => invoke('list_child_sessions', { parentPlatformSessionId }),
   setNativeLocale: (locale) => invoke('set_native_locale', { locale }),
 }
