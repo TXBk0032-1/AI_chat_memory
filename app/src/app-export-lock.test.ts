@@ -145,6 +145,7 @@ function settingsFixture(): SettingsModel {
       openai_compatible: { base_url: '', model: 'test' },
     },
     mcp_enabled: false,
+    codex: { auto_watch: false },
     cloud_sync: {
       backend: 'webdav', enabled: false, connection_verified: false, base_url: '', root_path: '', username: '', encryption_enabled: false,
       s3: { endpoint_url: '', region: 'us-east-1', bucket: '', prefix: '', force_path_style: false },

@@ -94,6 +94,7 @@ describe('desktopApi', () => {
         openai_compatible: { base_url: 'https://example.test/v1', model: 'test' },
       },
       mcp_enabled: true,
+      codex: { auto_watch: false },
       cloud_sync: {
         backend: 's3',
         enabled: true,
