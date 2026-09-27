@@ -1,5 +1,6 @@
 mod branch;
 mod codex;
+mod codex_watch;
 mod commands;
 mod data_directory;
 mod data_directory_marker;
@@ -197,6 +198,7 @@ pub fn run() {
             let codex_service = service.clone();
             tauri::async_runtime::spawn(async move {
                 if codex_service.settings().await.codex.auto_watch {
+                    // 先保留原有的启动一次性增量导入行为
                     match codex_service.import_codex().await {
                         Ok(resp) => tracing::info!(
                             imported = resp.imported,
@@ -205,6 +207,9 @@ pub fn run() {
                         ),
                         Err(error) => tracing::warn!(%error, "codex 启动增量导入失败"),
                     }
+                    // 再拉起常驻 notify 实时监听（防抖后增量导入）。
+                    // 仅在启动时按 auto_watch 拉起；未实现设置变更时的动态启停（YAGNI）。
+                    codex_watch::spawn(codex_service);
                 }
             });
 

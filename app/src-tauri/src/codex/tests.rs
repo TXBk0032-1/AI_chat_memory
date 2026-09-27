@@ -92,6 +92,60 @@ fn merges_paginated_windows_by_thread_id() {
     assert_eq!(contents, vec!["问题一", "答一", "问题二"]);
 }
 
+#[tokio::test]
+async fn codex_watch_incremental_import_is_idempotent() {
+    // 实时监听最终复用的导入链：scan_dir 解析目录 -> import_local_sessions 幂等入库。
+    // 简报步骤 1 引用的 import_codex_file(single_file) 单文件导入函数在代码库中并不存在
+    // （见任务简报「关键代码事实」），因此在真实可复用、构造成本合理的这一层验证幂等：
+    // 首次解析出 1 个线程且入库 1 行；对同一数据二次导入后 sessions 表仍只有 1 行（upsert 幂等）。
+    let tmp = std::env::temp_dir().join(format!("codex-watch-{}", uuid::Uuid::new_v4()));
+    let sessions_dir = tmp.join("sessions");
+    std::fs::create_dir_all(&sessions_dir).unwrap();
+
+    let thread_id = uuid::Uuid::new_v4().to_string();
+    let meta = format!(r#"{{"type":"session_meta","payload":{{"id":"{thread_id}","cwd":"/w/proj"}}}}"#);
+    write_rollout(
+        &sessions_dir,
+        "rollout-2026-01-01T00-00-00.jsonl",
+        &[
+            meta.as_str(),
+            r#"{"ordinal":1,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","text":"你好"}}}"#,
+            r#"{"ordinal":2,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","phase":"final_answer","text":"回答"}}}"#,
+        ],
+    );
+
+    let threads = scan_dir(&sessions_dir).unwrap();
+    assert_eq!(threads.len(), 1, "应解析出恰好 1 个 codex 线程");
+    let normalized: Vec<NormalizedSession> = threads.iter().map(|t| t.session.clone()).collect();
+
+    // register_sqlite_vec() 由 database::connect 内部调用；不用 #[sqlx::test]（其注入的 pool 缺 sqlite-vec）。
+    let db_path = tmp.join("chat_memory.db");
+    let pool = crate::database::connect(&db_path).await.unwrap();
+
+    let imported = crate::service::import_local_sessions(&pool, &normalized)
+        .await
+        .unwrap();
+    assert_eq!(imported, 1, "首次导入应处理 1 个会话");
+    let after_first: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(after_first, 1, "首次导入后 sessions 应有 1 行");
+
+    // 二次导入同一数据：upsert 幂等，不应新增行。
+    crate::service::import_local_sessions(&pool, &normalized)
+        .await
+        .unwrap();
+    let after_second: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(after_second, 1, "二次导入应保持 1 行（幂等 upsert，不重复计入）");
+
+    pool.close().await;
+    std::fs::remove_dir_all(&tmp).ok();
+}
+
 #[test]
 fn work_items_roundtrip_through_jsonl() {
     let tmp = std::env::temp_dir().join(format!("codex-work-{}", uuid::Uuid::new_v4()));
