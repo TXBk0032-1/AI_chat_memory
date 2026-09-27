@@ -178,18 +178,12 @@ pub struct CodexImportResponse {
     pub failed: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct CodexSettings {
     #[serde(default)]
     pub auto_watch: bool,
     #[serde(default)]
     pub codex_home: Option<String>,
-}
-
-impl Default for CodexSettings {
-    fn default() -> Self {
-        Self { auto_watch: false, codex_home: None }
-    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]

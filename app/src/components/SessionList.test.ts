@@ -7,10 +7,24 @@ import { setLocale } from '../i18n'
 import type { SessionSummary } from '../conversation'
 
 function summary(over: Partial<SessionSummary>): SessionSummary {
-  return { id: 'x', platform: 'codex', platform_session_id: 't', title: 'T', updated_at: '2026-09-27T00:00:00Z', message_count: 1, ...over }
+  return { id: 'x', platform: 'codex', platform_session_id: 't', title: 'T', updated_at: '2026-09-27T00:00:00Z', ...over }
 }
 
-async function mountList(props: Record<string, unknown>) {
+type SessionListProps = {
+  sessions: SessionSummary[]
+  total: number
+  loading: boolean
+  selectedId?: string
+  filtered: boolean
+  query: string
+  childSessions: Map<string, SessionSummary[]>
+  expandedParents: Set<string>
+  onSelect?: (id: string) => void
+  onLoadMore?: () => void
+  onToggleChildren?: (parentId: string) => void
+}
+
+async function mountList(props: SessionListProps) {
   document.body.innerHTML = '<div id="app"></div>'
   const Root = defineComponent({ setup: () => () => h(SessionList, props) })
   const app = createApp(Root)

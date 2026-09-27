@@ -1,6 +1,6 @@
 /** @vitest-environment happy-dom */
 
-import { createApp, defineComponent, h, nextTick, ref } from 'vue'
+import { createApp, defineComponent, h, nextTick } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { WorkItem } from '../conversation'
 import CodexWorkPanel from './CodexWorkPanel.vue'
