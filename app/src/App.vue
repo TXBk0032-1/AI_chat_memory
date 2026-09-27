@@ -149,8 +149,11 @@ const childSessionsByParentId = computed(() => {
 async function loadCodexWork(session: { platform: string; platform_session_id: string }) {
   codexWorkBySeq.value = new Map()
   if (session.platform !== 'codex') return
+  // 快速切换会话时旧请求可能后返回：记录目标会话，await 后若当前选中已变则丢弃结果。
+  const targetId = session.platform_session_id
   try {
     const items = await desktopApi.getCodexWork(session.platform_session_id)
+    if (selected.value?.platform_session_id !== targetId) return
     const grouped = new Map<number, WorkItem[]>()
     for (const item of items) {
       const bucket = grouped.get(item.seq)
