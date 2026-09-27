@@ -54,3 +54,57 @@ fn reasoning_and_command_go_to_work_items_only() {
     assert!(thread.work_items.iter().any(|w| w.kind == "reasoning"));
     assert!(thread.work_items.iter().any(|w| w.kind == "command" && w.title.contains("cargo test")));
 }
+
+use std::io::Write;
+
+fn write_rollout(dir: &std::path::Path, name: &str, lines: &[&str]) -> PathBuf {
+    let path = dir.join(name);
+    let mut f = std::fs::File::create(&path).unwrap();
+    for l in lines {
+        writeln!(f, "{l}").unwrap();
+    }
+    path
+}
+
+#[test]
+fn merges_paginated_windows_by_thread_id() {
+    let tmp = std::env::temp_dir().join(format!("codex-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    // 窗口 1：ordinal 1,2
+    write_rollout(&tmp, "rollout-a_0.jsonl", &[
+        r#"{"type":"session_meta","payload":{"id":"T-9","cwd":"/p/proj","history_mode":"paginated"}}"#,
+        r#"{"ordinal":1,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","text":"问题一"}}}"#,
+        r#"{"ordinal":2,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","phase":"final_answer","text":"答一"}}}"#,
+    ]);
+    // 窗口 2：ordinal 2（重叠，应去重）,3
+    write_rollout(&tmp, "rollout-a_1.jsonl", &[
+        r#"{"type":"session_meta","payload":{"id":"T-9","cwd":"/p/proj","history_mode":"paginated","history_base":{"thread_id":"T-9","end_ordinal_exclusive":2}}}"#,
+        r#"{"ordinal":2,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"AgentMessage","phase":"final_answer","text":"答一"}}}"#,
+        r#"{"ordinal":3,"type":"event_msg","payload":{"type":"item_completed","item":{"type":"UserMessage","text":"问题二"}}}"#,
+    ]);
+    let threads = scan_dir(&tmp).unwrap();
+    std::fs::remove_dir_all(&tmp).ok();
+    assert_eq!(threads.len(), 1);
+    let t = &threads[0];
+    assert_eq!(t.session.platform_session_id, "T-9");
+    // 去重后：user 问题一 / assistant 答一 / user 问题二 —— 只有一个"答一"
+    let contents: Vec<&str> = t.session.messages.iter().map(|m| m.content.as_str()).collect();
+    assert_eq!(contents, vec!["问题一", "答一", "问题二"]);
+}
+
+#[test]
+fn work_items_roundtrip_through_jsonl() {
+    let tmp = std::env::temp_dir().join(format!("codex-work-{}", uuid::Uuid::new_v4()));
+    let items = vec![WorkItem {
+        work_seq: 0, seq: 0, kind: "command".into(), title: "$ ls".into(),
+        body: Some("out".into()), expandable: true, truncated: false,
+        agent_thread_id: None, agent_label: None,
+    }];
+    write_work_items(&tmp, "T-x", &items).unwrap();
+    let back = read_work_items(&tmp, "T-x");
+    assert_eq!(back.len(), 1);
+    assert_eq!(back[0].title, "$ ls");
+    delete_work_items(&tmp, "T-x");
+    assert!(read_work_items(&tmp, "T-x").is_empty());
+    std::fs::remove_dir_all(&tmp).ok();
+}

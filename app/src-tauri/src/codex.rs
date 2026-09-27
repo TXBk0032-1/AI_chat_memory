@@ -395,6 +395,130 @@ impl ThreadBuilder {
     }
 }
 
+/// 从 session_meta 首行提取 thread_id 与 parent 提示（不解析全文，快速分组用）。
+fn read_thread_head(path: &Path) -> Option<(String, Option<String>)> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let first = content.lines().next()?;
+    let value: Value = serde_json::from_str(first).ok()?;
+    if value.get("type").and_then(Value::as_str)? != "session_meta" {
+        return None;
+    }
+    let payload = value.get("payload")?;
+    let id = payload.get("id").and_then(Value::as_str)?.to_string();
+    let parent = payload
+        .get("parent_thread_id")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or_else(|| {
+            payload
+                .get("source")
+                .and_then(|s| s.get("subagent"))
+                .and_then(|s| s.get("parent_thread_id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        });
+    Some((id, parent))
+}
+
+/// 读一个 rollout 文件的所有行为 Value（跳过解析失败的行，容忍尾部截断）。
+fn read_rollout_values(path: &Path) -> Vec<Value> {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .collect()
+}
+
+/// 扫描一个目录下的 rollout 文件，按 thread_id 分组合并并解析。
+pub fn scan_dir(dir: &Path) -> crate::error::Result<Vec<CodexThread>> {
+    use std::collections::BTreeMap;
+    // thread_id -> (parent_hint, 该线程所有窗口文件路径)
+    let mut groups: BTreeMap<String, (Option<String>, Vec<PathBuf>)> = BTreeMap::new();
+    for entry in walkdir::WalkDir::new(dir).into_iter().flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let is_jsonl = path.extension().and_then(|e| e.to_str()) == Some("jsonl");
+        let is_rollout = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.starts_with("rollout-"))
+            .unwrap_or(false);
+        if !is_jsonl || !is_rollout {
+            continue;
+        }
+        if let Some((thread_id, parent)) = read_thread_head(path) {
+            let slot = groups.entry(thread_id).or_default();
+            if slot.0.is_none() {
+                slot.0 = parent;
+            }
+            slot.1.push(path.to_path_buf());
+        }
+    }
+    let mut threads = Vec::new();
+    for (thread_id, (parent, mut paths)) in groups {
+        // 窗口文件名后缀 _0/_1 决定顺序；无后缀者视为单窗口
+        paths.sort();
+        let mut all_lines = Vec::new();
+        for p in &paths {
+            all_lines.extend(read_rollout_values(p));
+        }
+        match parse_lines(&thread_id, &all_lines, parent.as_deref()) {
+            Ok(thread) => threads.push(thread),
+            Err(error) => tracing::warn!(%thread_id, %error, "codex thread 解析失败，跳过"),
+        }
+    }
+    Ok(threads)
+}
+
+/// 把某线程的工作项写入 `<work_dir>/<thread_id>.jsonl`（每行一个 WorkItem）。
+pub fn write_work_items(work_dir: &Path, thread_id: &str, items: &[WorkItem]) -> std::io::Result<()> {
+    use std::io::Write;
+    std::fs::create_dir_all(work_dir)?;
+    let path = work_dir.join(sanitize_thread_id(thread_id)).with_extension("jsonl");
+    let tmp = path.with_extension("jsonl.tmp");
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        for item in items {
+            let line = serde_json::to_string(item).unwrap_or_default();
+            writeln!(f, "{line}")?;
+        }
+        f.flush()?;
+    }
+    std::fs::rename(&tmp, &path)?; // 原子替换，避免读到半截文件
+    Ok(())
+}
+
+/// 读取某线程工作项（文件缺失返回空）。
+pub fn read_work_items(work_dir: &Path, thread_id: &str) -> Vec<WorkItem> {
+    let path = work_dir.join(sanitize_thread_id(thread_id)).with_extension("jsonl");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<WorkItem>(l).ok())
+        .collect()
+}
+
+pub fn delete_work_items(work_dir: &Path, thread_id: &str) {
+    let path = work_dir.join(sanitize_thread_id(thread_id)).with_extension("jsonl");
+    let _ = std::fs::remove_file(path);
+}
+
+/// thread_id 全是 UUID/短标识，但仍防御路径穿越：仅保留字母数字/连字符/下划线。
+fn sanitize_thread_id(thread_id: &str) -> String {
+    thread_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect()
+}
+
 fn response_message_text(p: &Value) -> String {
     // content 可能是字符串或 [{type, text}]
     match p.get("content") {
