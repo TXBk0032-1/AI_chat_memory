@@ -7,7 +7,7 @@ pub mod timestamp;
 
 pub use connection::{connect, copy_database};
 pub use details::{get_session_branches, get_session_messages, open_session, search_session_hits};
-pub use imports::import_sessions;
+pub use imports::{ImportCounts, import_sessions, import_sessions_counted};
 pub use maintenance::{delete_embedding_vectors_in, delete_session, sync_status};
 pub use sessions::{list_child_sessions, search, search_and_count};
 

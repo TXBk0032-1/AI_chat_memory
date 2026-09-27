@@ -21,7 +21,7 @@ pub async fn list_child_sessions(
         "SELECT s.id, s.platform, s.platform_session_id, s.title, s.created_at, s.updated_at, s.imported_at, s.project,
                 0 AS child_count
          FROM sessions s
-         WHERE s.parent_platform_session_id = ?
+         WHERE s.parent_platform_session_id = ? AND s.platform = 'codex'
          ORDER BY ({ts}) ASC, s.id ASC"
     );
     let rows = sqlx::query(&sql)

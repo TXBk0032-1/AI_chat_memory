@@ -281,6 +281,14 @@ pub(crate) async fn import_local_sessions(
     database::import_sessions(pool, sessions, true).await
 }
 
+/// 同 `import_local_sessions`，但区分新建/更新计数（供 Codex 导入回填统计）。
+pub(crate) async fn import_local_sessions_counted(
+    pool: &SqlitePool,
+    sessions: &[NormalizedSession],
+) -> Result<database::ImportCounts> {
+    database::import_sessions_counted(pool, sessions, true).await
+}
+
 async fn delete_local_session(pool: &SqlitePool, id: &str) -> Result<()> {
     database::delete_session(pool, id, true).await
 }
@@ -2147,9 +2155,9 @@ impl AppService {
         }
 
         let normalized: Vec<NormalizedSession> = threads.iter().map(|t| t.session.clone()).collect();
-        let imported = {
+        let counts = {
             let _guard = self.sync_gate.lock().await;
-            import_local_sessions(&self.pool, &normalized).await?
+            import_local_sessions_counted(&self.pool, &normalized).await?
         };
         for session in &normalized {
             if let Ok(Some(id)) = sqlx::query_scalar::<_, String>(
@@ -2164,11 +2172,16 @@ impl AppService {
             }
         }
         let total = normalized.len();
-        tracing::info!(total, imported, "codex import completed");
+        tracing::info!(
+            total,
+            inserted = counts.inserted,
+            updated = counts.updated,
+            "codex import completed"
+        );
         self.notify_local_sync();
         Ok(crate::models::CodexImportResponse {
-            imported,
-            updated: total.saturating_sub(imported),
+            imported: counts.inserted,
+            updated: counts.updated,
             skipped: 0,
             failed: 0,
         })
@@ -2177,11 +2190,11 @@ impl AppService {
     pub async fn get_codex_work(&self, thread_id: &str) -> Result<Vec<WorkItem>> {
         let work_dir = self.codex_work_dir();
         let thread_id = thread_id.to_string();
-        Ok(tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             crate::codex::read_work_items(&work_dir, &thread_id)
         })
         .await
-        .map_err(|e| AppError::Configuration(e.to_string()))?)
+        .map_err(|e| AppError::Configuration(e.to_string()))
     }
 
     pub async fn list_child_sessions(&self, parent_platform_session_id: &str) -> Result<Vec<SessionSummary>> {

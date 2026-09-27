@@ -596,7 +596,9 @@ pub async fn summaries_by_ids(pool: &SqlitePool, ids: &[String]) -> Result<Vec<S
     let mut map: HashMap<String, SessionSummary> = HashMap::with_capacity(unique.len());
     for batch in unique.chunks(SUMMARIES_IN_BATCH) {
         let mut sql = String::from(
-            "SELECT id, platform, platform_session_id, title, created_at, updated_at, imported_at, project FROM sessions WHERE id IN (",
+            "SELECT s.id, s.platform, s.platform_session_id, s.title, s.created_at, s.updated_at, s.imported_at, s.project,
+                    (SELECT COUNT(*) FROM sessions c WHERE c.parent_platform_session_id = s.platform_session_id AND c.platform = s.platform) AS child_count
+             FROM sessions s WHERE s.id IN (",
         );
         for index in 0..batch.len() {
             if index > 0 {
@@ -604,7 +606,11 @@ pub async fn summaries_by_ids(pool: &SqlitePool, ids: &[String]) -> Result<Vec<S
             }
             sql.push('?');
         }
-        sql.push(')');
+        // 与关键词检索一致：父会话存在时排除子会话（子会话只在父下展开）。
+        sql.push_str(
+            ") AND (s.parent_platform_session_id IS NULL
+                    OR NOT EXISTS (SELECT 1 FROM sessions p WHERE p.platform = s.platform AND p.platform_session_id = s.parent_platform_session_id))",
+        );
         let mut query = sqlx::query(&sql);
         for id in batch {
             query = query.bind(id);
@@ -1165,7 +1171,8 @@ mod tests {
         sqlx::query(
             "CREATE TABLE sessions (
                 id TEXT PRIMARY KEY, platform TEXT NOT NULL, platform_session_id TEXT NOT NULL,
-                title TEXT, created_at TEXT, updated_at TEXT, imported_at TEXT
+                title TEXT, created_at TEXT, updated_at TEXT, imported_at TEXT,
+                project TEXT, parent_platform_session_id TEXT
             )",
         )
         .execute(&pool)
@@ -1198,6 +1205,24 @@ mod tests {
         // More ids than one IN batch still resolves every row.
         let many: Vec<String> = (0..1200).map(|index| format!("id-{index}")).collect();
         assert!(summaries_by_ids(&pool, &many).await.unwrap().is_empty());
+
+        // 父会话存在时，子会话被排除（与关键词检索一致，只在父下展开）。
+        sqlx::query("INSERT INTO sessions (id, platform, platform_session_id, title) VALUES ('parent', 'chatgpt', 'T-parent', '父')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO sessions (id, platform, platform_session_id, title, parent_platform_session_id) VALUES ('child', 'chatgpt', 'T-child', '子', 'T-parent')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let with_child = summaries_by_ids(&pool, &["child".into(), "parent".into()])
+            .await
+            .unwrap();
+        assert_eq!(
+            with_child.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            ["parent"],
+            "父存在时子会话应从结果排除"
+        );
     }
 
     #[tokio::test]
