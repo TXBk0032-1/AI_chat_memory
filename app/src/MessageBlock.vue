@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
-import { toolCallsFromMetadata, type Message, type Reference } from './conversation'
+import CodexWorkPanel from './components/CodexWorkPanel.vue'
+import { toolCallsFromMetadata, type Message, type Reference, type WorkItem } from './conversation'
 import { renderMarkdown } from './markdown'
 import { createMessagePreview, isOversizedMessage } from './message-display'
 import { currentLocale, translate as t } from './i18n'
@@ -17,9 +18,10 @@ const props = defineProps<{
   expanded: boolean
   formattedDate: string
   roleLabel: string
+  workItems?: WorkItem[]
 }>()
 
-const emit = defineEmits<{ toggleThinking: [messageId: string]; contentRendered: [] }>()
+const emit = defineEmits<{ toggleThinking: [messageId: string]; contentRendered: []; openSubagent: [agentThreadId: string] }>()
 
 const rootElement = ref<HTMLElement | null>(null)
 
@@ -43,6 +45,7 @@ const contentHtml = computed(() => {
   return result
 })
 const thinking = computed(() => typeof props.message.metadata?.thinking === 'string' ? props.message.metadata.thinking : '')
+const hasWorkItems = computed(() => Array.isArray(props.workItems) && props.workItems.length > 0)
 const thinkingHtml = computed(() => {
   if (!props.expanded || !thinking.value) return ''
   const t0 = performance.now()
@@ -118,7 +121,8 @@ watch([contentHtml, thinkingHtml], notifyRendered)
 <template>
   <article ref="rootElement" :data-message-id="message.id" :class="['message-block', message.role]" @click="handleBlockClick">
     <div class="message-author"><span>{{ roleLabel }}</span><time>{{ formattedDate }}</time></div>
-    <section v-if="thinking" :class="['thinking', { open: expanded }]">
+    <CodexWorkPanel v-if="hasWorkItems" :items="workItems!" @open-subagent="(id) => emit('openSubagent', id)" />
+    <section v-if="thinking && !hasWorkItems" :class="['thinking', { open: expanded }]">
       <button class="thinking-toggle" :aria-expanded="expanded" @click="$emit('toggleThinking', message.id)">{{ t('message.showThinking') }}</button>
       <div class="thinking-reveal" :aria-hidden="!expanded"><div><div v-if="expanded" class="markdown" data-search-field="thinking" v-html="thinkingHtml"></div></div></div>
     </section>
