@@ -127,6 +127,16 @@ async function toggleChildren(parentId: string) {
   if (parent) await loadChildSessions(parent.platform_session_id)
 }
 
+async function handleImportCodex() {
+  try {
+    const result = await desktopApi.importCodex()
+    console.log('[CODEX] import result:', result)
+    await loadSessions()
+  } catch (reason) {
+    console.error('[CODEX] import failed:', reason)
+  }
+}
+
 const childSessionsByParentId = computed(() => {
   const view = new Map<string, SessionSummary[]>()
   for (const session of sessions.value) {
@@ -1147,6 +1157,7 @@ onBeforeUnmount(() => {
       @cloud-sync-now="cloudSyncNow"
       @cloud-sync-rewrite="cloudSyncRewrite"
       @cloud-sync-remove-device="cloudSyncRemoveDevice"
+      @import-codex="handleImportCodex"
     />
 
     <SessionDialogs
