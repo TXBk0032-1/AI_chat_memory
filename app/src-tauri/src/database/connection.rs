@@ -84,7 +84,7 @@ pub async fn connect(path: &Path) -> Result<SqlitePool> {
 /// value the whole initialize_schema chain is skipped. Any schema change —
 /// new table, column, index, or ensure_* rule — MUST bump this constant,
 /// otherwise existing installs will never pick the change up.
-const SCHEMA_VERSION: i32 = 1;
+const SCHEMA_VERSION: i32 = 2;
 
 pub(crate) async fn initialize_schema(pool: &SqlitePool) -> Result<()> {
     sqlx::query("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, platform TEXT NOT NULL, platform_session_id TEXT NOT NULL, title TEXT, created_at TEXT, updated_at TEXT, imported_at TEXT DEFAULT CURRENT_TIMESTAMP, raw_data TEXT, UNIQUE(platform, platform_session_id));").execute(pool).await?;
@@ -226,6 +226,18 @@ pub(crate) async fn initialize_schema(pool: &SqlitePool) -> Result<()> {
     )
     .execute(pool)
     .await?;
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS codex_import_state (
+            rollout_path TEXT PRIMARY KEY,
+            thread_id TEXT NOT NULL,
+            byte_len INTEGER NOT NULL,
+            mtime_ms INTEGER NOT NULL,
+            imported_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );",
+    )
+    .execute(pool)
+    .await?;
+    ensure_codex_columns(pool).await?;
     ensure_embedding_vec_table(pool, None).await?;
     Ok(())
 }
@@ -359,6 +371,27 @@ async fn ensure_sync_published_bundle_columns(pool: &SqlitePool) -> Result<()> {
         if !existing.iter().any(|column| column == name) {
             sqlx::query(&format!(
                 "ALTER TABLE sync_published_bundles ADD COLUMN {name} {definition}"
+            ))
+            .execute(pool)
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn ensure_codex_columns(pool: &SqlitePool) -> Result<()> {
+    let existing: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('sessions')")
+            .fetch_all(pool)
+            .await?;
+    for (name, definition) in [
+        ("project", "TEXT"),
+        ("parent_platform_session_id", "TEXT"),
+        ("agent_label", "TEXT"),
+    ] {
+        if !existing.iter().any(|column| column == name) {
+            sqlx::query(&format!(
+                "ALTER TABLE sessions ADD COLUMN {name} {definition}"
             ))
             .execute(pool)
             .await?;
@@ -1009,7 +1042,7 @@ mod tests {
             .connect("sqlite::memory:")
             .await
             .unwrap();
-        sqlx::query("CREATE TABLE sessions (id TEXT PRIMARY KEY, platform TEXT NOT NULL, platform_session_id TEXT NOT NULL, title TEXT, created_at TEXT, updated_at TEXT, imported_at TEXT, raw_data TEXT, UNIQUE(platform, platform_session_id)); CREATE TABLE messages (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, role TEXT NOT NULL, content TEXT, metadata TEXT, created_at TEXT, seq INTEGER);")
+        sqlx::query("CREATE TABLE sessions (id TEXT PRIMARY KEY, platform TEXT NOT NULL, platform_session_id TEXT NOT NULL, title TEXT, created_at TEXT, updated_at TEXT, imported_at TEXT, raw_data TEXT, project TEXT, parent_platform_session_id TEXT, agent_label TEXT, UNIQUE(platform, platform_session_id)); CREATE TABLE messages (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE, role TEXT NOT NULL, content TEXT, metadata TEXT, created_at TEXT, seq INTEGER);")
             .execute(&pool)
             .await
             .unwrap();
@@ -1086,6 +1119,30 @@ mod tests {
             .unwrap();
         assert_eq!(mapped_rowid, fts_rowid);
         assert_eq!(fts_count, 1);
+    }
+
+    #[tokio::test]
+    async fn ensure_codex_columns_is_idempotent() {
+        register_sqlite_vec();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        // 初次建库后应含新列
+        initialize_schema(&pool).await.unwrap();
+        let cols: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info('sessions')")
+            .fetch_all(&pool).await.unwrap();
+        for c in ["project", "parent_platform_session_id", "agent_label"] {
+            assert!(cols.contains(&c.to_string()), "缺少列 {c}");
+        }
+        // codex_import_state 表存在
+        let n: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='codex_import_state'",
+        ).fetch_one(&pool).await.unwrap();
+        assert_eq!(n, 1);
+        // 二次调用不报错（幂等）
+        ensure_codex_columns(&pool).await.unwrap();
     }
 }
 
