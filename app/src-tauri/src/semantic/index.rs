@@ -596,7 +596,7 @@ pub async fn summaries_by_ids(pool: &SqlitePool, ids: &[String]) -> Result<Vec<S
     let mut map: HashMap<String, SessionSummary> = HashMap::with_capacity(unique.len());
     for batch in unique.chunks(SUMMARIES_IN_BATCH) {
         let mut sql = String::from(
-            "SELECT id, platform, platform_session_id, title, created_at, updated_at, imported_at FROM sessions WHERE id IN (",
+            "SELECT id, platform, platform_session_id, title, created_at, updated_at, imported_at, project FROM sessions WHERE id IN (",
         );
         for index in 0..batch.len() {
             if index > 0 {

@@ -59,9 +59,11 @@ async fn import_one_session(
     .fetch_optional(&mut *tx)
     .await?;
     let id = existing.unwrap_or_else(|| session.id.clone());
-    sqlx::query("INSERT INTO sessions (id, platform, platform_session_id, title, created_at, updated_at, imported_at, raw_data) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(platform, platform_session_id) DO UPDATE SET title=excluded.title, created_at=excluded.created_at, updated_at=excluded.updated_at, imported_at=excluded.imported_at, raw_data=excluded.raw_data")
+    sqlx::query("INSERT INTO sessions (id, platform, platform_session_id, title, created_at, updated_at, imported_at, raw_data, project, parent_platform_session_id, agent_label) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(platform, platform_session_id) DO UPDATE SET title=excluded.title, created_at=excluded.created_at, updated_at=excluded.updated_at, imported_at=excluded.imported_at, raw_data=excluded.raw_data, project=excluded.project, parent_platform_session_id=excluded.parent_platform_session_id, agent_label=excluded.agent_label")
         .bind(&id).bind(&session.platform).bind(&session.platform_session_id).bind(&session.title)
-        .bind(&session.created_at).bind(&session.updated_at).bind(&session.imported_at).bind(serde_json::to_string(&session.raw_data)?).execute(&mut *tx).await?;
+        .bind(&session.created_at).bind(&session.updated_at).bind(&session.imported_at).bind(serde_json::to_string(&session.raw_data)?)
+        .bind(&session.project).bind(&session.parent_platform_session_id).bind(&session.agent_label)
+        .execute(&mut *tx).await?;
     sqlx::query("DELETE FROM messages WHERE session_id = ?")
         .bind(&id)
         .execute(&mut *tx)

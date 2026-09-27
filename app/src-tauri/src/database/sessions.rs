@@ -12,6 +12,25 @@ pub async fn search(pool: &SqlitePool, query: &SearchQuery) -> Result<Vec<Sessio
     search_on(&mut connection, query).await
 }
 
+pub async fn list_child_sessions(
+    pool: &SqlitePool,
+    parent_platform_session_id: &str,
+) -> Result<Vec<SessionSummary>> {
+    let ts = timestamp::expression("s.updated_at");
+    let sql = format!(
+        "SELECT s.id, s.platform, s.platform_session_id, s.title, s.created_at, s.updated_at, s.imported_at, s.project,
+                0 AS child_count
+         FROM sessions s
+         WHERE s.parent_platform_session_id = ?
+         ORDER BY ({ts}) ASC, s.id ASC"
+    );
+    let rows = sqlx::query(&sql)
+        .bind(parent_platform_session_id)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.into_iter().map(summary_from_row).collect())
+}
+
 pub async fn search_and_count(
     pool: &SqlitePool,
     query: &SearchQuery,
@@ -40,13 +59,16 @@ async fn search_fts(
 ) -> Result<Vec<SessionSummary>> {
     let timestamp = timestamp::expression("s.updated_at");
     let sql = format!(
-        "SELECT s.id, s.platform, s.platform_session_id, s.title, s.created_at, s.updated_at, s.imported_at
+        "SELECT s.id, s.platform, s.platform_session_id, s.title, s.created_at, s.updated_at, s.imported_at, s.project,
+                (SELECT COUNT(*) FROM sessions c WHERE c.parent_platform_session_id = s.platform_session_id AND c.platform = s.platform) AS child_count
          FROM session_fts
          INNER JOIN sessions s ON s.id = session_fts.session_id
          WHERE session_fts MATCH ?
            AND (? IS NULL OR s.platform = ?)
            AND (? IS NULL OR ({timestamp}) >= CAST(? AS REAL))
            AND (? IS NULL OR ({timestamp}) <= CAST(? AS REAL))
+           AND (s.parent_platform_session_id IS NULL
+                OR NOT EXISTS (SELECT 1 FROM sessions p WHERE p.platform = s.platform AND p.platform_session_id = s.parent_platform_session_id))
          ORDER BY bm25(session_fts, 0.0, 2.0, 1.0) ASC, ({timestamp}) DESC, s.id ASC
          LIMIT ? OFFSET ?"
     );
@@ -72,7 +94,16 @@ async fn search_like(
     let timestamp = timestamp::expression("s.updated_at");
     let like_query = query.q.as_deref().map(escape_like);
     let sql = format!(
-        "SELECT s.id, s.platform, s.platform_session_id, s.title, s.created_at, s.updated_at, s.imported_at FROM sessions s WHERE (? IS NULL OR s.platform = ?) AND (? IS NULL OR ({timestamp}) >= CAST(? AS REAL)) AND (? IS NULL OR ({timestamp}) <= CAST(? AS REAL)) AND (? IS NULL OR s.title LIKE '%' || ? || '%' ESCAPE '\\' OR EXISTS (SELECT 1 FROM messages m WHERE m.session_id=s.id AND m.content LIKE '%' || ? || '%' ESCAPE '\\')) ORDER BY ({timestamp}) DESC, s.id ASC LIMIT ? OFFSET ?"
+        "SELECT s.id, s.platform, s.platform_session_id, s.title, s.created_at, s.updated_at, s.imported_at, s.project,
+                (SELECT COUNT(*) FROM sessions c WHERE c.parent_platform_session_id = s.platform_session_id AND c.platform = s.platform) AS child_count
+         FROM sessions s
+         WHERE (? IS NULL OR s.platform = ?)
+           AND (? IS NULL OR ({timestamp}) >= CAST(? AS REAL))
+           AND (? IS NULL OR ({timestamp}) <= CAST(? AS REAL))
+           AND (? IS NULL OR s.title LIKE '%' || ? || '%' ESCAPE '\\' OR EXISTS (SELECT 1 FROM messages m WHERE m.session_id=s.id AND m.content LIKE '%' || ? || '%' ESCAPE '\\'))
+           AND (s.parent_platform_session_id IS NULL
+                OR NOT EXISTS (SELECT 1 FROM sessions p WHERE p.platform = s.platform AND p.platform_session_id = s.parent_platform_session_id))
+         ORDER BY ({timestamp}) DESC, s.id ASC LIMIT ? OFFSET ?"
     );
     let rows = sqlx::query(&sql)
         .bind(&query.platform)
@@ -111,7 +142,9 @@ async fn count_fts(
          WHERE session_fts MATCH ?
            AND (? IS NULL OR s.platform = ?)
            AND (? IS NULL OR ({timestamp}) >= CAST(? AS REAL))
-           AND (? IS NULL OR ({timestamp}) <= CAST(? AS REAL))"
+           AND (? IS NULL OR ({timestamp}) <= CAST(? AS REAL))
+           AND (s.parent_platform_session_id IS NULL
+                OR NOT EXISTS (SELECT 1 FROM sessions p WHERE p.platform = s.platform AND p.platform_session_id = s.parent_platform_session_id))"
     );
     Ok(sqlx::query_scalar(&sql)
         .bind(fts_query)
@@ -129,7 +162,7 @@ async fn count_like(connection: &mut SqliteConnection, query: &SearchQuery) -> R
     let timestamp = timestamp::expression("s.updated_at");
     let like_query = query.q.as_deref().map(escape_like);
     let sql = format!(
-        "SELECT COUNT(*) FROM sessions s WHERE (? IS NULL OR s.platform = ?) AND (? IS NULL OR ({timestamp}) >= CAST(? AS REAL)) AND (? IS NULL OR ({timestamp}) <= CAST(? AS REAL)) AND (? IS NULL OR s.title LIKE '%' || ? || '%' ESCAPE '\\' OR EXISTS (SELECT 1 FROM messages m WHERE m.session_id=s.id AND m.content LIKE '%' || ? || '%' ESCAPE '\\'))"
+        "SELECT COUNT(*) FROM sessions s WHERE (? IS NULL OR s.platform = ?) AND (? IS NULL OR ({timestamp}) >= CAST(? AS REAL)) AND (? IS NULL OR ({timestamp}) <= CAST(? AS REAL)) AND (? IS NULL OR s.title LIKE '%' || ? || '%' ESCAPE '\\' OR EXISTS (SELECT 1 FROM messages m WHERE m.session_id=s.id AND m.content LIKE '%' || ? || '%' ESCAPE '\\')) AND (s.parent_platform_session_id IS NULL OR NOT EXISTS (SELECT 1 FROM sessions p WHERE p.platform = s.platform AND p.platform_session_id = s.parent_platform_session_id))"
     );
     Ok(sqlx::query_scalar(&sql)
         .bind(&query.platform)
@@ -166,6 +199,8 @@ pub(crate) fn summary_from_row(row: sqlx::sqlite::SqliteRow) -> SessionSummary {
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
         imported_at: row.get("imported_at"),
+        project: row.try_get("project").unwrap_or(None),
+        child_count: row.try_get("child_count").unwrap_or(0),
     }
 }
 
@@ -318,5 +353,42 @@ mod tests {
         .unwrap();
 
         assert_eq!(rows[0].id, "a");
+    }
+
+    #[tokio::test]
+    async fn list_excludes_child_sessions_with_present_parent() {
+        crate::database::connection::register_sqlite_vec();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::database::connection::initialize_schema(&pool)
+            .await
+            .unwrap();
+        // 父会话
+        sqlx::query("INSERT INTO sessions (id, platform, platform_session_id, title, project) VALUES ('p','codex','T-parent','父','proj')")
+            .execute(&pool).await.unwrap();
+        // 子会话（parent 指向已入库的父）
+        sqlx::query("INSERT INTO sessions (id, platform, platform_session_id, title, parent_platform_session_id, agent_label) VALUES ('c','codex','T-child','子','T-parent','审阅者')")
+            .execute(&pool).await.unwrap();
+        let top = search(&pool, &SearchQuery::default()).await.unwrap();
+        assert!(top.iter().any(|s| s.platform_session_id == "T-parent"));
+        assert!(
+            !top.iter().any(|s| s.platform_session_id == "T-child"),
+            "子会话不应出现在顶层列表"
+        );
+        let parent = top
+            .iter()
+            .find(|s| s.platform_session_id == "T-parent")
+            .unwrap();
+        assert_eq!(parent.child_count, 1);
+        assert_eq!(parent.project.as_deref(), Some("proj"));
+
+        let children = crate::database::list_child_sessions(&pool, "T-parent")
+            .await
+            .unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].platform_session_id, "T-child");
     }
 }

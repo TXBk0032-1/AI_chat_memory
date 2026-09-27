@@ -9,7 +9,24 @@ pub use connection::{connect, copy_database};
 pub use details::{get_session_branches, get_session_messages, open_session, search_session_hits};
 pub use imports::import_sessions;
 pub use maintenance::{delete_embedding_vectors_in, delete_session, sync_status};
-pub use sessions::{search, search_and_count};
+pub use sessions::{list_child_sessions, search, search_and_count};
+
+pub async fn session_platform_key(
+    pool: &sqlx::SqlitePool,
+    id: &str,
+) -> crate::error::Result<Option<(String, String)>> {
+    let row = sqlx::query("SELECT platform, platform_session_id FROM sessions WHERE id = ?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(row.map(|r| {
+        use sqlx::Row;
+        (
+            r.get::<String, _>("platform"),
+            r.get::<String, _>("platform_session_id"),
+        )
+    }))
+}
 
 #[cfg(test)]
 use crate::models::{SearchHitField, SearchQuery};
