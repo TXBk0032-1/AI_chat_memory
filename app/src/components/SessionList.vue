@@ -12,8 +12,10 @@ const props = defineProps<{
   selectedId?: string
   filtered: boolean
   query: string
+  childSessions: Map<string, SessionSummary[]>
+  expandedParents: Set<string>
 }>()
-const emit = defineEmits<{ select: [id: string]; loadMore: [] }>()
+const emit = defineEmits<{ select: [id: string]; loadMore: []; toggleChildren: [parentId: string] }>()
 
 function highlightTitle(value: string) {
   const html = escapeTitle(value)
@@ -29,6 +31,7 @@ function platformName(value: string) {
     chatbox: t('app.platformChatbox'),
     kelivo: t('app.platformKelivo'),
     gemini: t('app.platformGemini'),
+    codex: 'Codex',
   } as Record<string, string>)[value] || value
 }
 function formatDate(value?: string) {
@@ -44,11 +47,16 @@ function handleSessionPointerDown(id: string, event: PointerEvent) {
 function handleSessionClick(id: string) {
   emit('select', id)
 }
+
+function handleToggleChildren(id: string, event: MouseEvent) {
+  event.stopPropagation()
+  emit('toggleChildren', id)
+}
 </script>
 
 <template>
   <div class="session-pane">
-    <div class="table-head"><span>{{ t('session.conversation') }}</span><span>{{ t('session.source') }}</span><span>{{ t('session.updated') }}</span></div>
+    <div class="table-head"><span>{{ t('session.conversation') }}</span><span>{{ t('session.source') }}</span><span>{{ t('session.project') }}</span><span>{{ t('session.updated') }}</span></div>
     <Transition name="session-state" mode="out-in">
       <div v-if="loading && !sessions.length" key="loading" class="loading-state"><LoaderCircle class="spinning" :size="22" /><span>{{ t('session.reading') }}</span></div>
       <div v-else-if="!sessions.length" key="empty" class="empty-state">
@@ -58,11 +66,29 @@ function handleSessionClick(id: string) {
       </div>
       <div v-else key="list" class="session-list-wrapper">
         <div class="session-items">
-          <button v-for="session in sessions" :key="session.id" :class="['session-row', { selected: selectedId === session.id }]" @pointerdown="handleSessionPointerDown(session.id, $event)" @click="handleSessionClick(session.id)">
-            <span class="session-title"><strong v-html="highlightTitle(session.title)"></strong></span>
-            <span class="platform-cell"><i :class="session.platform"></i>{{ platformName(session.platform) }}</span>
-            <time>{{ formatDate(session.updated_at) }}</time>
-          </button>
+          <template v-for="session in sessions" :key="session.id">
+            <button :class="['session-row', { selected: selectedId === session.id }]" @pointerdown="handleSessionPointerDown(session.id, $event)" @click="handleSessionClick(session.id)">
+              <span class="session-title">
+                <span v-if="(session.child_count ?? 0) > 0" :class="['child-toggle', { open: expandedParents.has(session.id) }]" role="button" @pointerdown.stop @click="handleToggleChildren(session.id, $event)"></span>
+                <strong v-html="highlightTitle(session.title)"></strong>
+              </span>
+              <span class="platform-cell"><i :class="session.platform"></i>{{ platformName(session.platform) }}</span>
+              <span class="project-cell">{{ session.project || '-' }}</span>
+              <time>{{ formatDate(session.updated_at) }}</time>
+            </button>
+            <button
+              v-for="child in (expandedParents.has(session.id) ? (childSessions.get(session.id) ?? []) : [])"
+              :key="child.id"
+              :class="['session-row', 'child', { selected: selectedId === child.id }]"
+              @pointerdown="handleSessionPointerDown(child.id, $event)"
+              @click="handleSessionClick(child.id)"
+            >
+              <span class="session-title"><strong v-html="highlightTitle(child.title)"></strong></span>
+              <span class="platform-cell"><i :class="child.platform"></i>{{ platformName(child.platform) }}</span>
+              <span class="project-cell">{{ child.project || '-' }}</span>
+              <time>{{ formatDate(child.updated_at) }}</time>
+            </button>
+          </template>
         </div>
         <button v-if="sessions.length < total" class="load-more" :disabled="loading" @click="emit('loadMore')">{{ loading ? t('session.loading') : t('session.loadMore', { count: total - sessions.length }) }}</button>
       </div>
