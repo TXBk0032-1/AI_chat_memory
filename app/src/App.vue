@@ -44,6 +44,7 @@ import {
   type BranchOverview,
   type SearchMatch,
   type Message,
+  type SessionSummary,
   type WorkItem,
 } from './conversation'
 import {
@@ -111,6 +112,29 @@ const exportDocumentRef = ref<InstanceType<typeof ExportDocument> | null>(null)
 const pendingCloseBehavior = ref<'hide_to_tray' | 'exit' | null>(null)
 const expandedThinking = ref(new Set<string>())
 const codexWorkBySeq = ref(new Map<number, WorkItem[]>())
+const expandedParents = ref(new Set<string>())
+
+async function toggleChildren(parentId: string) {
+  const next = new Set(expandedParents.value)
+  if (next.has(parentId)) {
+    next.delete(parentId)
+    expandedParents.value = next
+    return
+  }
+  next.add(parentId)
+  expandedParents.value = next
+  const parent = sessions.value.find((s) => s.id === parentId)
+  if (parent) await loadChildSessions(parent.platform_session_id)
+}
+
+const childSessionsByParentId = computed(() => {
+  const view = new Map<string, SessionSummary[]>()
+  for (const session of sessions.value) {
+    const kids = childSessions.value.get(session.platform_session_id)
+    if (kids) view.set(session.id, kids)
+  }
+  return view
+})
 
 async function loadCodexWork(session: { platform: string; platform_session_id: string }) {
   codexWorkBySeq.value = new Map()
@@ -235,7 +259,7 @@ function clearSelectedSession() {
 const {
   sessions, loading, error, query, committedQuery, platform, dateFrom, dateTo,
   showFilters, total, searchElapsed, filtered, searchMode, semanticStatus, loadSessions, loadMore, resetFilters,
-  selectPlatform, setSearchMode, loadChildSessions,
+  selectPlatform, setSearchMode, loadChildSessions, childSessions,
 } = useSessionCatalog(desktopApi, (visibleIds) => {
   if (exportBusy.value) return
   if (selected.value && !visibleIds.has(selected.value.id)) {
@@ -995,8 +1019,11 @@ onBeforeUnmount(() => {
           :selected-id="selected?.id"
           :filtered="filtered"
           :query="committedQuery"
+          :child-sessions="childSessionsByParentId"
+          :expanded-parents="expandedParents"
           @select="selectSession"
           @load-more="loadMore"
+          @toggle-children="toggleChildren"
         />
 
         <div class="pane-resizer" role="separator" :aria-label="t('app.paneResize')" aria-orientation="vertical" tabindex="0" @pointerdown="startPaneResize" @pointermove="resizePanes" @pointerup="stopPaneResize" @pointercancel="stopPaneResize"></div>
