@@ -53,6 +53,10 @@ pub struct SessionSummary {
     pub created_at: Option<String>,
     pub updated_at: Option<String>,
     pub imported_at: Option<String>,
+    #[serde(default)]
+    pub project: Option<String>,
+    #[serde(default)]
+    pub child_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -124,6 +128,9 @@ pub struct NormalizedSession {
     pub imported_at: String,
     pub messages: Vec<NormalizedMessage>,
     pub raw_data: Value,
+    pub project: Option<String>,
+    pub parent_platform_session_id: Option<String>,
+    pub agent_label: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -144,6 +151,45 @@ pub struct ImportRequest {
 pub struct ImportResponse {
     pub imported: usize,
     pub skipped: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkItem {
+    pub work_seq: i64,
+    pub seq: i64,
+    /// commentary | reasoning | command | mcp_tool | file_change | subagent | plan | output
+    pub kind: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    pub expandable: bool,
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_label: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CodexImportResponse {
+    pub imported: usize,
+    pub updated: usize,
+    pub skipped: usize,
+    pub failed: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CodexSettings {
+    #[serde(default)]
+    pub auto_watch: bool,
+    #[serde(default)]
+    pub codex_home: Option<String>,
+}
+
+impl Default for CodexSettings {
+    fn default() -> Self {
+        Self { auto_watch: false, codex_home: None }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -380,6 +426,8 @@ pub struct AppSettings {
     pub mcp_enabled: bool,
     #[serde(default)]
     pub cloud_sync: CloudSyncSettings,
+    #[serde(default)]
+    pub codex: CodexSettings,
     #[serde(default)]
     pub custom_themes: Vec<CustomThemeDefinition>,
 }
@@ -650,6 +698,7 @@ impl Default for AppSettings {
             semantic_search: SemanticSearchSettings::default(),
             mcp_enabled: false,
             cloud_sync: CloudSyncSettings::default(),
+            codex: CodexSettings::default(),
             custom_themes: Vec::new(),
         }
     }
@@ -842,4 +891,35 @@ pub struct EmbeddingHealth {
     pub model_id: String,
     pub dimensions: Option<usize>,
     pub message: String,
+}
+
+#[cfg(test)]
+mod codex_tests {
+    use super::{CodexSettings, WorkItem};
+
+    #[test]
+    fn work_item_serializes_snake_case() {
+        let item = WorkItem {
+            work_seq: 3,
+            seq: 1,
+            kind: "command".into(),
+            title: "ls".into(),
+            body: Some("total 0".into()),
+            expandable: true,
+            truncated: false,
+            agent_thread_id: None,
+            agent_label: None,
+        };
+        let json = serde_json::to_value(&item).unwrap();
+        assert_eq!(json["work_seq"], 3);
+        assert_eq!(json["kind"], "command");
+        assert_eq!(json["expandable"], true);
+    }
+
+    #[test]
+    fn codex_settings_default_is_disabled() {
+        let s = CodexSettings::default();
+        assert!(!s.auto_watch);
+        assert!(s.codex_home.is_none());
+    }
 }
