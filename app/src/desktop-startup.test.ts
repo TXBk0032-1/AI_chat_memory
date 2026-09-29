@@ -3,15 +3,13 @@ import type { UnlistenFn } from '@tauri-apps/api/event'
 import { runAppStartup } from './desktop-startup'
 import { initializeAppSettings } from './app-settings-initialization'
 import type { SettingsModel } from './desktop-api'
+import { createSettingsFixture } from './test-fixtures/settings'
 
 function settingsFixture(defaultMode: SettingsModel['semantic_search']['default_mode']): SettingsModel {
-  return {
-    setup_complete: true, secret_enabled: false, allowed_origins: [], close_behavior: 'ask', tray_click_behavior: 'show_menu', theme: 'system', language: 'system',
-    semantic_search: { enabled: true, default_mode: defaultMode, backend: 'local', local: { model: 'test', device: 'auto', dtype: 'auto' }, ollama: { base_url: '', model: 'test' }, llama_cpp: { base_url: '', model: 'test' }, openai_compatible: { base_url: '', model: 'test' } },
-    mcp_enabled: true,
-    codex: { auto_watch: false },
-    cloud_sync: { backend: 'webdav', enabled: false, connection_verified: false, base_url: '', root_path: '', username: '', encryption_enabled: false, s3: { endpoint_url: '', region: 'us-east-1', bucket: '', prefix: '', force_path_style: false }, remote_id: 'default', vault_id: 'default', generation_id: 'gen-1' },
-  }
+  return createSettingsFixture({
+    semantic_search: { default_mode: defaultMode },
+    cloud_sync: { generation_id: 'gen-1' },
+  })
 }
 
 type Steps = Parameters<typeof runAppStartup>[0]

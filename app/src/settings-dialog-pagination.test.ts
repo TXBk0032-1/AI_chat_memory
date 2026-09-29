@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import SettingsDialog from './components/SettingsDialog.vue'
 import type { LanguagePreference, SettingsModel } from './desktop-api'
 import { setLanguagePreference, setLocale } from './i18n'
+import { createSettingsFixture } from './test-fixtures/settings'
 
 const styleSource = readFileSync(resolve(process.cwd(), 'src/style.css'), 'utf8')
 // The main window is created programmatically in lib.rs (for the on_navigation
@@ -23,29 +24,18 @@ function ruleFor(selector: string) {
 }
 
 function settingsFixture(): SettingsModel {
-  return {
-    setup_complete: true,
+  return createSettingsFixture({
     secret_enabled: true,
     secret: 'test-secret',
     allowed_origins: ['https://example.test'],
     data_directory: 'C:\\test-data',
-    close_behavior: 'ask',
-    tray_click_behavior: 'show_menu',
-    theme: 'system',
-    language: 'system',
     semantic_search: {
-      enabled: true,
-      default_mode: 'hybrid',
-      backend: 'local',
-      local: { model: 'test-model', device: 'auto', dtype: 'auto' },
+      local: { model: 'test-model' },
       ollama: { base_url: 'http://127.0.0.1:11434', model: 'test-model' },
       llama_cpp: { base_url: 'http://127.0.0.1:8080/v1', model: 'test-model' },
       openai_compatible: { base_url: 'https://example.test/v1', model: 'test-model' },
     },
-    mcp_enabled: true,
-    codex: { auto_watch: false },
-    cloud_sync: { backend: 'webdav', enabled: false, connection_verified: false, base_url: '', root_path: '', username: '', encryption_enabled: false, s3: { endpoint_url: '', region: 'us-east-1', bucket: '', prefix: '', force_path_style: false }, remote_id: 'default', vault_id: 'default', generation_id: 'generation-1' },
-  }
+  })
 }
 
 function requiredElement<T extends Element>(root: ParentNode, selector: string): T {

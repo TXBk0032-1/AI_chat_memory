@@ -3,10 +3,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createApp } from 'vue'
 import type { Message, SessionOpen } from './conversation'
-import type { SettingsModel } from './desktop-api'
 import appSource from './App.vue?raw'
 import App from './App.vue'
 import { i18n } from './i18n'
+import { createSettingsFixture } from './test-fixtures/settings'
 
 describe('App export context locking', () => {
   it('keeps the selected session and branch stable while an export is running', () => {
@@ -134,24 +134,8 @@ vi.mock('./components/ExportDocument.vue', async () => {
   }
 })
 
-function settingsFixture(): SettingsModel {
-  return {
-    setup_complete: true, secret_enabled: false, allowed_origins: [], close_behavior: 'ask', tray_click_behavior: 'show_menu', theme: 'system', language: 'zh-CN',
-    semantic_search: {
-      enabled: true, default_mode: 'hybrid', backend: 'local',
-      local: { model: 'test', device: 'auto', dtype: 'auto' },
-      ollama: { base_url: '', model: 'test' },
-      llama_cpp: { base_url: '', model: 'test' },
-      openai_compatible: { base_url: '', model: 'test' },
-    },
-    mcp_enabled: false,
-    codex: { auto_watch: false },
-    cloud_sync: {
-      backend: 'webdav', enabled: false, connection_verified: false, base_url: '', root_path: '', username: '', encryption_enabled: false,
-      s3: { endpoint_url: '', region: 'us-east-1', bucket: '', prefix: '', force_path_style: false },
-      remote_id: 'default', vault_id: 'default', generation_id: 'generation-1',
-    },
-  }
+function settingsFixture() {
+  return createSettingsFixture({ language: 'zh-CN', mcp_enabled: false })
 }
 
 function openedSessionFixture(): SessionOpen {
@@ -291,63 +275,63 @@ describe('App export ready barrier', () => {
     expect(barrier.mermaid.renderExportMermaidDiagrams).toHaveBeenCalledWith(root)
   })
 
-  it('captures a PNG export only after the document reports ready', async () => {
+  it.each([
+    {
+      format: 'PNG',
+      selectFormatLabel: null as string | null,
+      savePath: 'C:/exports/conversation.png',
+      assertNotCalledBeforeReady: () => {
+        expect(barrier.images.toPng).not.toHaveBeenCalled()
+      },
+      assertCalledAfterReady: async () => {
+        await vi.waitFor(() => { expect(barrier.images.toPng).toHaveBeenCalledTimes(1) })
+        expect(barrier.api.writeExportFile).toHaveBeenCalledWith('C:/exports/conversation.png', { encoding: 'base64', data: 'PNG1' })
+      },
+    },
+    {
+      format: 'JPEG',
+      selectFormatLabel: 'JPEG',
+      savePath: 'C:/exports/conversation.jpeg',
+      assertNotCalledBeforeReady: () => {
+        expect(barrier.images.toJpeg).not.toHaveBeenCalled()
+        expect(barrier.images.toPng).not.toHaveBeenCalled()
+      },
+      assertCalledAfterReady: async () => {
+        await vi.waitFor(() => { expect(barrier.images.toJpeg).toHaveBeenCalledTimes(1) })
+        expect(barrier.api.writeExportFile).toHaveBeenCalledWith('C:/exports/conversation.jpeg', { encoding: 'base64', data: 'JPG1' })
+      },
+    },
+    {
+      format: 'PDF',
+      selectFormatLabel: 'PDF',
+      savePath: 'C:/exports/conversation.pdf',
+      assertNotCalledBeforeReady: () => {
+        expect(barrier.api.printToPdf).not.toHaveBeenCalled()
+      },
+      assertCalledAfterReady: async () => {
+        await vi.waitFor(() => { expect(barrier.api.printToPdf).toHaveBeenCalledTimes(1) })
+        expect(barrier.api.printToPdf).toHaveBeenCalledWith('C:/exports/conversation.pdf', { compact: false })
+        expect(barrier.api.writeExportFile).not.toHaveBeenCalled()
+      },
+    },
+  ])('captures a $format export only after the document reports ready', async ({ selectFormatLabel, savePath, assertNotCalledBeforeReady, assertCalledAfterReady }) => {
     const { host } = await mountToExportToolbar(openedSessionFixture())
     const resolvePreview = await openExportDialogWithBarrier(host)
     resolvePreview()
     await vi.waitFor(() => { expect(barrier.mermaid.renderExportMermaidDiagrams).toHaveBeenCalled() })
     await waitForPreviewSettled(host)
 
+    if (selectFormatLabel) {
+      await clickWhenReady(() => formatButton(host, selectFormatLabel))
+      barrier.dialogs.save.mockResolvedValue(savePath)
+    }
     const resolveExport = barrier.armReady()
     await clickWhenReady(() => host.querySelector<HTMLButtonElement>('.export-dialog footer button.primary-button'))
     await settle()
 
-    expect(barrier.images.toPng).not.toHaveBeenCalled()
+    assertNotCalledBeforeReady()
 
     resolveExport()
-    await vi.waitFor(() => { expect(barrier.images.toPng).toHaveBeenCalledTimes(1) })
-    expect(barrier.api.writeExportFile).toHaveBeenCalledWith('C:/exports/conversation.png', { encoding: 'base64', data: 'PNG1' })
-  })
-
-  it('captures a JPEG export only after the document reports ready', async () => {
-    const { host } = await mountToExportToolbar(openedSessionFixture())
-    const resolvePreview = await openExportDialogWithBarrier(host)
-    resolvePreview()
-    await vi.waitFor(() => { expect(barrier.mermaid.renderExportMermaidDiagrams).toHaveBeenCalled() })
-    await waitForPreviewSettled(host)
-
-    await clickWhenReady(() => formatButton(host, 'JPEG'))
-    barrier.dialogs.save.mockResolvedValue('C:/exports/conversation.jpeg')
-    const resolveExport = barrier.armReady()
-    await clickWhenReady(() => host.querySelector<HTMLButtonElement>('.export-dialog footer button.primary-button'))
-    await settle()
-
-    expect(barrier.images.toJpeg).not.toHaveBeenCalled()
-    expect(barrier.images.toPng).not.toHaveBeenCalled()
-
-    resolveExport()
-    await vi.waitFor(() => { expect(barrier.images.toJpeg).toHaveBeenCalledTimes(1) })
-    expect(barrier.api.writeExportFile).toHaveBeenCalledWith('C:/exports/conversation.jpeg', { encoding: 'base64', data: 'JPG1' })
-  })
-
-  it('prints a PDF export only after the document reports ready', async () => {
-    const { host } = await mountToExportToolbar(openedSessionFixture())
-    const resolvePreview = await openExportDialogWithBarrier(host)
-    resolvePreview()
-    await vi.waitFor(() => { expect(barrier.mermaid.renderExportMermaidDiagrams).toHaveBeenCalled() })
-    await waitForPreviewSettled(host)
-
-    await clickWhenReady(() => formatButton(host, 'PDF'))
-    barrier.dialogs.save.mockResolvedValue('C:/exports/conversation.pdf')
-    const resolveExport = barrier.armReady()
-    await clickWhenReady(() => host.querySelector<HTMLButtonElement>('.export-dialog footer button.primary-button'))
-    await settle()
-
-    expect(barrier.api.printToPdf).not.toHaveBeenCalled()
-
-    resolveExport()
-    await vi.waitFor(() => { expect(barrier.api.printToPdf).toHaveBeenCalledTimes(1) })
-    expect(barrier.api.printToPdf).toHaveBeenCalledWith('C:/exports/conversation.pdf', { compact: false })
-    expect(barrier.api.writeExportFile).not.toHaveBeenCalled()
+    await assertCalledAfterReady()
   })
 })

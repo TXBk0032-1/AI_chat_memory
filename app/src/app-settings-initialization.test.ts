@@ -1,15 +1,19 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { SettingsModel } from './desktop-api'
 import { initializeAppSettings } from './app-settings-initialization'
+import { createSettingsFixture } from './test-fixtures/settings'
 
 function settingsFixture(language: SettingsModel['language']): SettingsModel {
-  return {
-    setup_complete: true, secret_enabled: false, allowed_origins: [], close_behavior: 'ask', tray_click_behavior: 'show_menu', theme: 'system', language,
-    semantic_search: { enabled: true, default_mode: 'hybrid', backend: 'local', local: { model: 'test', device: 'auto', dtype: 'auto' }, ollama: { base_url: '', model: 'test' }, llama_cpp: { base_url: '', model: 'test' }, openai_compatible: { base_url: '', model: 'test' } },
-    mcp_enabled: true,
-    codex: { auto_watch: false },
-    cloud_sync: { backend: 's3', enabled: false, connection_verified: false, base_url: '', root_path: '', username: '', encryption_enabled: false, s3: { endpoint_url: '', region: 'us-east-1', bucket: 'archive', prefix: '', force_path_style: false }, remote_id: 'remote-a', vault_id: 'vault-a', generation_id: 'generation-a' },
-  }
+  return createSettingsFixture({
+    language,
+    cloud_sync: {
+      backend: 's3',
+      s3: { bucket: 'archive' },
+      remote_id: 'remote-a',
+      vault_id: 'vault-a',
+      generation_id: 'generation-a',
+    },
+  })
 }
 
 describe('app settings initialization', () => {
