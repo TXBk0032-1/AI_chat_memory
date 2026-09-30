@@ -506,15 +506,15 @@ function onDeleteCustomTheme(id: string) {
               </section>
               <section class="setting-group codex-settings">
                 <h3>{{ t('settings.codexTitle') }}</h3>
-                <label class="setting-row switch-row">
+                <div class="setting-row">
                   <span>{{ t('settings.codexAutoWatch') }}</span>
-                  <input type="checkbox" v-model="settings.codex.auto_watch" />
-                </label>
+                  <label class="switch"><input v-model="settings.codex.auto_watch" type="checkbox" /><span></span></label>
+                </div>
                 <label class="setting-row">
                   <span>{{ t('settings.codexHome') }}</span>
-                  <input type="text" v-model="settings.codex.codex_home" :placeholder="t('settings.codexHomePlaceholder')" />
+                  <input type="text" class="codex-home-input" v-model="settings.codex.codex_home" :placeholder="t('settings.codexHomePlaceholder')" />
                 </label>
-                <button class="codex-import-now" @click="emit('importCodex')">{{ t('settings.codexImportNow') }}</button>
+                <button class="secondary-button codex-import-now" @click="emit('importCodex')">{{ t('settings.codexImportNow') }}</button>
               </section>
             </section>
 

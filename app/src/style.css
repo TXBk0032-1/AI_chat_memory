@@ -467,6 +467,11 @@ i.deepseek { background: #5273e6; } i.doubao { background: #e36f53; } i.kimi { b
 .behavior-settings label > span { display: block; margin-bottom: 7px; color: #51595d; font-size: 11px; font-weight: 650; }
 .behavior-settings select { width: 100%; height: 34px; padding: 0 9px; border: 1px solid var(--color-border, #cbd1d4); border-radius: 12px; outline: 0; color: #343a3e; background: #fff; font-size: 11px; transition: border-color .18s ease, box-shadow .18s ease; }
 .behavior-settings select:focus { border-color: var(--color-primary-border, #3b8875); box-shadow: 0 0 0 2px var(--color-primary-subtle, #3b887518); }
+.codex-settings { display: flex; flex-direction: column; gap: 14px; }
+.codex-settings .setting-row { justify-content: space-between; }
+.codex-home-input { min-width: 0; width: 260px; height: 34px; border: 1px solid var(--color-border, #cbd1d4); border-radius: 8px; padding: 0 10px; color: #31373a; background: #fff; font-size: 11px; transition: border-color .18s ease, box-shadow .18s ease; }
+.codex-home-input:focus { outline: 0; border-color: var(--color-primary-border, #3b8875); box-shadow: 0 0 0 2px var(--color-primary-subtle, #3b887518); }
+.codex-import-now { align-self: flex-start; }
 .behavior-settings .app-select { width: 100%; }
 .behavior-settings .app-select__trigger { height: 34px; font-size: 11px; border-radius: 12px; }
 .setting-expand-enter-active { overflow: clip; transition: max-height .28s cubic-bezier(.2, .8, .2, 1), opacity .22s ease, margin .28s ease; }
@@ -610,6 +615,7 @@ html[data-theme="dark"] .filter-button,
 html[data-theme="dark"] .search-field,
 html[data-theme="dark"] .filter-panel input,
 html[data-theme="dark"] .behavior-settings select,
+html[data-theme="dark"] .codex-home-input,
 html[data-theme="dark"] .load-more { color: #dce2e4; border: 1px solid rgba(255, 255, 255, 0.09); background: rgba(255, 255, 255, 0.045); backdrop-filter: blur(8px); }
 html[data-theme="dark"] .secondary-button:hover,
 html[data-theme="dark"] .filter-button:hover,
@@ -618,6 +624,7 @@ html[data-theme="dark"] .icon-button { color: #aeb7bb; }
 html[data-theme="dark"] .icon-button:hover { color: #f3f6f7; background: rgba(255, 255, 255, 0.08); }
 html[data-theme="dark"] .search-field input,
 html[data-theme="dark"] .filter-panel input,
+html[data-theme="dark"] .codex-home-input,
 html[data-theme="dark"] .behavior-settings select { color: #edf1f2; }
 html[data-theme="dark"] .search-field:focus-within { border-color: var(--color-primary, #55c49e); box-shadow: 0 0 0 2px var(--color-primary-subtle, rgba(85, 196, 158, 0.2)); }
 html[data-theme="dark"] .filter-button.active { color: var(--color-primary-text, #82d2ba); border-color: var(--color-primary-border, #467c6e); background: var(--color-primary-subtle, rgba(85, 196, 158, 0.15)); }
