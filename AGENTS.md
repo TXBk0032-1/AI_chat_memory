@@ -16,7 +16,7 @@
 - Run the desktop app: `cd app; npm run tauri dev`. Vite must bind port `1420`; the local API must bind port `19820`.
 - Frontend test: `cd app; npm test`. One file: `npm test -- src/conversation.test.ts`. One case: `npm test -- src/conversation.test.ts -t "case name"`.
 - Rust test: `cd app/src-tauri; cargo test --all-features`. One test: `cargo test --all-features test_name`.
-- Repository checks: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\ci.ps1 check`; add all frontend and Rust tests with stage `test`; stage `release` also builds and copies the Windows MSI/EXE and writes `artifacts/manifest.json`.
+- Repository checks: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\ci.ps1 check`; add all frontend and Rust tests with stage `test`; stage `release` also builds the Windows NSIS installer EXEs (offline/online/system WebView2 variants) and a portable EXE/zip, copies them to `artifacts/`, and writes `artifacts/manifest.json`. There is no MSI output — the bundler target is NSIS, not WiX.
 - `scripts/ci.ps1` is the executable source of truth for verification order: userscript syntax, Rust format, Clippy with warnings denied, frontend typecheck/build, then frontend and Rust tests.
 
 ## Build Constraints
@@ -34,6 +34,6 @@ For every task that changes tracked files:
 1. Run focused checks appropriate to the change.
 2. Create atomic commits with Chinese commit messages. The completion hook rejects any dirty worktree, including untracked files.
 3. From the repository root run `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\finish-task.ps1`. It runs the full release pipeline, so do not report completion unless it succeeds.
-4. Report the generated MSI, EXE, and `artifacts/manifest.json` paths.
+4. Report the generated installer EXE paths (offline/online/system WebView2 variants), the portable EXE/zip path, and `artifacts/manifest.json`.
 
 If `ai-chat-memory-desktop.exe` is running, ask the user to close it or close only a development instance you started before rerunning the hook. Never terminate a user-started instance without notice.
