@@ -18,6 +18,7 @@
 - Rust test: `cd app/src-tauri; cargo test --all-features`. One test: `cargo test --all-features test_name`.
 - Repository checks: `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\ci.ps1 check`; add all frontend and Rust tests with stage `test`; stage `release` also builds the Windows NSIS installer EXEs (offline/online/system WebView2 variants) and a portable EXE/zip, copies them to `artifacts/`, and writes `artifacts/manifest.json`. There is no MSI output — the bundler target is NSIS, not WiX.
 - `scripts/ci.ps1` is the executable source of truth for verification order: userscript syntax, Rust format, Clippy with warnings denied, frontend typecheck/build, then frontend and Rust tests.
+- `scripts/ci.ps1` also has a `quick` stage (userscript check/tests + frontend build only, no CUDA/Rust). `.githooks/pre-push` runs `ci.ps1 test` on push, but auto-degrades to `ci.ps1 quick` when no CUDA toolkit (`nvcc`) is found on the machine — a push from a CUDA-less machine does not run the Rust suite or Clippy.
 
 ## Build Constraints
 
